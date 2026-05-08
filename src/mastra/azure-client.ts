@@ -17,8 +17,15 @@ if (!AZURE_OPENAI_RESOURCE_NAME || !AZURE_OPENAI_API_KEY) {
   );
 }
 
+// O recurso atual (Cognitive Services unificado) usa o dominio
+// 'cognitiveservices.azure.com' em vez de 'openai.azure.com' (legacy).
+// Junto com useDeploymentBasedUrls=true, a URL final fica
+// <baseURL>/deployments/<deployment>/chat/completions?api-version=...
+// que e o formato que azure.chat() espera (compativel com api-version
+// 2024-12-01-preview e modelo gpt-4.1).
 export const azure = createAzure({
-  resourceName: AZURE_OPENAI_RESOURCE_NAME,
+  baseURL: `https://${AZURE_OPENAI_RESOURCE_NAME}.cognitiveservices.azure.com/openai`,
   apiKey: AZURE_OPENAI_API_KEY,
   apiVersion: AZURE_OPENAI_API_VERSION,
+  useDeploymentBasedUrls: true,
 });
