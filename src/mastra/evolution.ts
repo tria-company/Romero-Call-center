@@ -109,9 +109,15 @@ async function enviarMensagemUnica(numero: string, texto: string): Promise<void>
 }
 
 // Envia mensagem de texto para um numero no WhatsApp.
-// Se a mensagem tiver mais de 90 caracteres, quebra em varias mensagens menores.
-export async function enviarMensagem(numero: string, texto: string): Promise<void> {
-  const partes = quebrarMensagem(texto);
+// Por padrao quebra mensagens longas em varias menores (limite 90 chars).
+// Para enviar como mensagem unica (ex: aviso ao grupo de suporte), passe { quebrar: false }.
+export async function enviarMensagem(
+  numero: string,
+  texto: string,
+  opcoes: { quebrar?: boolean } = {},
+): Promise<void> {
+  const { quebrar = true } = opcoes;
+  const partes = quebrar ? quebrarMensagem(texto) : [texto];
 
   for (const parte of partes) {
     await enviarMensagemUnica(numero, parte);

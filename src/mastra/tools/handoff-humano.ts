@@ -1,15 +1,15 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { getSessao, trocarAgente } from '../sessao';
-import { enviarMensagem } from '../evolution';
-import { SUPORTE_GRUPO_JID } from '../config';
+import { enviarAvisoAoSuporte } from '../notificacoes';
 
 // Categorias de motivo aceitas. O LLM pode mandar texto livre, mas a gente
 // normaliza pra um label legivel pro time.
+// Obs: 'publico_fora_perfil' (homem) NAO esta aqui — pra esse caso a Sofia
+// usa `notificar-time` (continua atendendo) em vez de `handoff-humano` (pausa).
 const MOTIVO_LABEL: Record<string, string> = {
   problema_pagamento_efetuado: 'problema de pagamento ja efetuado',
   problema_no_checkout: 'problema no checkout',
-  publico_fora_perfil: 'publico fora do perfil (homem)',
   comportamento_inadequado: 'comportamento inadequado / xingamento',
   pediu_pessoa: 'lead pediu falar com pessoa',
   irritacao: 'lead demonstrou irritacao',
@@ -27,11 +27,6 @@ async function notificarGrupoSuporte(
   motivo: string,
   resumo: string | undefined,
 ): Promise<void> {
-  if (!SUPORTE_GRUPO_JID) {
-    console.log('[handoff-humano] SUPORTE_GRUPO_JID nao configurado, pulando notificacao do grupo');
-    return;
-  }
-
   const sessao = await getSessao(telefone);
   const nome = sessao?.nome && sessao.nome !== 'Não identificado' ? sessao.nome : '(sem nome)';
   const motivoLegivel = rotularMotivo(motivo);
@@ -45,24 +40,22 @@ async function notificarGrupoSuporte(
   if (resumo) linhas.push(`Resumo: ${resumo}`);
   linhas.push('', 'A IA esta em silencio neste numero. Alguem do time precisa assumir.');
 
-  try {
-    await enviarMensagem(SUPORTE_GRUPO_JID, linhas.join('\n'));
+  const ok = await enviarAvisoAoSuporte(linhas);
+  if (ok) {
     console.log(`[handoff-humano] Grupo de suporte notificado para ${telefone}`);
-  } catch (e) {
-    console.error('[handoff-humano] Falha ao notificar grupo de suporte:', e);
   }
 }
 
 export const handoffHumano = createTool({
   id: 'handoff-humano',
   description:
-    'Transfere a conversa para um atendente humano. Use quando o lead pedir explicitamente para falar com pessoa, demonstrar irritacao, fizer pergunta factual fora do escopo, ou quando a duvida fugir do roteiro de vendas (ex: suporte tecnico, problema de pagamento ja efetuado, juridico). APOS chamar esta tool, NAO escreva mais nenhuma mensagem ao lead — a IA fica em silencio absoluto e o time humano assume.',
+    'Transfere a conversa para um atendente humano. Use quando o lead pedir explicitamente para falar com pessoa, demonstrar irritacao, fizer pergunta factual fora do escopo, ou quando a duvida fugir do roteiro de vendas (ex: suporte tecnico, problema de pagamento ja efetuado, juridico). APOS chamar esta tool, NAO escreva mais nenhuma mensagem ao lead — a IA fica em silencio absoluto e o time humano assume. NAO use esta tool quando o lead for homem — nesse caso use `notificar-time` (a IA continua atendendo).',
   inputSchema: z.object({
     telefone: z.string().describe('Telefone do lead'),
     motivo: z
       .string()
       .describe(
-        'Motivo da transferencia. Categorias preferidas: problema_pagamento_efetuado, problema_no_checkout, publico_fora_perfil, comportamento_inadequado, pediu_pessoa, irritacao, factual_desconhecida, fora_do_escopo.',
+        'Motivo da transferencia. Categorias preferidas: problema_pagamento_efetuado, problema_no_checkout, comportamento_inadequado, pediu_pessoa, irritacao, factual_desconhecida, fora_do_escopo.',
       ),
     resumo: z
       .string()

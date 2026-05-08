@@ -7,7 +7,9 @@ import { enviarMensagem } from './evolution';
 import { SUPORTE_GRUPO_JID } from './config';
 
 /**
- * Envia uma mensagem (multi-linha) para o grupo de suporte configurado.
+ * Envia uma mensagem (multi-linha) para o grupo de suporte configurado,
+ * em UMA unica mensagem (sem quebra automatica) — assim o aviso aparece
+ * coeso pro time, em vez de 4-6 balões separados no WhatsApp.
  * Retorna true se SUPORTE_GRUPO_JID estiver setado e o envio nao lancar.
  * Retorna false (no-op) se nao houver grupo configurado.
  */
@@ -17,7 +19,7 @@ export async function enviarAvisoAoSuporte(linhas: string[]): Promise<boolean> {
     return false;
   }
   try {
-    await enviarMensagem(SUPORTE_GRUPO_JID, linhas.join('\n'));
+    await enviarMensagem(SUPORTE_GRUPO_JID, linhas.join('\n'), { quebrar: false });
     return true;
   } catch (e) {
     console.error('[notificacoes] Falha ao notificar grupo de suporte:', e);
