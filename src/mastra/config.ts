@@ -5,8 +5,24 @@ export const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL || 'http://localh
 export const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 export const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE_NAME || 'roberth';
 
-// OpenAI
+// OpenAI direto (deprecated — usar Azure abaixo). Mantido para rollback.
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+
+// Azure OpenAI — substitui OpenAI direto pra atender requisitos de compliance
+// (residencia de dados na regiao Azure). Endpoint base e
+// https://<AZURE_OPENAI_RESOURCE_NAME>.openai.azure.com.
+export const AZURE_OPENAI_RESOURCE_NAME = process.env.AZURE_OPENAI_RESOURCE_NAME || '';
+export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
+export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '2024-08-01-preview';
+export const AZURE_OPENAI_DEPLOYMENT_GPT41 = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41 || 'gpt-4.1';
+export const AZURE_OPENAI_DEPLOYMENT_GPT41_MINI = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41_MINI || 'gpt-4.1-mini';
+// Embedding: o recurso atual tem 'text-embedding-3-large' (3072 dim).
+// Atencao: se o pgvector ja foi populado com embeddings 1536d (small), trocar
+// para 3-large quebra os indices vetoriais — limpe a tabela antes ou recrie.
+export const AZURE_OPENAI_DEPLOYMENT_EMBEDDING = process.env.AZURE_OPENAI_DEPLOYMENT_EMBEDDING || 'text-embedding-3-large';
+// Transcricao: 'gpt-4o-transcribe-diarize' substitui Whisper no Azure moderno.
+// Mesmo endpoint /audio/transcriptions, deployment diferente.
+export const AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO = process.env.AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO || 'gpt-4o-transcribe-diarize';
 
 // Checkout (Kiwify/Eduzz/Cakto/...) — definir no briefing qual plataforma e qual URL
 export const CHECKOUT_URL_PRINCIPAL = process.env.CHECKOUT_URL_PRINCIPAL || '';

@@ -74,7 +74,9 @@ Substitua todos os `COLAR_AQUI_*` e o `IP_COM_HIFENS`:
 
 | Placeholder | O que colocar |
 |---|---|
-| `COLAR_AQUI_OPENAI_KEY` | sua chave OpenAI (`sk-proj-...`) |
+| `COLAR_AQUI_AZURE_API_KEY` | API key do Azure OpenAI (em Azure Portal → recurso → Keys and Endpoint) |
+| `AZURE_OPENAI_RESOURCE_NAME` | ja preenchido como `rober-mox7y720-eastus2` |
+| `AZURE_OPENAI_DEPLOYMENT_*` | ja preenchidos com os deployments atuais (gpt-4.1, gpt-4.1-mini, text-embedding-3-large, gpt-4o-transcribe-diarize) |
 | `COLAR_AQUI_EVOLUTION_KEY` | apikey da Evolution (`216e22d2...` ou da nova instancia) |
 | `EVOLUTION_INSTANCE_NAME` | `agente_test_01` (nome da instancia que tem o grupo SUPORTE) |
 | `COLAR_AQUI_PROJECT_ID` | subdominio Supabase (so a parte antes de `.supabase.co`) |

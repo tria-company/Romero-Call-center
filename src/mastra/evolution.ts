@@ -1,6 +1,14 @@
 // Funcoes para enviar/receber mensagens via Evolution API
 
-import { EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE, OPENAI_API_KEY } from './config';
+import {
+  EVOLUTION_API_URL,
+  EVOLUTION_API_KEY,
+  EVOLUTION_INSTANCE,
+  AZURE_OPENAI_RESOURCE_NAME,
+  AZURE_OPENAI_API_KEY,
+  AZURE_OPENAI_API_VERSION,
+  AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO,
+} from './config';
 
 // IDs de mensagens enviadas pelo bot — distingue de mensagens humanas no webhook (fromMe)
 // Usa Map com timestamp pra limpeza periodica (mais eficiente que setTimeout por entry)
@@ -235,12 +243,14 @@ export async function baixarAudioBase64(payload: EvolutionWebhookPayload): Promi
 }
 
 /**
- * Transcreve audio usando OpenAI Whisper API.
- * Recebe base64 do audio, converte para arquivo e envia para transcricao.
+ * Transcreve audio usando Azure OpenAI Whisper.
+ * Endpoint diferente do OpenAI direto:
+ *   https://<resource>.openai.azure.com/openai/deployments/<deployment>/audio/transcriptions?api-version=<version>
+ * Header de auth: 'api-key' (nao 'Authorization: Bearer').
  */
 export async function transcreverAudio(base64Audio: string): Promise<string | null> {
-  if (!OPENAI_API_KEY) {
-    console.error('[audio] OPENAI_API_KEY nao configurada');
+  if (!AZURE_OPENAI_RESOURCE_NAME || !AZURE_OPENAI_API_KEY) {
+    console.error('[audio] AZURE_OPENAI_RESOURCE_NAME / AZURE_OPENAI_API_KEY nao configurados');
     return null;
   }
 
@@ -248,24 +258,26 @@ export async function transcreverAudio(base64Audio: string): Promise<string | nu
     // Converte base64 para Buffer
     const audioBuffer = Buffer.from(base64Audio, 'base64');
 
-    // Monta FormData com o arquivo de audio
+    // Monta FormData com o arquivo de audio.
+    // Azure ignora o campo 'model' (usa o deployment via URL), mas mantemos por compatibilidade.
     const blob = new Blob([audioBuffer], { type: 'audio/ogg' });
     const formData = new FormData();
     formData.append('file', blob, 'audio.ogg');
-    formData.append('model', 'whisper-1');
     formData.append('language', 'pt');
 
-    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    const url = `https://${AZURE_OPENAI_RESOURCE_NAME}.openai.azure.com/openai/deployments/${AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO}/audio/transcriptions?api-version=${AZURE_OPENAI_API_VERSION}`;
+
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'api-key': AZURE_OPENAI_API_KEY,
       },
       body: formData,
     });
 
     if (!response.ok) {
       const erro = await response.text();
-      console.error(`[audio] Erro Whisper: ${response.status} - ${erro}`);
+      console.error(`[audio] Erro Whisper Azure: ${response.status} - ${erro}`);
       return null;
     }
 

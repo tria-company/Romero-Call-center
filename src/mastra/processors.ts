@@ -1,4 +1,9 @@
 import { PromptInjectionDetector, PIIDetector, SystemPromptScrubber } from '@mastra/core/processors';
+import { azure } from './azure-client';
+import { AZURE_OPENAI_DEPLOYMENT_GPT41_MINI } from './config';
+
+// Modelo leve compartilhado pelos 3 processors (instancia unica via factory).
+const modeloLeve = azure(AZURE_OPENAI_DEPLOYMENT_GPT41_MINI);
 
 // --- Input Processors ---
 
@@ -8,7 +13,7 @@ import { PromptInjectionDetector, PIIDetector, SystemPromptScrubber } from '@mas
  * Usa modelo leve para manter custo baixo.
  */
 export const promptInjectionDetector = new PromptInjectionDetector({
-  model: 'openai/gpt-4.1-mini',
+  model: modeloLeve,
   threshold: 0.7,
   strategy: 'rewrite',
   detectionTypes: [
@@ -24,7 +29,7 @@ export const promptInjectionDetector = new PromptInjectionDetector({
  * Importante: nao bloqueia porque o cliente pode precisar enviar CPF para identificacao.
  */
 export const piiDetector = new PIIDetector({
-  model: 'openai/gpt-4.1-mini',
+  model: modeloLeve,
   threshold: 0.6,
   strategy: 'warn',
   detectionTypes: [
@@ -46,6 +51,6 @@ export const piiDetector = new PIIDetector({
  * no meio da frase, parecendo bug pro lead).
  */
 export const systemPromptScrubber = new SystemPromptScrubber({
-  model: 'openai/gpt-4.1-mini',
+  model: modeloLeve,
   strategy: 'rewrite',
 });

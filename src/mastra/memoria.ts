@@ -1,6 +1,7 @@
 import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
-import { openai } from '@ai-sdk/openai';
+import { azure } from './azure-client';
+import { AZURE_OPENAI_DEPLOYMENT_EMBEDDING } from './config';
 
 const connectionString = process.env.SUPABASE_DB_URL || '';
 
@@ -27,7 +28,7 @@ export const pgVector = new PgVector({
 export const memoria = new Memory({
   storage: pgStore,
   vector: pgVector,
-  embedder: openai.embedding('text-embedding-3-small'),
+  embedder: azure.embedding(AZURE_OPENAI_DEPLOYMENT_EMBEDDING),
   options: {
     lastMessages: 40,
     workingMemory: {

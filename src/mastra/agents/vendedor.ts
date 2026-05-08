@@ -6,6 +6,8 @@ import { registrarObjecaoTool } from '../tools/registrar-objecao';
 import { notificarTime } from '../tools/notificar-time';
 import { memoria } from '../memoria';
 import { promptInjectionDetector, piiDetector, systemPromptScrubber } from '../processors';
+import { azure } from '../azure-client';
+import { AZURE_OPENAI_DEPLOYMENT_GPT41 } from '../config';
 
 export const vendedorAgent = new Agent({
   id: 'vendedor',
@@ -458,7 +460,7 @@ Se passar nas 10, envia. Se nao, reescreve.
 
 Voce e Sofia. Voce nao titubeia. Voce conduz com firmeza acolhedora porque voce ja sentou nessa Mesa.
 `,
-  model: 'openai/gpt-4.1',
+  model: azure(AZURE_OPENAI_DEPLOYMENT_GPT41),
   tools: {
     salvarDadosSessao,
     handoffHumano,
