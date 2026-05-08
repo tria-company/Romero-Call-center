@@ -120,18 +120,34 @@ async function enviarMensagemUnica(numero: string, texto: string): Promise<void>
   }
 }
 
+// Regex pra detectar URLs http/https em respostas do agente.
+// Sofia DEVE usar a tool `enviar-checkout` pra mandar link, nunca colar em texto.
+// O filtro abaixo bloqueia URLs por padrao — exceto quando a tool passar permitirUrl=true.
+const URL_REGEX = /https?:\/\/\S+/gi;
+
 // Envia mensagem de texto para um numero no WhatsApp.
 // Por padrao quebra mensagens longas em varias menores (limite 90 chars).
 // Para enviar como mensagem unica (ex: aviso ao grupo de suporte), passe { quebrar: false }.
+// Para enviar com URL legitima (tool enviar-checkout), passe { permitirUrl: true }.
 // Sempre faz trim() para evitar quebras/espacos invisiveis vindos do LLM.
 export async function enviarMensagem(
   numero: string,
   texto: string,
-  opcoes: { quebrar?: boolean } = {},
+  opcoes: { quebrar?: boolean; permitirUrl?: boolean } = {},
 ): Promise<void> {
-  const { quebrar = true } = opcoes;
-  const textoLimpo = texto.trim();
+  const { quebrar = true, permitirUrl = false } = opcoes;
+  let textoLimpo = texto.trim();
+
+  // Defesa em profundidade: o agente as vezes cola URL em texto apesar do
+  // prompt instruir o contrario. Se permitirUrl=false (default), removemos
+  // qualquer URL antes do envio. So a tool enviar-checkout passa true.
+  if (!permitirUrl && URL_REGEX.test(textoLimpo)) {
+    const urlsDetectadas = textoLimpo.match(URL_REGEX);
+    console.warn(`[evolution] URL bloqueada na resposta do agente: ${urlsDetectadas?.join(', ')}`);
+    textoLimpo = textoLimpo.replace(URL_REGEX, '').replace(/\s+/g, ' ').trim();
+  }
   if (textoLimpo.length === 0) return;
+
   const partes = quebrar ? quebrarMensagem(textoLimpo) : [textoLimpo];
 
   for (const parte of partes) {

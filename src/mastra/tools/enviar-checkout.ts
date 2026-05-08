@@ -40,7 +40,9 @@ export const enviarCheckout = createTool({
       ? `${mensagemAcompanhante}\n\n${linkFinal}`
       : `Aqui esta o link da inscricao:\n\n${linkFinal}`;
 
-    await enviarMensagem(telefone, texto);
+    // permitirUrl: true porque essa tool ENVIA o link de checkout legitimo.
+    // Defesa em profundidade no enviarMensagem bloqueia URL pra outras chamadas.
+    await enviarMensagem(telefone, texto, { permitirUrl: true });
 
     if (conversaId) {
       salvarMensagem({
