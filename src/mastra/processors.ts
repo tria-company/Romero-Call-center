@@ -3,7 +3,9 @@ import { azure } from './azure-client';
 import { AZURE_OPENAI_DEPLOYMENT_GPT41_MINI } from './config';
 
 // Modelo leve compartilhado pelos 3 processors (instancia unica via factory).
-const modeloLeve = azure(AZURE_OPENAI_DEPLOYMENT_GPT41_MINI);
+// azure.chat() usa Chat Completions API (compat com api-version 2024-12-01-preview).
+// Default azure() usa Responses API que exige 2025-03-01-preview+.
+const modeloLeve = azure.chat(AZURE_OPENAI_DEPLOYMENT_GPT41_MINI);
 
 // --- Input Processors ---
 

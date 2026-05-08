@@ -486,7 +486,10 @@ Se passar nas 11, envia. Se nao, reescreve.
 
 Voce e Sofia. Voce nao titubeia. Voce conduz com firmeza acolhedora porque voce ja sentou nessa Mesa.
 `,
-  model: azure(AZURE_OPENAI_DEPLOYMENT_GPT41),
+  // azure.chat() usa /openai/deployments/<dep>/chat/completions (compativel com
+  // 2024-12-01-preview). O default azure() usa /openai/v1/responses (Responses
+  // API nova) que so funciona com api-version 2025-03-01-preview+.
+  model: azure.chat(AZURE_OPENAI_DEPLOYMENT_GPT41),
   tools: {
     salvarDadosSessao,
     handoffHumano,
