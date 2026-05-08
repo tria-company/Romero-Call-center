@@ -35,6 +35,13 @@ jobs:
             cd /opt/Agent-Roberth
             git pull --ff-only
             docker build -t agent-roberth:latest .
-            docker stack deploy --resolve-image=never -c ~/roberth.yaml roberth
-            sleep 3
+            # stack deploy nao detecta mudanca quando so a imagem 'latest'
+            # tem novo conteudo (mesmo digest no spec). Por isso forcamos o
+            # service update -- assim a task e recriada com a imagem nova.
+            if docker service ls --filter name=roberth_agent_roberth --format '{{.Name}}' | grep -q roberth_agent_roberth; then
+              docker service update --force --image agent-roberth:latest roberth_agent_roberth
+            else
+              docker stack deploy --resolve-image=never -c ~/roberth.yaml roberth
+            fi
+            sleep 5
             docker service ps roberth_agent_roberth --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -5
