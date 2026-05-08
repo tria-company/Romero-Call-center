@@ -1,5 +1,10 @@
 name: Deploy na VPS (Docker Swarm)
 
+# Trigger atual: SOMENTE manual (workflow_dispatch).
+# Pra reativar deploy automatico em push pra main, depois que tiver feito o
+# primeiro deploy manual + configurado os 3 secrets (VPS_HOST, VPS_USER,
+# VPS_SSH_KEY), descomente as duas linhas "push:" e "branches: [main]" abaixo.
+#
 # Pre-requisito: o primeiro deploy precisa ter sido feito manualmente
 # (ver docs/deploy-vps-ubuntu.md). Este workflow assume que ja existe:
 #   - /opt/Agent-Roberth (clone do repo)
@@ -7,16 +12,16 @@ name: Deploy na VPS (Docker Swarm)
 #   - stack 'roberth' deployada pelo menos uma vez
 #
 # Secrets necessarios em Settings -> Secrets and variables -> Actions:
-#   - VPS_HOST: IP publico da VPS
+#   - VPS_HOST: IP publico da VPS (84.46.244.167)
 #   - VPS_USER: usuario SSH (ex: root)
 #   - VPS_SSH_KEY: chave SSH privada (conteudo do arquivo, geralmente ed25519)
 #
 # Setup completo: docs/auto-deploy-github-actions.md
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch: # permite rodar manualmente em Actions -> Run workflow
+  # push:
+  #   branches: [main]
+  workflow_dispatch: # rodar manualmente em Actions -> Run workflow
 
 jobs:
   deploy:
