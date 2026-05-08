@@ -41,11 +41,11 @@ export const piiDetector = new PIIDetector({
 
 /**
  * Impede que o agente vaze o system prompt na resposta.
- * Strategy: redact — substitui por placeholder.
+ * Strategy: rewrite — reescreve a mensagem suprimindo trechos internos.
+ * Mais limpo visualmente que 'redact' (que deixava "[informacao interna]"
+ * no meio da frase, parecendo bug pro lead).
  */
 export const systemPromptScrubber = new SystemPromptScrubber({
   model: 'openai/gpt-4.1-mini',
-  strategy: 'redact',
-  redactionMethod: 'placeholder',
-  placeholderText: '[informacao interna]',
+  strategy: 'rewrite',
 });
