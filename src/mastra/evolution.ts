@@ -45,11 +45,15 @@ function ehMenu(texto: string): boolean {
 
 // Quebra mensagem longa em partes de ate ~90 caracteres, respeitando quebras de linha.
 // Menus com opcoes numeradas sao enviados inteiros.
+// Faz trim de cada parte para evitar leading/trailing newlines/espacos
+// (LLM as vezes gera "\n\noi" no inicio, que aparece como quebra estranha no WhatsApp).
 function quebrarMensagem(texto: string, limite: number = 90): string[] {
-  if (texto.length <= limite) return [texto];
-  if (ehMenu(texto)) return [texto];
+  const textoLimpo = texto.trim();
+  if (textoLimpo.length === 0) return [];
+  if (textoLimpo.length <= limite) return [textoLimpo];
+  if (ehMenu(textoLimpo)) return [textoLimpo];
 
-  const linhas = texto.split('\n');
+  const linhas = textoLimpo.split('\n');
   const partes: string[] = [];
   let atual = '';
 
@@ -64,7 +68,7 @@ function quebrarMensagem(texto: string, limite: number = 90): string[] {
   }
   if (atual) partes.push(atual);
 
-  return partes.filter(p => p.trim().length > 0);
+  return partes.map(p => p.trim()).filter(p => p.length > 0);
 }
 
 // Envia uma unica mensagem de texto pelo WhatsApp
@@ -111,13 +115,16 @@ async function enviarMensagemUnica(numero: string, texto: string): Promise<void>
 // Envia mensagem de texto para um numero no WhatsApp.
 // Por padrao quebra mensagens longas em varias menores (limite 90 chars).
 // Para enviar como mensagem unica (ex: aviso ao grupo de suporte), passe { quebrar: false }.
+// Sempre faz trim() para evitar quebras/espacos invisiveis vindos do LLM.
 export async function enviarMensagem(
   numero: string,
   texto: string,
   opcoes: { quebrar?: boolean } = {},
 ): Promise<void> {
   const { quebrar = true } = opcoes;
-  const partes = quebrar ? quebrarMensagem(texto) : [texto];
+  const textoLimpo = texto.trim();
+  if (textoLimpo.length === 0) return;
+  const partes = quebrar ? quebrarMensagem(textoLimpo) : [textoLimpo];
 
   for (const parte of partes) {
     await enviarMensagemUnica(numero, parte);
