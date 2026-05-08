@@ -1,7 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { getSessao, trocarAgente } from '../sessao';
-import { enviarAvisoAoSuporte } from '../notificacoes';
+import { enviarAvisoAoSuporte, jaNotificouRecentemente } from '../notificacoes';
 
 // Categorias de motivo aceitas. O LLM pode mandar texto livre, mas a gente
 // normaliza pra um label legivel pro time.
@@ -27,6 +27,13 @@ async function notificarGrupoSuporte(
   motivo: string,
   resumo: string | undefined,
 ): Promise<void> {
+  // Idempotencia: 1 notificacao por contato+motivo (janela de 1h).
+  // Evita spam no grupo se o LLM chamar handoff 2x na mesma sessao.
+  if (jaNotificouRecentemente(telefone, `handoff:${motivo}`)) {
+    console.log(`[handoff-humano] ${telefone} (${motivo}): grupo ja notificado, ignorando`);
+    return;
+  }
+
   const sessao = await getSessao(telefone);
   const nome = sessao?.nome && sessao.nome !== 'Não identificado' ? sessao.nome : '(sem nome)';
   const motivoLegivel = rotularMotivo(motivo);

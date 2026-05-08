@@ -1,7 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { getSessao } from '../sessao';
-import { enviarAvisoAoSuporte } from '../notificacoes';
+import { enviarAvisoAoSuporte, jaNotificouRecentemente } from '../notificacoes';
 
 const MOTIVO_LABEL: Record<string, string> = {
   lead_homem: 'lead masculino (IA continua atendendo)',
@@ -34,6 +34,12 @@ export const notificarTime = createTool({
     sucesso: z.boolean(),
   }),
   execute: async ({ telefone, motivo, resumo }) => {
+    // Idempotencia: nao spamea o grupo se a Sofia chamar 2x pelo mesmo motivo
+    if (jaNotificouRecentemente(telefone, motivo)) {
+      console.log(`[notificar-time] ${telefone} (${motivo}): ja notificado nesta sessao, ignorando`);
+      return { sucesso: true };
+    }
+
     const sessao = await getSessao(telefone);
     const nome = sessao?.nome && sessao.nome !== 'Não identificado' ? sessao.nome : '(sem nome)';
     const motivoLegivel = rotularMotivo(motivo);
