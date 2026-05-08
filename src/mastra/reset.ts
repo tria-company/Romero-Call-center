@@ -35,15 +35,22 @@ async function limparMemoryMastra(telefone: string, erros: string[]): Promise<{
   let workingMemoryLimpa = false;
 
   // threadId e resourceId = telefone (ver index.ts)
+  // Mastra v1.x: deleteThread aceita string direta (id da thread).
+  // O 'as any' permite passar qualquer formato de assinatura caso a API
+  // mude entre versoes.
   const memAny = memoria as unknown as Record<string, any>;
 
   try {
     if (typeof memAny.deleteThread === 'function') {
-      await memAny.deleteThread({ threadId: telefone });
-      threadDeletada = true;
-    } else if (typeof memAny.delete === 'function') {
-      await memAny.delete({ threadId: telefone });
-      threadDeletada = true;
+      // Tenta string direta primeiro (Mastra v1+)
+      try {
+        await memAny.deleteThread(telefone);
+        threadDeletada = true;
+      } catch {
+        // Fallback: formato objeto antigo
+        await memAny.deleteThread({ threadId: telefone });
+        threadDeletada = true;
+      }
     }
   } catch (e) {
     erros.push(`deleteThread: ${(e as Error).message}`);
@@ -51,8 +58,13 @@ async function limparMemoryMastra(telefone: string, erros: string[]): Promise<{
 
   try {
     if (typeof memAny.deleteWorkingMemory === 'function') {
-      await memAny.deleteWorkingMemory({ resourceId: telefone });
-      workingMemoryLimpa = true;
+      try {
+        await memAny.deleteWorkingMemory(telefone);
+        workingMemoryLimpa = true;
+      } catch {
+        await memAny.deleteWorkingMemory({ resourceId: telefone });
+        workingMemoryLimpa = true;
+      }
     } else if (typeof memAny.updateWorkingMemory === 'function') {
       // Sobrescreve com template em branco — funciona como reset funcional
       await memAny.updateWorkingMemory({ resourceId: telefone, workingMemory: '' });

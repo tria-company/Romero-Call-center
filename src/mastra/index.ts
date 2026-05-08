@@ -18,6 +18,9 @@ import { pgStore } from './memoria';
 // Sessao
 import { getSessao, criarSessao, AGENTES_MAP, type Sessao } from './sessao';
 
+// Memory (so para debug de leitura por turno)
+import { memoria } from './memoria';
+
 // Supabase (persistencia)
 import { salvarMensagem, buscarCustomerPorTelefone } from './supabase';
 
@@ -92,6 +95,22 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
     const agenteKey = AGENTES_MAP[sessao.agenteAtual] || 'vendedorAgent';
     const agent = mastraRef.getAgent(agenteKey);
     console.log(`[WhatsApp] Roteando para: ${sessao.agenteAtual} (${agenteKey})`);
+
+    // DEBUG da memoria: quantas mensagens a Memory devolve pra esse threadId
+    try {
+      const memAny = memoria as unknown as Record<string, any>;
+      if (typeof memAny.query === 'function') {
+        const result = await memAny.query({ threadId: numero, resourceId: numero, selectBy: { last: 40 } });
+        const count = Array.isArray(result?.messages) ? result.messages.length : Array.isArray(result) ? result.length : 0;
+        console.log(`[memoria] ${numero} → ${count} mensagens recuperadas pelo Mastra`);
+      } else if (typeof memAny.getMessages === 'function') {
+        const result = await memAny.getMessages({ threadId: numero });
+        const count = Array.isArray(result) ? result.length : Array.isArray(result?.messages) ? result.messages.length : 0;
+        console.log(`[memoria] ${numero} → ${count} mensagens recuperadas pelo Mastra`);
+      }
+    } catch (e) {
+      console.log(`[memoria] erro ao consultar memoria de ${numero}: ${(e as Error).message}`);
+    }
 
     const nomeFormatado = sessao.nome && sessao.nome !== 'Não identificado'
       ? sessao.nome
