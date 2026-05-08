@@ -22,13 +22,16 @@ import { getSessao, criarSessao, AGENTES_MAP, type Sessao } from './sessao';
 import { memoria } from './memoria';
 
 // Supabase (persistencia)
-import { salvarMensagem, buscarCustomerPorTelefone } from './supabase';
+import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia } from './supabase';
 
 // Buffer de mensagens (debounce 10s)
 import { adicionarAoBuffer } from './buffer';
 
 // Reset de teste (#55555)
 import { resetarConversaTeste, COMANDO_RESET } from './reset';
+
+// Scheduler de follow-ups (1h/3h/5h) e handoff por silencio (24h)
+import { iniciarFollowUpScheduler } from './follow-up';
 
 // Timeout e retry para agent.generate()
 const TIMEOUT_AGENTE = 60_000;
@@ -81,6 +84,11 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
         content: texto,
         agent_table: sessao.agenteAtual,
       });
+      // Lead voltou a falar: registra timestamp e zera marcadores de FUP/handoff
+      // (proximo silencio comeca do zero). O scheduler em follow-up.ts depende
+      // dessas colunas pra decidir quando mandar 1h/3h/5h e quando dar handoff
+      // automatico em 24h.
+      marcarMsgLead(sessao.conversaId);
     }
 
     // Conversa pausada por humano — IA fica em silencio absoluto.
@@ -148,6 +156,9 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
           content: resposta.text,
           agent_table: sessao.agenteAtual,
         });
+        // Sofia falou: inicia (ou reinicia) o relogio de silencio. Se o lead
+        // sumir agora, o scheduler vai disparar FUP1 em 1h.
+        marcarMsgSofia(sessao.conversaId);
       }
     }
   } catch (erro) {
@@ -280,3 +291,9 @@ export const mastra = new Mastra({
     ],
   },
 });
+
+// Scheduler de follow-ups (1h/3h/5h) e handoff por silencio (24h).
+// Roda em background no mesmo container — 1 replica Docker Swarm garante
+// que so 1 processo varre, sem risco de duplicacao. State no Supabase
+// sobrevive reinicio.
+iniciarFollowUpScheduler(mastra);

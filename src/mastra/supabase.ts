@@ -110,6 +110,77 @@ export async function atualizarConversa(conversaId: string, dados: Record<string
   } catch (e) { console.error('[supabase] Erro atualizar conversa:', e); }
 }
 
+// ==================== FOLLOW-UP TRACKING ====================
+// Helpers usados pelo scheduler em follow-up.ts e pelo webhook em index.ts
+// pra rastrear quem foi o ultimo a falar e em que momento.
+
+/**
+ * Lead acabou de mandar mensagem: registra o timestamp e zera os marcadores
+ * de FUP/handoff (ciclo de silencio reseta — proximo silencio comeca do zero).
+ */
+export async function marcarMsgLead(conversaId: string): Promise<void> {
+  if (!conversaId) return;
+  await atualizarConversa(conversaId, {
+    last_lead_message_at: new Date().toISOString(),
+    fup_1_sent_at: null,
+    fup_3_sent_at: null,
+    fup_5_sent_at: null,
+    handoff_silencio_em: null,
+  });
+}
+
+/**
+ * Sofia acabou de mandar mensagem: registra o timestamp.
+ * Inicia (ou reinicia) o relogio de silencio.
+ */
+export async function marcarMsgSofia(conversaId: string): Promise<void> {
+  if (!conversaId) return;
+  await atualizarConversa(conversaId, {
+    last_assistant_message_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * Busca conversas elegiveis pra envio de FUP ou handoff por silencio.
+ * Critericos: status em_atendimento, sem handoff de silencio ja disparado,
+ * ultima mensagem da Sofia ha pelo menos 1h. O caller checa qual FUP
+ * dispara (1h/3h/5h/24h) com base nas colunas fup_*_sent_at.
+ *
+ * Retorna conversas com customer (telefone, nome) embutido pra evitar
+ * round-trip extra por linha.
+ */
+export async function buscarConversasParaFollowUp(): Promise<any[]> {
+  if (!SUPABASE_URL) return [];
+  try {
+    const limite1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?` +
+      `status=eq.em_atendimento` +
+      `&ended_at=is.null` +
+      `&handoff_silencio_em=is.null` +
+      `&last_assistant_message_at=not.is.null` +
+      `&last_assistant_message_at=lt.${limite1h}` +
+      `&select=*,customers_roberth(telefone,nome)` +
+      `&limit=200`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) {
+      console.error('[supabase] buscarConversasParaFollowUp:', await res.text());
+      return [];
+    }
+    const data = await res.json() as any[];
+    // Filtro adicional in-memory: Sofia tem que ser a ultima a falar.
+    // Postgrest nao tem comparacao entre 2 colunas via querystring, entao a
+    // checagem fica aqui.
+    return data.filter(c => {
+      if (!c.last_lead_message_at) return true;
+      return new Date(c.last_assistant_message_at).getTime()
+        > new Date(c.last_lead_message_at).getTime();
+    });
+  } catch (e) {
+    console.error('[supabase] Erro buscarConversasParaFollowUp:', e);
+    return [];
+  }
+}
+
 // ==================== MESSAGES ====================
 
 export async function salvarMensagem(dados: {
