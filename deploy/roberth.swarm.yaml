@@ -13,7 +13,7 @@ services:
       ## 🤖 LLM (Azure OpenAI — Tria, eastus2)
       - AZURE_OPENAI_RESOURCE_NAME=rober-mox7y720-eastus2
       - AZURE_OPENAI_API_KEY=COLAR_AQUI_AZURE_API_KEY
-      - AZURE_OPENAI_API_VERSION=2024-08-01-preview
+      - AZURE_OPENAI_API_VERSION=2024-12-01-preview
       - AZURE_OPENAI_DEPLOYMENT_GPT41=gpt-4.1
       - AZURE_OPENAI_DEPLOYMENT_GPT41_MINI=gpt-4.1-mini
       - AZURE_OPENAI_DEPLOYMENT_EMBEDDING=text-embedding-3-large

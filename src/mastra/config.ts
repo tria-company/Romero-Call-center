@@ -13,7 +13,10 @@ export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 // https://<AZURE_OPENAI_RESOURCE_NAME>.openai.azure.com.
 export const AZURE_OPENAI_RESOURCE_NAME = process.env.AZURE_OPENAI_RESOURCE_NAME || '';
 export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
-export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '2024-08-01-preview';
+// Responses API (/openai/v1/responses) usada pelo @ai-sdk/azure v3 exige
+// 2024-10-01-preview ou mais novo. Versoes mais antigas (ex: 2024-08-01-preview)
+// retornam BadRequest "API version not supported".
+export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '2024-12-01-preview';
 export const AZURE_OPENAI_DEPLOYMENT_GPT41 = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41 || 'gpt-4.1';
 export const AZURE_OPENAI_DEPLOYMENT_GPT41_MINI = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41_MINI || 'gpt-4.1-mini';
 // Embedding: o recurso atual tem 'text-embedding-3-large' (3072 dim).
