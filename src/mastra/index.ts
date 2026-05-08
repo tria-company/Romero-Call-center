@@ -102,7 +102,19 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
       : `[telefone: ${numero}] (lead sem nome ainda) diz: ${texto}`;
 
     const resposta = await comRetry(
-      () => comTimeout(agent.generate(prompt, { threadId: numero, resourceId: numero }), TIMEOUT_AGENTE, sessao.agenteAtual),
+      () => comTimeout(
+        // Mastra v1.17+: usar { memory: { thread, resource } }.
+        // O formato antigo { threadId, resourceId } e ignorado em alguns
+        // contextos, fazendo o agent perder historico de mensagens entre
+        // turnos (sintoma: Sofia recomeca a conversa toda vez).
+        agent.generate(prompt, {
+          memory: { thread: numero, resource: numero },
+          threadId: numero,
+          resourceId: numero,
+        } as any),
+        TIMEOUT_AGENTE,
+        sessao.agenteAtual,
+      ),
       MAX_TENTATIVAS,
       sessao.agenteAtual,
     );
