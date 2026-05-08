@@ -14,7 +14,7 @@ services:
       - OPENAI_API_KEY=COLAR_AQUI_OPENAI_KEY
 
       ## 📲 Evolution API (WhatsApp)
-      - EVOLUTION_API_URL=https://evo.tc1.triacompany.com.br
+      - EVOLUTION_API_URL=https://evo.triacompany.com.br
       - EVOLUTION_API_KEY=COLAR_AQUI_EVOLUTION_KEY
       - EVOLUTION_INSTANCE_NAME=agente_test_01
 
