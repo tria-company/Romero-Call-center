@@ -28,7 +28,11 @@ export const pgVector = new PgVector({
 export const memoria = new Memory({
   storage: pgStore,
   vector: pgVector,
-  embedder: azure.embedding(AZURE_OPENAI_DEPLOYMENT_EMBEDDING),
+  // text-embedding-3-large com 1536 dim (em vez do default 3072) por causa do
+  // limite de 2000 dim do pgvector antigo no Supabase Cloud (IVFFlat e HNSW).
+  // Ainda melhor que text-embedding-3-small com 1536 nativo — Matryoshka:
+  // 3-large truncado pra 1536 dim mantem qualidade superior ao 3-small.
+  embedder: azure.embedding(AZURE_OPENAI_DEPLOYMENT_EMBEDDING, { dimensions: 1536 }),
   options: {
     lastMessages: 40,
     workingMemory: {
