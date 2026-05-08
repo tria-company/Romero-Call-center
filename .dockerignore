@@ -1,0 +1,10 @@
+node_modules
+.mastra
+.env
+*.db
+*.sqlite
+.git
+.gitignore
+docs
+AGENTS.md
+README.md

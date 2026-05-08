@@ -1,0 +1,16 @@
+services:
+  loovi-agents:
+    build: .
+    container_name: loovi-agents
+    restart: unless-stopped
+    ports:
+      - "4111:4111"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - loovi-data:/app/data
+
+volumes:
+  loovi-data:
