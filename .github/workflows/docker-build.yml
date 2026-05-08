@@ -1,8 +1,22 @@
-name: Deploy na VPS
+name: Deploy na VPS (Docker Swarm)
+
+# Pre-requisito: o primeiro deploy precisa ter sido feito manualmente
+# (ver docs/deploy-vps-ubuntu.md). Este workflow assume que ja existe:
+#   - /opt/Agent-Roberth (clone do repo)
+#   - ~/roberth.yaml (com secrets reais editados)
+#   - stack 'roberth' deployada pelo menos uma vez
+#
+# Secrets necessarios em Settings -> Secrets and variables -> Actions:
+#   - VPS_HOST: IP publico da VPS
+#   - VPS_USER: usuario SSH (ex: root)
+#   - VPS_SSH_KEY: chave SSH privada (conteudo do arquivo, geralmente ed25519)
+#
+# Setup completo: docs/auto-deploy-github-actions.md
 
 on:
   push:
     branches: [main]
+  workflow_dispatch: # permite rodar manualmente em Actions -> Run workflow
 
 jobs:
   deploy:
@@ -15,7 +29,10 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /opt/Loovi-Agents
-            git pull
-            docker compose up -d --build
-            docker image prune -f
+            set -e
+            cd /opt/Agent-Roberth
+            git pull --ff-only
+            docker build -t agent-roberth:latest .
+            docker stack deploy --resolve-image=never -c ~/roberth.yaml roberth
+            sleep 3
+            docker service ps roberth_agent_roberth --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -5
