@@ -50,8 +50,6 @@ function respond401(c: any) {
 }
 
 function respondHTML(c: any, html: string, status: number = 200) {
-  // c.html() existe no Hono mas alguns provedores Mastra so expoem c.text/c.body.
-  // Fallback seguro: c.body com header.
   if (typeof c.html === 'function') {
     return c.html(html, status as any);
   }
@@ -106,23 +104,52 @@ function formatarDuracao(ms: number): string {
   return `${m}m${sRest}s`;
 }
 
-// Mapa de tool_name pra emoji+label exibido no viewer
-function badgeTool(toolName: string | null, toolInput: any): string {
-  if (!toolName) return '';
-  const map: Record<string, string> = {
-    'enviar-checkout': '🔗 link de checkout enviado',
-    'salvar-dados-sessao': '👤 dados da sessao salvos',
-    'handoff-humano': '🚨 handoff humano',
-    'notificar-time': '📨 time notificado',
-  };
+// Cor do tempo de resposta: verde rapido, amber medio, vermelho lento.
+function classeDuracao(ms: number): string {
+  if (ms < 10_000) return 'text-emerald-300';
+  if (ms < 30_000) return 'text-amber-300';
+  return 'text-rose-300';
+}
+
+function iniciaisDe(nome: string | undefined | null): string {
+  const n = (nome || '').trim();
+  if (!n) return '?';
+  const parts = n.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
+}
+
+// Mapa de tool_name pra label visual no viewer (usado em badge pill)
+function badgeTool(toolName: string | null, toolInput: any): { icone: string; label: string } | null {
+  if (!toolName) return null;
+  if (toolName === 'enviar-checkout') return { icone: '🔗', label: 'link enviado' };
+  if (toolName === 'salvar-dados-sessao') return { icone: '👤', label: 'dados salvos' };
+  if (toolName === 'handoff-humano') {
+    const motivo = toolInput?.motivo || '?';
+    return { icone: '🚨', label: `handoff (${motivo})` };
+  }
+  if (toolName === 'notificar-time') {
+    const motivo = toolInput?.motivo || '?';
+    return { icone: '📨', label: `notificou (${motivo})` };
+  }
   if (toolName === 'registrar-objecao') {
     const cat = toolInput?.categoria || '?';
-    return `🎯 objecao registrada (${escapeHtml(cat)})`;
+    return { icone: '🎯', label: `objeção (${cat})` };
   }
   if (toolName.startsWith('follow-up-')) {
-    return `🔄 ${escapeHtml(toolName)} (sistema)`;
+    return { icone: '🔄', label: toolName };
   }
-  return map[toolName] || `🔧 ${escapeHtml(toolName)}`;
+  return { icone: '🔧', label: toolName };
+}
+
+// Cor do status badge pra usar nos chips/cards
+function classeStatus(status: string): string {
+  switch (status) {
+    case 'em_atendimento': return 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30';
+    case 'aguardando_humano': return 'bg-amber-500/15 text-amber-300 ring-amber-500/30';
+    case 'encerrada': return 'bg-slate-500/15 text-slate-300 ring-slate-500/30';
+    default: return 'bg-slate-500/15 text-slate-300 ring-slate-500/30';
+  }
 }
 
 // =================== Estilos / chrome ===================
@@ -130,19 +157,50 @@ function badgeTool(toolName: string | null, toolInput: any): string {
 const HEAD_COMUM = `
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .bubble { max-width: 75%; padding: 8px 12px; border-radius: 12px; }
-    .b-lead { background: #374151; color: #f9fafb; align-self: flex-start; border-bottom-left-radius: 4px; }
-    .b-sofia { background: #14532d; color: #f0fdf4; align-self: flex-end; border-bottom-right-radius: 4px; }
-    .b-sys { background: #0f172a; color: #cbd5e1; align-self: center; max-width: 90%; font-size: 13px; }
-    .meta { font-size: 11px; opacity: 0.7; margin-top: 4px; }
-    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    .glass { background: rgba(15,23,42,0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+    .mono { font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; }
+    .scrollbar-thin::-webkit-scrollbar { height: 6px; width: 6px; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    /* Bolhas WhatsApp */
+    .bubble { max-width: 80%; padding: 10px 14px; border-radius: 16px; line-height: 1.4; word-wrap: break-word; box-shadow: 0 1px 2px rgba(0,0,0,0.15); }
+    .b-lead { background: #1e293b; color: #f1f5f9; align-self: flex-start; border-bottom-left-radius: 4px; }
+    .b-sofia { background: #064e3b; color: #ecfdf5; align-self: flex-end; border-bottom-right-radius: 4px; }
+    .b-sys { background: #1e1b4b; color: #c7d2fe; align-self: center; max-width: 92%; font-size: 13px; border-radius: 10px; }
+    .meta { font-size: 11px; opacity: 0.65; margin-top: 4px; }
+    /* Animações sutis */
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .pulse-dot { animation: pulse-dot 2s infinite; }
+    /* Mobile: tabela vira card */
+    @media (max-width: 640px) {
+      .mobile-card-table thead { display: none; }
+      .mobile-card-table tr { display: block; padding: 12px; border-radius: 12px; background: rgba(30,41,59,0.5); margin-bottom: 8px; }
+      .mobile-card-table td { display: flex; justify-content: space-between; padding: 4px 0; border: none; }
+      .mobile-card-table td::before { content: attr(data-label); font-weight: 600; color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+    }
   </style>
 </head>
 `;
+
+// =================== SVG Icons inline ===================
+
+const ICON = {
+  bolt: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>`,
+  chat: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>`,
+  target: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>`,
+  alert: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>`,
+  arrow: `<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>`,
+  check: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>`,
+  clock: `<svg class="w-3 h-3 inline" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
+};
 
 // =================== Dashboard principal ===================
 
@@ -158,166 +216,205 @@ function gerarHTMLDashboard(dados: {
   const agora = new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   // ----- Cards de conversoes -----
-  const cardsConversoes = [
-    ['Hoje', conversoes.hoje, 'bg-emerald-900'],
-    ['Semana', conversoes.semana, 'bg-emerald-800'],
-    ['Mes', conversoes.mes, 'bg-emerald-700'],
-    ['Total', conversoes.total, 'bg-emerald-600'],
-  ].map(([label, n, bg]) => `
-    <div class="${bg} text-white rounded-lg p-4 shadow">
-      <div class="text-xs uppercase tracking-wider opacity-80">${label}</div>
-      <div class="text-3xl font-bold mt-1">${n}</div>
+  const conversoesItems = [
+    { label: 'Hoje', n: conversoes.hoje, gradient: 'from-emerald-500 to-emerald-700' },
+    { label: 'Semana', n: conversoes.semana, gradient: 'from-emerald-600 to-teal-700' },
+    { label: 'Mês', n: conversoes.mes, gradient: 'from-teal-600 to-cyan-700' },
+    { label: 'Total', n: conversoes.total, gradient: 'from-cyan-600 to-blue-700' },
+  ];
+  const cardsConversoes = conversoesItems.map((item) => `
+    <div class="relative overflow-hidden rounded-2xl bg-gradient-to-br ${item.gradient} p-4 sm:p-5 shadow-lg ring-1 ring-white/10">
+      <div class="flex items-center justify-between text-white/80 text-xs uppercase tracking-wider font-medium">
+        <span>${item.label}</span>
+        <span class="opacity-50">${ICON.bolt}</span>
+      </div>
+      <div class="text-3xl sm:text-4xl font-bold text-white mt-2">${item.n}</div>
+      <div class="text-xs text-white/60 mt-1">checkouts enviados</div>
     </div>
   `).join('');
 
   // ----- Tabela de conversas ativas -----
   const linhasConversas = conversasAtivas.length === 0
-    ? `<tr><td colspan="6" class="text-center text-gray-500 py-6">Nenhuma conversa ativa.</td></tr>`
+    ? `<tr><td colspan="6" class="text-center text-slate-400 py-10">Nenhuma conversa ativa.</td></tr>`
     : conversasAtivas.map((c) => {
         const customer = c.customers_roberth || {};
-        const nome = escapeHtml(customer.nome || '(sem nome)');
-        const tel = escapeHtml(customer.telefone || '—');
-        const status = escapeHtml(c.status);
+        const nome = customer.nome || '(sem nome)';
+        const tel = customer.telefone || '—';
+        const status = c.status;
         const ultimaLead = formatarTempoRelativo(c.last_lead_message_at);
         const ultimaSofia = formatarTempoRelativo(c.last_assistant_message_at);
         const inativ = formatarTempoRelativo(c.data_ultima_mensagem);
         return `
-          <tr class="hover:bg-gray-50 cursor-pointer">
-            <td class="px-3 py-2"><a href="/api/dashboard/conversa/${escapeHtml(c.id)}" class="text-blue-600 hover:underline">${nome}</a></td>
-            <td class="px-3 py-2 mono text-sm">${tel}</td>
-            <td class="px-3 py-2"><span class="inline-block px-2 py-0.5 text-xs rounded ${status === 'em_atendimento' ? 'bg-blue-100 text-blue-800' : 'bg-orange-100 text-orange-800'}">${status}</span></td>
-            <td class="px-3 py-2 text-sm">${ultimaLead}</td>
-            <td class="px-3 py-2 text-sm">${ultimaSofia}</td>
-            <td class="px-3 py-2 text-sm">${inativ}</td>
+          <tr class="group hover:bg-slate-700/30 transition cursor-pointer">
+            <td class="px-3 sm:px-4 py-3" data-label="Lead">
+              <a href="/api/dashboard/conversa/${escapeHtml(c.id)}" class="flex items-center gap-2 group-hover:text-emerald-300 transition">
+                <span class="flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-white text-xs font-semibold shrink-0">${escapeHtml(iniciaisDe(nome))}</span>
+                <span class="font-medium text-slate-200 truncate">${escapeHtml(nome)}</span>
+              </a>
+            </td>
+            <td class="px-3 sm:px-4 py-3 mono text-xs text-slate-400" data-label="Telefone">${escapeHtml(tel)}</td>
+            <td class="px-3 sm:px-4 py-3" data-label="Status">
+              <span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full ring-1 ${classeStatus(status)}">
+                ${status === 'em_atendimento' ? '<span class="w-1.5 h-1.5 rounded-full bg-current pulse-dot"></span>' : ''}
+                ${escapeHtml(status)}
+              </span>
+            </td>
+            <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Lead falou">${ultimaLead}</td>
+            <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Sofia falou">${ultimaSofia}</td>
+            <td class="px-3 sm:px-4 py-3 text-sm text-slate-400" data-label="Inatividade">${inativ}</td>
           </tr>
         `;
       }).join('');
 
   // ----- Objecoes -----
   const chipsObjecoes = Object.entries(objecoesPorCategoria).length === 0
-    ? '<span class="text-gray-500">nenhuma registrada</span>'
+    ? '<span class="text-slate-500 text-sm italic">nenhuma registrada</span>'
     : Object.entries(objecoesPorCategoria)
         .sort(([, a], [, b]) => (b as number) - (a as number))
-        .map(([cat, n]) => `<span class="inline-block bg-amber-100 text-amber-900 px-3 py-1 rounded-full text-sm mr-2 mb-1">${escapeHtml(cat)}: <b>${n}</b></span>`)
-        .join('');
+        .map(([cat, n]) => `<span class="inline-flex items-center gap-1.5 bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30 px-3 py-1 rounded-full text-sm">${escapeHtml(cat)}<span class="font-bold">${n}</span></span>`)
+        .join(' ');
 
   const linhasObjecoes = objecoesRecentes.length === 0
-    ? `<tr><td colspan="4" class="text-center text-gray-500 py-6">Nenhuma objecao registrada.</td></tr>`
+    ? `<tr><td colspan="4" class="text-center text-slate-400 py-10">Nenhuma objeção registrada.</td></tr>`
     : objecoesRecentes.map((o) => `
-      <tr class="hover:bg-gray-50">
-        <td class="px-3 py-2 text-sm">${formatarTempoRelativo(o.created_at)}</td>
-        <td class="px-3 py-2"><span class="inline-block bg-amber-100 text-amber-900 px-2 py-0.5 rounded text-xs">${escapeHtml(o.categoria)}</span></td>
-        <td class="px-3 py-2 mono text-xs">${escapeHtml(o.telefone)}</td>
-        <td class="px-3 py-2 text-sm">${escapeHtml(o.texto_original)}</td>
+      <tr class="hover:bg-slate-700/30 transition">
+        <td class="px-3 sm:px-4 py-2.5 text-sm text-slate-400 whitespace-nowrap" data-label="Quando">${formatarTempoRelativo(o.created_at)}</td>
+        <td class="px-3 sm:px-4 py-2.5" data-label="Categoria"><span class="inline-block bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30 px-2 py-0.5 rounded text-xs">${escapeHtml(o.categoria)}</span></td>
+        <td class="px-3 sm:px-4 py-2.5 mono text-xs text-slate-400 whitespace-nowrap" data-label="Telefone">${escapeHtml(o.telefone)}</td>
+        <td class="px-3 sm:px-4 py-2.5 text-sm text-slate-300" data-label="Texto">${escapeHtml(o.texto_original)}</td>
       </tr>
     `).join('');
 
   // ----- Erros -----
+  const corErroChip = (cod: string): string => {
+    if (cod === 'content_filter') return 'bg-rose-500/15 text-rose-300 ring-rose-500/30';
+    if (cod === 'timeout') return 'bg-orange-500/15 text-orange-300 ring-orange-500/30';
+    if (cod === 'rate_limit') return 'bg-yellow-500/15 text-yellow-300 ring-yellow-500/30';
+    return 'bg-slate-500/15 text-slate-300 ring-slate-500/30';
+  };
   const chipsErros = Object.entries(errosPorCodigo).length === 0
-    ? '<span class="text-gray-500">nenhum nas ultimas 24h</span>'
+    ? '<span class="inline-flex items-center gap-2 text-emerald-400 text-sm">'+ICON.check+' Sem erros nas últimas 24h</span>'
     : Object.entries(errosPorCodigo)
         .sort(([, a], [, b]) => (b as number) - (a as number))
-        .map(([cod, n]) => {
-          const cor = cod === 'content_filter' ? 'bg-red-100 text-red-900'
-            : cod === 'timeout' ? 'bg-orange-100 text-orange-900'
-            : cod === 'rate_limit' ? 'bg-yellow-100 text-yellow-900'
-            : 'bg-gray-100 text-gray-900';
-          return `<span class="inline-block ${cor} px-3 py-1 rounded-full text-sm mr-2 mb-1">${escapeHtml(cod)}: <b>${n}</b></span>`;
-        })
-        .join('');
+        .map(([cod, n]) => `<span class="inline-flex items-center gap-1.5 ${corErroChip(cod)} ring-1 px-3 py-1 rounded-full text-sm">${escapeHtml(cod)}<span class="font-bold">${n}</span></span>`)
+        .join(' ');
 
   const linhasErros = errosRecentes.length === 0
-    ? `<tr><td colspan="4" class="text-center text-gray-500 py-6">Sem erros recentes. 🎉</td></tr>`
+    ? `<tr><td colspan="4" class="text-center text-slate-400 py-10">Sem erros recentes 🎉</td></tr>`
     : errosRecentes.map((e) => `
-      <tr class="hover:bg-gray-50">
-        <td class="px-3 py-2 text-sm">${formatarTempoRelativo(e.created_at)}</td>
-        <td class="px-3 py-2 mono text-xs">${escapeHtml(e.telefone)}</td>
-        <td class="px-3 py-2"><span class="inline-block bg-red-100 text-red-900 px-2 py-0.5 rounded text-xs">${escapeHtml(e.error_code || 'outro')}</span></td>
-        <td class="px-3 py-2 text-xs text-gray-700">${escapeHtml((e.error_message || '').slice(0, 200))}</td>
+      <tr class="hover:bg-slate-700/30 transition">
+        <td class="px-3 sm:px-4 py-2.5 text-sm text-slate-400 whitespace-nowrap" data-label="Quando">${formatarTempoRelativo(e.created_at)}</td>
+        <td class="px-3 sm:px-4 py-2.5 mono text-xs text-slate-400 whitespace-nowrap" data-label="Telefone">${escapeHtml(e.telefone)}</td>
+        <td class="px-3 sm:px-4 py-2.5" data-label="Código"><span class="inline-block ${corErroChip(e.error_code || 'outro')} ring-1 px-2 py-0.5 rounded text-xs">${escapeHtml(e.error_code || 'outro')}</span></td>
+        <td class="px-3 sm:px-4 py-2.5 text-xs text-slate-300 max-w-md truncate" title="${escapeHtml(e.error_message || '')}" data-label="Mensagem">${escapeHtml((e.error_message || '').slice(0, 200))}</td>
       </tr>
     `).join('');
 
   return `<!doctype html>
 <html lang="pt-BR">
-${HEAD_COMUM.replace('</head>', `<title>Dashboard — Roberth Sofia (MCR)</title><meta http-equiv="refresh" content="30"></head>`)}
-<body class="bg-gray-100 text-gray-900">
-  <div class="max-w-7xl mx-auto p-4 md:p-6">
-    <header class="flex items-center justify-between mb-6">
-      <div>
-        <h1 class="text-2xl md:text-3xl font-bold">Dashboard — Sofia (MCR)</h1>
-        <p class="text-sm text-gray-600">Atualizacao automatica a cada 30s</p>
+${HEAD_COMUM.replace('</head>', `<title>Dashboard — Sofia</title><meta http-equiv="refresh" content="30"></head>`)}
+<body class="min-h-screen bg-slate-900 text-slate-100" style="background-image: radial-gradient(circle at 0% 0%, rgba(16,185,129,0.08) 0%, transparent 50%), radial-gradient(circle at 100% 0%, rgba(59,130,246,0.05) 0%, transparent 50%);">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
+    <!-- Header sticky -->
+    <header class="sticky top-0 z-10 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 mb-6 glass border-b border-slate-700/50">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-xl">👑</div>
+          <div>
+            <h1 class="text-lg sm:text-xl font-bold tracking-tight">Sofia <span class="text-slate-400 font-normal">— MCR</span></h1>
+            <p class="text-xs text-slate-400">Dashboard de operação</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 text-xs text-slate-400 mono">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 pulse-dot"></span>
+          ${agora}
+        </div>
       </div>
-      <div class="text-sm text-gray-600 mono">⏰ ${agora}</div>
     </header>
 
     <!-- Conversoes -->
     <section class="mb-8">
-      <h2 class="text-lg font-semibold mb-3">Conversoes (link enviado)</h2>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+        ${ICON.bolt} Conversões <span class="text-slate-500 normal-case font-normal">(link enviado)</span>
+      </h2>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
         ${cardsConversoes}
       </div>
     </section>
 
     <!-- Conversas ativas -->
     <section class="mb-8">
-      <h2 class="text-lg font-semibold mb-3">Conversas ativas <span class="text-sm font-normal text-gray-500">(${conversasAtivas.length})</span></h2>
-      <div class="bg-white rounded-lg shadow overflow-hidden">
-        <table class="w-full text-left">
-          <thead class="bg-gray-50 text-xs uppercase tracking-wider text-gray-600">
-            <tr>
-              <th class="px-3 py-2">Nome</th>
-              <th class="px-3 py-2">Telefone</th>
-              <th class="px-3 py-2">Status</th>
-              <th class="px-3 py-2">Ultima msg lead</th>
-              <th class="px-3 py-2">Ultima msg Sofia</th>
-              <th class="px-3 py-2">Inativ.</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-100">${linhasConversas}</tbody>
-        </table>
+      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+        ${ICON.chat} Conversas ativas
+        <span class="text-slate-500 normal-case font-normal">(${conversasAtivas.length})</span>
+      </h2>
+      <div class="rounded-2xl ring-1 ring-slate-700/50 overflow-hidden bg-slate-800/40">
+        <div class="overflow-x-auto scrollbar-thin">
+          <table class="w-full text-left mobile-card-table">
+            <thead class="bg-slate-800/60 text-[10px] uppercase tracking-wider text-slate-400 hidden sm:table-header-group">
+              <tr>
+                <th class="px-3 sm:px-4 py-3 font-medium">Lead</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Telefone</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Status</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Lead falou</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Sofia falou</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Inativ.</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-700/30">${linhasConversas}</tbody>
+          </table>
+        </div>
       </div>
     </section>
 
     <!-- Objecoes -->
     <section class="mb-8">
-      <h2 class="text-lg font-semibold mb-3">Objecoes</h2>
-      <div class="mb-3">${chipsObjecoes}</div>
-      <div class="bg-white rounded-lg shadow overflow-hidden">
-        <table class="w-full text-left">
-          <thead class="bg-gray-50 text-xs uppercase tracking-wider text-gray-600">
-            <tr>
-              <th class="px-3 py-2">Quando</th>
-              <th class="px-3 py-2">Categoria</th>
-              <th class="px-3 py-2">Telefone</th>
-              <th class="px-3 py-2">Texto original</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-100">${linhasObjecoes}</tbody>
-        </table>
+      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+        ${ICON.target} Objeções
+      </h2>
+      <div class="mb-3 flex flex-wrap gap-1.5">${chipsObjecoes}</div>
+      <div class="rounded-2xl ring-1 ring-slate-700/50 overflow-hidden bg-slate-800/40">
+        <div class="overflow-x-auto scrollbar-thin">
+          <table class="w-full text-left mobile-card-table">
+            <thead class="bg-slate-800/60 text-[10px] uppercase tracking-wider text-slate-400 hidden sm:table-header-group">
+              <tr>
+                <th class="px-3 sm:px-4 py-3 font-medium">Quando</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Categoria</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Telefone</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Texto original</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-700/30">${linhasObjecoes}</tbody>
+          </table>
+        </div>
       </div>
     </section>
 
     <!-- Erros -->
     <section class="mb-8">
-      <h2 class="text-lg font-semibold mb-3">Erros do agente <span class="text-sm font-normal text-gray-500">(ultimas 24h)</span></h2>
-      <div class="mb-3">${chipsErros}</div>
-      <div class="bg-white rounded-lg shadow overflow-hidden">
-        <table class="w-full text-left">
-          <thead class="bg-gray-50 text-xs uppercase tracking-wider text-gray-600">
-            <tr>
-              <th class="px-3 py-2">Quando</th>
-              <th class="px-3 py-2">Telefone</th>
-              <th class="px-3 py-2">Codigo</th>
-              <th class="px-3 py-2">Mensagem</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-100">${linhasErros}</tbody>
-        </table>
+      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+        ${ICON.alert} Erros do agente <span class="text-slate-500 normal-case font-normal">(últimas 24h)</span>
+      </h2>
+      <div class="mb-3 flex flex-wrap gap-1.5">${chipsErros}</div>
+      <div class="rounded-2xl ring-1 ring-slate-700/50 overflow-hidden bg-slate-800/40">
+        <div class="overflow-x-auto scrollbar-thin">
+          <table class="w-full text-left mobile-card-table">
+            <thead class="bg-slate-800/60 text-[10px] uppercase tracking-wider text-slate-400 hidden sm:table-header-group">
+              <tr>
+                <th class="px-3 sm:px-4 py-3 font-medium">Quando</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Telefone</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Código</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Mensagem</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-700/30">${linhasErros}</tbody>
+          </table>
+        </div>
       </div>
     </section>
 
-    <footer class="text-center text-xs text-gray-500 mt-8">
-      Auto-refresh em 30s. Ultima carga: ${agora}.
+    <footer class="text-center text-xs text-slate-500 mt-12 pb-6">
+      Auto-refresh em 30s · Sofia v3 · ${agora}
     </footer>
   </div>
 </body>
@@ -328,30 +425,32 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Roberth Sofia (MCR)</title
 
 function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
   const customer = conversa.customers_roberth || {};
-  const nome = escapeHtml(customer.nome || '(sem nome)');
-  const telefone = escapeHtml(customer.telefone || '—');
-  const status = escapeHtml(conversa.status);
+  const nome = customer.nome || '(sem nome)';
+  const telefone = customer.telefone || '—';
+  const status = conversa.status;
   const inicio = formatarDataHora(conversa.started_at);
   const linkEnv = conversa.link_enviado
-    ? `✅ ${formatarDataHora(conversa.link_enviado_em)} (${escapeHtml(conversa.oferta_enviada || 'principal')})`
+    ? `${ICON.check} ${formatarDataHora(conversa.link_enviado_em)}`
     : '—';
 
   // Itera mensagens em ordem cronologica e calcula tempo de resposta da Sofia.
-  // Pra cada msg role='assistant', diff = ts(assistant) - ts(ultima role='user' antes).
   let ultimaUserTs: number | null = null;
   const bolhas = mensagens.map((m) => {
     const ts = new Date(m.created_at).getTime();
     const hora = formatarHora(m.created_at);
     const conteudo = escapeHtml(m.content || '').replace(/\n/g, '<br>');
     const tool = badgeTool(m.tool_name, m.tool_input);
+    const toolBadge = tool
+      ? `<div class="inline-flex items-center gap-1 mt-2 px-2 py-0.5 bg-white/10 rounded text-[11px] font-medium"><span>${tool.icone}</span><span>${escapeHtml(tool.label)}</span></div>`
+      : '';
 
     if (m.role === 'user') {
       ultimaUserTs = ts;
       return `
-        <div class="flex flex-col mb-2">
+        <div class="flex flex-col mb-3">
           <div class="bubble b-lead">
-            ${conteudo}
-            <div class="meta">${hora}</div>
+            <div>${conteudo}</div>
+            <div class="meta text-slate-400">${hora}</div>
           </div>
         </div>
       `;
@@ -360,29 +459,31 @@ function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
     if (m.role === 'assistant') {
       let medidor = '';
       if (m.tool_name && m.tool_name.startsWith('follow-up-')) {
-        // FUP do scheduler — nao tem msg de lead anterior necessariamente.
         const horas = m.tool_name.replace('follow-up-', '').replace('h', '');
-        medidor = `⏱ FUP ${horas}h`;
+        medidor = `<span class="text-violet-300">${ICON.clock} FUP ${escapeHtml(horas)}h</span>`;
       } else if (ultimaUserTs) {
-        medidor = `⏱ ${formatarDuracao(ts - ultimaUserTs)}`;
+        const diff = ts - ultimaUserTs;
+        medidor = `<span class="${classeDuracao(diff)}">${ICON.clock} ${formatarDuracao(diff)}</span>`;
       }
       return `
-        <div class="flex flex-col mb-2 items-end">
+        <div class="flex flex-col mb-3 items-end">
           <div class="bubble b-sofia">
-            ${conteudo}
-            ${tool ? `<div class="text-xs mt-1 opacity-90">${tool}</div>` : ''}
-            <div class="meta text-right">${medidor ? medidor + ' · ' : ''}${hora}</div>
+            <div>${conteudo}</div>
+            ${toolBadge}
+            <div class="meta text-emerald-200/70 text-right flex items-center justify-end gap-2 mt-1">
+              ${medidor}
+              <span>${hora}</span>
+            </div>
           </div>
         </div>
       `;
     }
 
-    // role 'system' ou outro — bolha central
     return `
-      <div class="flex justify-center mb-2">
+      <div class="flex justify-center mb-3">
         <div class="bubble b-sys">
-          ${conteudo}
-          ${tool ? `<div class="text-xs mt-1">${tool}</div>` : ''}
+          <div>${conteudo}</div>
+          ${toolBadge}
           <div class="meta text-center">${hora}</div>
         </div>
       </div>
@@ -391,33 +492,53 @@ function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
 
   return `<!doctype html>
 <html lang="pt-BR">
-${HEAD_COMUM.replace('</head>', `<title>Conversa — ${nome} (${telefone})</title></head>`)}
-<body class="bg-gray-100 text-gray-900">
-  <div class="max-w-3xl mx-auto p-4 md:p-6">
-    <a href="/api/dashboard" aria-label="Voltar ao dashboard" class="text-blue-600 hover:underline text-sm mb-4 inline-block">← Voltar ao dashboard</a>
+${HEAD_COMUM.replace('</head>', `<title>${escapeHtml(nome)} — Sofia</title></head>`)}
+<body class="min-h-screen bg-slate-900 text-slate-100" style="background-image: radial-gradient(circle at 50% 0%, rgba(16,185,129,0.08) 0%, transparent 50%);">
+  <div class="max-w-3xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
+    <!-- Top bar com voltar -->
+    <div class="mb-4">
+      <a href="/api/dashboard" aria-label="Voltar ao dashboard" class="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-emerald-300 transition">
+        ${ICON.arrow} Voltar
+      </a>
+    </div>
 
-    <header class="bg-white rounded-lg shadow p-4 mb-4">
-      <div class="flex items-center justify-between flex-wrap gap-2">
-        <div>
-          <h1 class="text-xl font-bold">${nome}</h1>
-          <div class="text-sm text-gray-600 mono">${telefone}</div>
+    <!-- Header da conversa estilo WhatsApp -->
+    <header class="sticky top-2 z-10 mb-4 glass rounded-2xl ring-1 ring-slate-700/50 p-4 shadow-lg">
+      <div class="flex items-center gap-3 flex-wrap">
+        <div class="w-12 h-12 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white font-bold shrink-0">${escapeHtml(iniciaisDe(nome))}</div>
+        <div class="flex-1 min-w-0">
+          <h1 class="text-lg font-semibold text-slate-100 truncate">${escapeHtml(nome)}</h1>
+          <div class="flex items-center gap-2 text-xs text-slate-400 mono mt-0.5">
+            <span>${escapeHtml(telefone)}</span>
+            <span class="text-slate-600">·</span>
+            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full ring-1 ${classeStatus(status)}">
+              ${status === 'em_atendimento' ? '<span class="w-1.5 h-1.5 rounded-full bg-current pulse-dot"></span>' : ''}
+              ${escapeHtml(status)}
+            </span>
+          </div>
         </div>
-        <div class="text-right text-sm">
-          <div>Status: <span class="font-medium">${status}</span></div>
-          <div class="text-gray-600">Inicio: ${inicio}</div>
-          <div class="text-gray-600">Link: ${linkEnv}</div>
+      </div>
+      <div class="mt-3 pt-3 border-t border-slate-700/50 grid grid-cols-2 gap-2 text-xs">
+        <div>
+          <div class="text-slate-500 uppercase tracking-wider">Início</div>
+          <div class="text-slate-300 mt-0.5">${inicio}</div>
+        </div>
+        <div>
+          <div class="text-slate-500 uppercase tracking-wider">Link de checkout</div>
+          <div class="text-slate-300 mt-0.5 flex items-center gap-1 ${conversa.link_enviado ? 'text-emerald-300' : ''}">${linkEnv}</div>
         </div>
       </div>
     </header>
 
-    <main class="bg-gray-200 rounded-lg shadow p-4 flex flex-col" style="min-height: 400px;">
+    <!-- Thread de mensagens -->
+    <main class="bg-slate-800/30 rounded-2xl ring-1 ring-slate-700/50 p-4 sm:p-5 flex flex-col" style="min-height: 400px;">
       ${mensagens.length === 0
-        ? '<div class="text-center text-gray-500 py-12">Nenhuma mensagem nesta conversa.</div>'
+        ? '<div class="text-center text-slate-500 py-16">Nenhuma mensagem nesta conversa.</div>'
         : bolhas}
     </main>
 
-    <footer class="text-center text-xs text-gray-500 mt-4">
-      ${mensagens.length} mensagem(ns) | conversation_id: <span class="mono">${escapeHtml(conversa.id)}</span>
+    <footer class="text-center text-xs text-slate-500 mt-4 pb-4">
+      ${mensagens.length} mensagem(ns) · <span class="mono">${escapeHtml(conversa.id)}</span>
     </footer>
   </div>
 </body>
