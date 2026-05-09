@@ -39,7 +39,7 @@ services:
 
       ## 🛒 Checkout (Roberth Resende — landing serve Caminho da Rainha + Bolha RR)
       ## A landing apresenta os 2 produtos. utm_term=caminho|bolha grava qual a Sofia recomendou.
-      - CHECKOUT_URL_PRINCIPAL=https://roberthresende.com.br/checkout
+      - CHECKOUT_URL_PRINCIPAL=https://roberthresende.com.br/checkout-rainha
       # - CHECKOUT_URL_ORDERBUMP=  # deprecated, nao usado mais (URL unica pros 2 produtos)
       - CAMPANHA_NOME=lancamento_2026_q2
 
