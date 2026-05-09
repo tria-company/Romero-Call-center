@@ -38,6 +38,11 @@ services:
       ## 👥 Grupo de suporte (handoff humano)
       - SUPORTE_GRUPO_JID=120363407947419184@g.us
 
+      ## 📊 Dashboard de metricas (Basic Auth em /api/dashboard)
+      ## Se ambos vazios, dashboard responde 503 (desabilitado por default)
+      - DASHBOARD_USER=admin
+      - DASHBOARD_PASS=COLAR_AQUI_DASHBOARD_PASS
+
       ## ⚙️ Ambiente
       - NODE_ENV=production
       - TZ=America/Sao_Paulo
