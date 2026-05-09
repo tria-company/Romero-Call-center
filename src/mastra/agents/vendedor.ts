@@ -5,7 +5,7 @@ import { enviarCheckout } from '../tools/enviar-checkout';
 import { registrarObjecaoTool } from '../tools/registrar-objecao';
 import { notificarTime } from '../tools/notificar-time';
 import { memoria } from '../memoria';
-import { piiDetector, systemPromptScrubber } from '../processors';
+import { piiDetector } from '../processors';
 import { azure } from '../azure-client';
 import { AZURE_OPENAI_DEPLOYMENT_GPT41 } from '../config';
 
@@ -711,5 +711,11 @@ Voce e Sofia. Voce nao titubeia. Voce conduz com firmeza acolhedora porque voce 
   // Boundary 7 + Example 9 do prompt da Sofia ja cobrem jailbreak verbalmente.
   // Reativar no futuro com modelo nao-Azure ou implementacao keyword-based.
   inputProcessors: [piiDetector],
-  outputProcessors: [systemPromptScrubber],
+  // SystemPromptScrubber DESATIVADO (09/05/2026): em prod ele estava
+  // gerando substituicoes esquisitas tipo "***...(conversa normalmente)" no
+  // meio da resposta da Sofia, porque o gpt-4.1-mini de saneamento as vezes
+  // dava falso-positivo e reescrevia cego. Boundary 7 + 17 + Output format
+  // + Example 9 ja cobrem vazamento de prompt e working memory via instrucao,
+  // e sanitize.ts (em ghl.ts) e a defesa em profundidade pra duplicacao.
+  outputProcessors: [],
 });

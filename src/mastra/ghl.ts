@@ -24,6 +24,7 @@ import {
   AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO,
 } from './config';
 import { fetchTimeout } from './http';
+import { removerDuplicacoes } from './sanitize';
 
 const GHL_BASE_URL = 'https://services.leadconnectorhq.com';
 
@@ -431,7 +432,10 @@ export async function enviarMensagem(
     return;
   }
 
-  let textoLimpo = texto.trim();
+  // Defesa em profundidade: GPT-4.1 ocasionalmente duplica o texto inteiro
+  // ou frases longas dentro do mesmo `text` da resposta. Detectamos e removemos
+  // antes do envio. So afeta duplicatas literais (>50 chars / >30 chars/frase).
+  let textoLimpo = removerDuplicacoes(texto).trim();
 
   // Filtro de URL — mesma logica da Evolution.
   if (!permitirUrl && URL_REGEX.test(textoLimpo)) {
