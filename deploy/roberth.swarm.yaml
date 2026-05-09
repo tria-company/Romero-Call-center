@@ -22,7 +22,7 @@ services:
       ## 📲 GoHighLevel (canal WhatsApp via API oficial)
       ## PIT: Settings -> Integrations -> Private Integrations
       ## Scopes: conversations.write, conversations/message.write, contacts.readonly
-      - GHL_PIT_TOKEN=COLAR_AQUI_GHL_PIT_TOKEN
+      - GHL_PIT_TOKEN=pit-0b1a95b0-0ec2-4233-8d86-0d5a3368663b
       - GHL_API_VERSION=2021-04-15
       - GHL_DEFAULT_TYPE=WhatsApp
 
