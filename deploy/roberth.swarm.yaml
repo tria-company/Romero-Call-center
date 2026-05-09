@@ -44,6 +44,11 @@ services:
       - CHECKOUT_URL_PRINCIPAL=https://roberthresende.com.br/checkout-rainha
       - CAMPANHA_NOME=lancamento_2026_q2
 
+      ## 💰 Webhooks Kiwify (1 token por produto, vem como ?token= na URL)
+      ## URL final: https://<host>/api/webhook/kiwify/<caminho|bolha>?token=<TOKEN>
+      - KIWIFY_TOKEN_CAMINHO=68mz9qafdbs
+      - KIWIFY_TOKEN_BOLHA=ywmanehea4f
+
       ## 👥 Grupo de suporte (handoff humano)
       - SUPORTE_GRUPO_JID=120363407947419184@g.us
 

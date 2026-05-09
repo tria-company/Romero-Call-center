@@ -32,7 +32,10 @@ import { getSessao, criarSessao, AGENTES_MAP, type Sessao } from './sessao';
 import { memoria } from './memoria';
 
 // Supabase (persistencia)
-import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro, tentarRegistrarWebhook } from './supabase';
+import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro, tentarRegistrarWebhook, confirmarPagamento } from './supabase';
+
+// Tokens dos webhooks Kiwify (1 por produto)
+import { KIWIFY_TOKEN_CAMINHO, KIWIFY_TOKEN_BOLHA } from './config';
 
 // Buffer de mensagens (debounce 10s, com persistencia)
 import { adicionarAoBuffer } from './buffer';
@@ -283,6 +286,96 @@ export const mastra = new Mastra({
             await desbloquearNumero(telefone);
             return c.json({ status: 'desbloqueado', telefone });
           } catch (erro) {
+            return c.json({ status: 'erro', mensagem: String(erro) }, 500);
+          }
+        },
+      },
+      // Webhook Kiwify — confirma pagamento e marca conversao do agente.
+      // 1 endpoint, 2 produtos (path param). Cada produto tem token proprio.
+      // URL no Kiwify: https://<host>/api/webhook/kiwify/<produto>?token=<TOKEN>
+      // So marca como conversao se o telefone foi atendido pela Sofia antes
+      // (existe customer + alguma conversa). Pagou via anuncio direto sem
+      // falar no whats -> ignorado (status: 'sem_atendimento').
+      {
+        path: '/api/webhook/kiwify/:produto',
+        method: 'POST',
+        handler: async (c) => {
+          try {
+            const produto = c.req.param('produto');
+            if (produto !== 'caminho' && produto !== 'bolha') {
+              return c.json({ status: 'produto invalido' }, 400);
+            }
+            const token = c.req.query('token') || '';
+            const expected = produto === 'caminho' ? KIWIFY_TOKEN_CAMINHO : KIWIFY_TOKEN_BOLHA;
+            if (!expected || token !== expected) {
+              console.warn(`[kiwify] token invalido pra ${produto} (recebido: "${token.slice(0, 4)}...")`);
+              return c.json({ status: 'unauthorized' }, 401);
+            }
+
+            const payload = await c.req.json() as any;
+
+            // Parse tolerante — Kiwify usa diferentes envelopes (Customer, Order)
+            // dependendo da versao/lingua. Prioriza camelCase comum.
+            const evento = String(payload.webhook_event_type || payload.event || '').toLowerCase();
+            const statusKiwify = String(payload.order_status || payload.Order?.status || payload.status || '').toLowerCase();
+            const ehAprovado =
+              evento === 'order_approved' ||
+              evento === 'paid' ||
+              statusKiwify === 'paid' ||
+              statusKiwify === 'approved';
+            if (!ehAprovado) {
+              console.log(`[kiwify] evento ignorado: ${produto} evento="${evento}" status="${statusKiwify}"`);
+              return c.json({ status: 'evento ignorado', evento, statusKiwify });
+            }
+
+            const telefoneRaw = String(
+              payload.Customer?.mobile ||
+              payload.Customer?.phone ||
+              payload.customer?.phone ||
+              payload.customer?.mobile ||
+              ''
+            );
+            const telefone = telefoneRaw.replace(/[^\d]/g, '');
+            const orderId = String(payload.order_id || payload.Order?.id || payload.id || '');
+            const valorRaw = payload.Commissions?.charge_amount || payload.Order?.total_value || payload.amount || payload.charge_amount || '0';
+            // Kiwify as vezes manda valor em centavos (string ou number) — heuristica:
+            // se valor inteiro > 10000 e string sem ponto, divide por 100.
+            const valorParsed = parseFloat(String(valorRaw).replace(',', '.'));
+            const valor = Number.isFinite(valorParsed) ? valorParsed : 0;
+
+            if (!telefone || !orderId) {
+              console.warn('[kiwify] payload incompleto:', JSON.stringify(payload).slice(0, 400));
+              return c.json({ status: 'payload incompleto' }, 400);
+            }
+
+            const result = await confirmarPagamento({
+              telefone,
+              kiwify_order_id: orderId,
+              valor_pago: valor,
+              produto,
+            });
+
+            if (!result.novo) {
+              const motivo = result.ignorado;
+              console.log(`[kiwify] ${produto} order ${orderId} ignorado (${motivo}) pra ${telefone}`);
+              return c.json({ status: motivo, orderId });
+            }
+
+            console.log(`[kiwify] ✓ pagamento confirmado: ${telefone} ← ${produto} R$${valor.toFixed(2)} (order ${orderId})`);
+
+            const produtoLabel = produto === 'caminho' ? 'Caminho da Rainha' : 'Bolha RR';
+            enviarAvisoAoSuporte([
+              '🎉 *Conversao confirmada*',
+              `Lead: ${result.nome || '(sem nome)'}`,
+              `Telefone: ${telefone}`,
+              `Produto: ${produtoLabel}`,
+              `Valor: R$ ${valor.toFixed(2)}`,
+              `Order: ${orderId}`,
+            ]).catch((e) => console.error('[kiwify] Falha notificar grupo:', e));
+
+            return c.json({ status: 'confirmado', orderId, produto });
+          } catch (erro) {
+            console.error('[kiwify] Erro no webhook:', erro);
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
           }
         },

@@ -16,6 +16,7 @@ import {
   buscarConversaPorId,
   buscarMensagensDaConversa,
   contarConversoes,
+  contarPagamentosConfirmados,
   buscarObjecoesRecentes,
   contarObjecoesPorCategoria,
   buscarErrosRecentes,
@@ -245,12 +246,13 @@ const ICON = {
 function gerarHTMLDashboard(dados: {
   conversasAtivas: any[];
   conversoes: { hoje: number; semana: number; mes: number; total: number };
+  pagamentos: { hoje: number; semana: number; mes: number; total: number };
   objecoesRecentes: any[];
   objecoesPorCategoria: Record<string, number>;
   errosRecentes: any[];
   errosPorCodigo: Record<string, number>;
 }): string {
-  const { conversasAtivas, conversoes, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
+  const { conversasAtivas, conversoes, pagamentos, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
   const agora = new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   // ----- Cards de conversoes -----
@@ -268,6 +270,24 @@ function gerarHTMLDashboard(dados: {
       </div>
       <div class="text-2xl sm:text-4xl font-bold text-white mt-1 sm:mt-2">${item.n}</div>
       <div class="text-[10px] sm:text-xs text-white/60 mt-0.5 sm:mt-1">checkouts</div>
+    </div>
+  `).join('');
+
+  // ----- Cards de pagamentos confirmados (Kiwify) -----
+  const pagamentosItems = [
+    { label: 'Hoje', n: pagamentos.hoje, gradient: 'from-green-500 to-green-700' },
+    { label: 'Semana', n: pagamentos.semana, gradient: 'from-green-600 to-emerald-700' },
+    { label: 'Mês', n: pagamentos.mes, gradient: 'from-emerald-700 to-green-800' },
+    { label: 'Total', n: pagamentos.total, gradient: 'from-green-800 to-emerald-900' },
+  ];
+  const cardsPagamentos = pagamentosItems.map((item) => `
+    <div class="relative overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-br ${item.gradient} p-3 sm:p-5 shadow-lg ring-1 ring-white/10">
+      <div class="flex items-center justify-between text-white/80 text-[10px] sm:text-xs uppercase tracking-wider font-medium">
+        <span>${item.label}</span>
+        <span class="opacity-50">💰</span>
+      </div>
+      <div class="text-2xl sm:text-4xl font-bold text-white mt-1 sm:mt-2">${item.n}</div>
+      <div class="text-[10px] sm:text-xs text-white/60 mt-0.5 sm:mt-1">vendas pagas</div>
     </div>
   `).join('');
 
@@ -428,13 +448,23 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title><meta htt
       </div>
     </header>
 
-    <!-- Conversoes -->
+    <!-- Links enviados (Sofia mandou checkout) -->
     <section class="mb-6 sm:mb-8">
       <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
-        ${ICON.bolt} Conversões <span class="text-slate-500 normal-case font-normal text-xs">(link enviado)</span>
+        ${ICON.bolt} Links enviados <span class="text-slate-500 normal-case font-normal text-xs">(Sofia mandou checkout)</span>
       </h2>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
         ${cardsConversoes}
+      </div>
+    </section>
+
+    <!-- Pagamentos confirmados (Kiwify webhook) -->
+    <section class="mb-6 sm:mb-8">
+      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+        💰 Pagamentos confirmados <span class="text-slate-500 normal-case font-normal text-xs">(Kiwify aprovou)</span>
+      </h2>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+        ${cardsPagamentos}
       </div>
     </section>
 
@@ -656,9 +686,10 @@ export async function handlerDashboard(c: any) {
   if (!verificarAuth(auth)) return respond401(c);
 
   try {
-    const [conversasAtivas, conversoes, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
+    const [conversasAtivas, conversoes, pagamentos, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
       buscarConversasAtivas(50),
       contarConversoes(),
+      contarPagamentosConfirmados(),
       buscarObjecoesRecentes(30),
       contarObjecoesPorCategoria(),
       buscarErrosRecentes(30),
@@ -667,6 +698,7 @@ export async function handlerDashboard(c: any) {
     const html = gerarHTMLDashboard({
       conversasAtivas,
       conversoes,
+      pagamentos,
       objecoesRecentes,
       objecoesPorCategoria,
       errosRecentes,

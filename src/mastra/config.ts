@@ -52,6 +52,13 @@ export const CHECKOUT_URL_ORDERBUMP = process.env.CHECKOUT_URL_ORDERBUMP || '';
 // Identificador da campanha do lancamento — vai como utm_campaign no link
 export const CAMPANHA_NOME = process.env.CAMPANHA_NOME || 'lancamento';
 
+// Kiwify webhooks — 1 token por produto, vem como ?token=xxx na URL.
+// Configurados em Kiwify -> produto -> Settings -> Webhooks. Cada produto
+// tem o seu token pra deixar claro qual webhook bateu mesmo se a URL
+// vazar. Token vazio = webhook do produto correspondente desabilitado.
+export const KIWIFY_TOKEN_CAMINHO = process.env.KIWIFY_TOKEN_CAMINHO || '';
+export const KIWIFY_TOKEN_BOLHA = process.env.KIWIFY_TOKEN_BOLHA || '';
+
 // JID do grupo de suporte que recebe notificacao quando a IA chama handoff humano.
 // Formato: '<id>@g.us'. Vazio = sem notificacao (apenas pausa a IA).
 export const SUPORTE_GRUPO_JID = process.env.SUPORTE_GRUPO_JID || '';

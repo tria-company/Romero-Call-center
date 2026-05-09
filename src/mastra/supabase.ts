@@ -190,10 +190,13 @@ export async function buscarConversasParaFollowUp(): Promise<any[]> {
   if (!SUPABASE_URL) return [];
   try {
     const limite1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    // Filtro pagamento_confirmado=is.false: leads que ja compraram nao
+    // recebem FUP nem handoff por silencio (migration 05 adicionou a coluna).
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?` +
       `status=eq.em_atendimento` +
       `&ended_at=is.null` +
       `&handoff_silencio_em=is.null` +
+      `&pagamento_confirmado=is.false` +
       `&last_assistant_message_at=not.is.null` +
       `&last_assistant_message_at=lt.${limite1h}` +
       `&select=*,customers_roberth(telefone,nome)` +
@@ -468,6 +471,132 @@ export async function contarErrosPorCodigo(desdeISO?: string): Promise<Record<st
     console.error('[supabase] Erro contarErrosPorCodigo:', e);
     return {};
   }
+}
+
+// ==================== KIWIFY / PAGAMENTO CONFIRMADO ====================
+// Webhook do Kiwify chama esses helpers quando uma compra e aprovada.
+// Migration 05 adicionou as colunas pagamento_confirmado, pagamento_confirmado_em,
+// kiwify_order_id, valor_pago em conversations_roberth.
+
+export type ConfirmarPagamentoResult =
+  | { novo: true; nome: string | null; conversaId: string }
+  | { novo: false; ignorado: 'sem_atendimento' | 'duplicado' };
+
+/**
+ * Marca uma conversa como pagamento confirmado.
+ *
+ * Idempotente + so marca conversao se o telefone foi atendido pela Sofia antes
+ * (existe customer + alguma conversa). Pessoa que pagou via anuncio direto sem
+ * nunca falar no whats nao conta como conversao do agente — retorna 'sem_atendimento'.
+ *
+ * Pos-marcacao: conversa fica encerrada (status='encerrada', ended_at=NOW),
+ * Sofia para de atender. Scheduler de FUP filtra pagamento_confirmado=false,
+ * entao nao spamma quem ja comprou.
+ */
+export async function confirmarPagamento(dados: {
+  telefone: string;
+  kiwify_order_id: string;
+  valor_pago: number;
+  produto: 'caminho' | 'bolha';
+}): Promise<ConfirmarPagamentoResult> {
+  if (!SUPABASE_URL || !dados.telefone || !dados.kiwify_order_id) {
+    return { novo: false, ignorado: 'sem_atendimento' };
+  }
+
+  // 1. Customer precisa existir (criterio: Sofia atendeu antes)
+  const customer = await buscarCustomerPorTelefone(dados.telefone);
+  if (!customer?.id) {
+    return { novo: false, ignorado: 'sem_atendimento' };
+  }
+
+  // 2. Conversa mais recente do customer (incluindo encerradas)
+  let conversaId: string | null = null;
+  let nomeCustomer: string | null = customer.nome || null;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?` +
+      `customer_id=eq.${customer.id}&select=id&order=data_ultima_mensagem.desc&limit=1`;
+    const res = await fetchTimeout(url, { headers: headers() });
+    if (res.ok) {
+      const rows = await res.json() as Array<{ id: string }>;
+      conversaId = rows[0]?.id || null;
+    }
+  } catch (e) {
+    console.error('[supabase] confirmarPagamento — buscar conversa:', e);
+  }
+  if (!conversaId) {
+    return { novo: false, ignorado: 'sem_atendimento' };
+  }
+
+  // 3. Marca a conversa. Unique index uk_conv_kiwify_order rejeita duplicata
+  // (Kiwify retry com mesmo order_id) — caimos no fallback.
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?id=eq.${conversaId}`;
+    const agora = new Date().toISOString();
+    const body: Record<string, any> = {
+      pagamento_confirmado: true,
+      pagamento_confirmado_em: agora,
+      kiwify_order_id: dados.kiwify_order_id,
+      valor_pago: dados.valor_pago,
+      oferta_enviada: dados.produto,
+      status: 'encerrada',
+      ended_at: agora,
+      updated_at: agora,
+      data_ultima_mensagem: agora,
+    };
+    const res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: { ...headers(), 'Prefer': 'return=representation' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const erroBody = await res.text();
+      // 23505 = unique_violation no kiwify_order_id (webhook duplicado)
+      if (res.status === 409 || erroBody.includes('23505') || erroBody.includes('uk_conv_kiwify_order')) {
+        return { novo: false, ignorado: 'duplicado' };
+      }
+      console.error('[supabase] confirmarPagamento PATCH falhou:', erroBody);
+      return { novo: false, ignorado: 'sem_atendimento' };
+    }
+    return { novo: true, nome: nomeCustomer, conversaId };
+  } catch (e) {
+    console.error('[supabase] confirmarPagamento erro:', e);
+    return { novo: false, ignorado: 'sem_atendimento' };
+  }
+}
+
+/**
+ * Conta pagamentos confirmados em 4 janelas (espelha contarConversoes,
+ * mas filtra pagamento_confirmado=true e janela em pagamento_confirmado_em).
+ */
+export async function contarPagamentosConfirmados(): Promise<{ hoje: number; semana: number; mes: number; total: number }> {
+  if (!SUPABASE_URL) return { hoje: 0, semana: 0, mes: 0, total: 0 };
+  const agora = Date.now();
+  const inicioHoje = new Date(agora);
+  inicioHoje.setHours(0, 0, 0, 0);
+  const inicioSemana = new Date(agora - 7 * 24 * 60 * 60 * 1000);
+  const inicioMes = new Date(agora - 30 * 24 * 60 * 60 * 1000);
+
+  async function contar(filtroExtra: string): Promise<number> {
+    try {
+      const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?pagamento_confirmado=eq.true${filtroExtra}&select=id`;
+      const res = await fetchTimeout(url, {
+        method: 'HEAD',
+        headers: { ...headers(), 'Prefer': 'count=exact' },
+      });
+      if (!res.ok) return 0;
+      const range = res.headers.get('content-range') || '';
+      const match = range.match(/\/(\d+|\*)$/);
+      return match && match[1] !== '*' ? parseInt(match[1], 10) : 0;
+    } catch { return 0; }
+  }
+
+  const [hoje, semana, mes, total] = await Promise.all([
+    contar(`&pagamento_confirmado_em=gte.${inicioHoje.toISOString()}`),
+    contar(`&pagamento_confirmado_em=gte.${inicioSemana.toISOString()}`),
+    contar(`&pagamento_confirmado_em=gte.${inicioMes.toISOString()}`),
+    contar(''),
+  ]);
+  return { hoje, semana, mes, total };
 }
 
 // ==================== RESET DE TESTE ====================
