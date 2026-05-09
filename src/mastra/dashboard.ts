@@ -8,7 +8,7 @@
 // env, retorna 503 (nao habilitado).
 //
 // HTML: server-rendered com Tailwind via CDN. Sem JS pesado, sem build step.
-// Auto-refresh do dashboard via <meta http-equiv="refresh" content="30">.
+// Auto-refresh do dashboard via fetch + DOM swap (sem reload — sem flash).
 
 import { DASHBOARD_USER, DASHBOARD_PASS } from './config';
 import {
@@ -428,9 +428,9 @@ function gerarHTMLDashboard(dados: {
 
   return `<!doctype html>
 <html lang="pt-BR">
-${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title><meta http-equiv="refresh" content="30"></head>`)}
+${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title></head>`)}
 <body class="min-h-screen bg-slate-900 text-slate-100" style="background-image: radial-gradient(circle at 0% 0%, rgba(16,185,129,0.08) 0%, transparent 50%), radial-gradient(circle at 100% 0%, rgba(59,130,246,0.05) 0%, transparent 50%);">
-  <div class="max-w-7xl mx-auto px-3 sm:px-6 py-3 sm:py-6">
+  <div id="dash-root" class="max-w-7xl mx-auto px-3 sm:px-6 py-3 sm:py-6">
     <!-- Header sticky -->
     <header class="sticky top-0 z-10 -mx-3 sm:-mx-6 px-3 sm:px-6 py-3 sm:py-4 mb-5 sm:mb-6 glass border-b border-slate-700/50">
       <div class="flex items-center justify-between gap-2">
@@ -548,6 +548,38 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title><meta htt
       Auto-refresh 30s · Rei Delas · ${agora}
     </footer>
   </div>
+  <script>
+  // Auto-refresh sem reload da pagina: a cada 30s busca a propria URL,
+  // parseia o HTML retornado e substitui so o #dash-root. Mantem o scroll,
+  // nao causa flash, nao fecha dropdowns. Basic Auth e enviado automatico
+  // pelo browser (cache da sessao same-origin).
+  (function() {
+    const INTERVAL_MS = 30000;
+    let inFlight = false;
+    async function refresh() {
+      if (inFlight || document.hidden) return;
+      inFlight = true;
+      try {
+        const r = await fetch(location.href, { credentials: 'same-origin', cache: 'no-store' });
+        if (!r.ok) return;
+        const html = await r.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const novo = doc.getElementById('dash-root');
+        const atual = document.getElementById('dash-root');
+        if (novo && atual) atual.replaceWith(novo);
+      } catch (e) {
+        console.error('[dash-refresh]', e);
+      } finally {
+        inFlight = false;
+      }
+    }
+    setInterval(refresh, INTERVAL_MS);
+    // Atualiza quando a aba volta a ficar visivel apos ter ficado oculta
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refresh();
+    });
+  })();
+  </script>
 </body>
 </html>`;
 }
