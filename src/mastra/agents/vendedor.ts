@@ -5,7 +5,7 @@ import { enviarCheckout } from '../tools/enviar-checkout';
 import { registrarObjecaoTool } from '../tools/registrar-objecao';
 import { notificarTime } from '../tools/notificar-time';
 import { memoria } from '../memoria';
-import { promptInjectionDetector, piiDetector, systemPromptScrubber } from '../processors';
+import { piiDetector, systemPromptScrubber } from '../processors';
 import { azure } from '../azure-client';
 import { AZURE_OPENAI_DEPLOYMENT_GPT41 } from '../config';
 
@@ -573,6 +573,13 @@ Voce e Sofia. Voce nao titubeia. Voce conduz com firmeza acolhedora porque voce 
     notificarTime,
   },
   memory: memoria,
-  inputProcessors: [promptInjectionDetector, piiDetector],
+  // PromptInjectionDetector REMOVIDO temporariamente: o prompt interno que
+  // o detector usa pra classificar jailbreak ESTAVA sendo bloqueado pelo
+  // proprio content filter do Azure (jailbreak.detected=true), retornando
+  // 400 em toda chamada. Cada falha + retry adicionava 30-60s de latencia
+  // antes do agent.generate real, causando os timeouts e loops do Teste 4.
+  // Boundary 6 + Example 8 do prompt da Sofia ja cobrem jailbreak verbalmente.
+  // Reativar no futuro com modelo nao-Azure ou implementacao keyword-based.
+  inputProcessors: [piiDetector],
   outputProcessors: [systemPromptScrubber],
 });
