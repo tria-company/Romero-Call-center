@@ -33,6 +33,9 @@ import { resetarConversaTeste, COMANDO_RESET } from './reset';
 // Scheduler de follow-ups (1h/3h/5h) e handoff por silencio (24h)
 import { iniciarFollowUpScheduler } from './follow-up';
 
+// Notificacao ao grupo de suporte em caso de erro
+import { enviarAvisoAoSuporte, jaNotificouRecentemente } from './notificacoes';
+
 // Timeout e retry para agent.generate()
 const TIMEOUT_AGENTE = 60_000;
 const MAX_TENTATIVAS = 3;
@@ -169,11 +172,23 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
     // relatorios do Teste 4 (ClickUp 868jjn1f4): 6 dos 9 cenarios reprovados
     // tinham loops dessa frase.
     //
-    // Comportamento novo: silencio. Lead manda outra coisa, proxima tentativa
-    // tenta de novo. Se persistir, o scheduler de FUP (follow-up.ts) reabre
-    // a conversa em 1h com o agente operacional. Lead nunca ve mensagem de
-    // sistema confessando erro.
+    // Comportamento novo: silencio pro lead + alerta no grupo de suporte
+    // pra que o time saiba e possa atender manualmente.
     console.error('[WhatsApp] Erro ao processar mensagem (silencioso pro lead):', erro);
+
+    // Notifica grupo de suporte (idempotencia de 1h por telefone — evita
+    // virar spam no grupo se erro persistir turno apos turno).
+    if (!jaNotificouRecentemente(numero, 'erro_agente')) {
+      const mensagemErro = String((erro as Error)?.message || erro).slice(0, 250);
+      enviarAvisoAoSuporte([
+        '🚨 *Erro no agente — atender o lead manualmente*',
+        `Lead: ${nome || '(sem nome)'}`,
+        `Telefone: ${numero}`,
+        `Erro: ${mensagemErro}`,
+        '',
+        'A IA falhou ao gerar resposta neste turno. Alguem do time precisa olhar.',
+      ]).catch((e) => console.error('[notificacao] Falha ao avisar grupo:', e));
+    }
   }
 }
 
