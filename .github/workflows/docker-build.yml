@@ -33,6 +33,11 @@ jobs:
           script: |
             set -e
             cd /opt/Agent-Roberth
+            # Stash mudanças locais (geralmente edicoes em deploy/roberth.swarm.yaml
+            # com credenciais reais que substituem os placeholders COLAR_AQUI_*).
+            # Sem isso, git pull --ff-only falha quando a VPS tem yaml editado.
+            # As envs em runtime ficam no docker service, nao dependem do yaml local.
+            git stash --include-untracked || true
             git pull --ff-only
             docker build -t agent-roberth:latest .
             # stack deploy nao detecta mudanca quando so a imagem 'latest'
