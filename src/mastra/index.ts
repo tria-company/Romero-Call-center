@@ -310,8 +310,9 @@ export const mastra = new Mastra({
               return c.json({ status: 'bloqueado_humano' });
             }
 
-            // Audio por enquanto desabilitado (stubs retornam false/null).
+            // Audio: detecta URL de attachments, baixa, transcreve via Azure.
             if (!texto && ehMensagemAudio(payload)) {
+              console.log(`[GHL] Audio recebido de ${nome} (${numero}), transcrevendo...`);
               const base64 = await baixarAudioBase64(payload);
               if (base64) {
                 const transcricao = await transcreverAudio(base64);
@@ -324,6 +325,12 @@ export const mastra = new Mastra({
             }
 
             if (!texto) {
+              // Diagnostico: log do customData pra ajudar a entender o formato
+              // de attachments do GHL quando body vier vazio. Util pra ajustar
+              // a regex de detecao de audio se algum formato escapar.
+              console.log('[GHL][debug] mensagem sem texto. customData:',
+                JSON.stringify(payload.customData),
+                '| message.type:', payload.message?.type);
               return c.json({ status: 'sem texto' });
             }
 

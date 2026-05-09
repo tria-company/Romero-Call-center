@@ -18,6 +18,10 @@ import {
   GHL_PIT_TOKEN,
   GHL_API_VERSION,
   GHL_DEFAULT_TYPE,
+  AZURE_OPENAI_RESOURCE_NAME,
+  AZURE_OPENAI_API_KEY,
+  AZURE_OPENAI_API_VERSION,
+  AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO,
 } from './config';
 
 const GHL_BASE_URL = 'https://services.leadconnectorhq.com';
@@ -66,19 +70,121 @@ export function extrairNome(payload: GhlWebhookPayload): string {
   return payload.full_name || payload.first_name || 'Não identificado';
 }
 
-// =================== Audio (desabilitado por enquanto) ===================
-// O webhook do GHL Workflow nao traz audio em base64 igual a Evolution.
-// Audio chegaria via attachment URL, exigindo download autenticado + transcricao.
-// Stubs abaixo mantem compat com o handler antigo no index.ts ate adaptarmos.
+// =================== Audio ===================
+// GHL Workflow "Send Webhook" mapeou attachments={{message.attachments}}.
+// Quando o lead manda audio, attachments contem URL(s) signed (S3/CDN do GHL).
+// Lógica: detectar URL de audio -> baixar -> transcrever via Azure Whisper.
 
-export function ehMensagemAudio(_payload: GhlWebhookPayload): boolean {
-  return false;
+// Helper interno: extrai array de URLs do campo attachments (suporta varias formas).
+function extrairAttachmentUrls(payload: GhlWebhookPayload): string[] {
+  const att = payload.customData?.attachments;
+  if (!att) return [];
+  if (Array.isArray(att)) return att.filter((u) => typeof u === 'string') as string[];
+  if (typeof att === 'string' && att.trim().length > 0) {
+    const trimmed = att.trim();
+    // Pode chegar como JSON stringified: '["url1","url2"]'
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed.filter((u) => typeof u === 'string');
+      } catch {
+        // fallthrough — usa como string unica
+      }
+    }
+    // String com 1 URL ou ', '-separated
+    if (trimmed.includes(',')) return trimmed.split(/,\s*/).filter(Boolean);
+    return [trimmed];
+  }
+  return [];
 }
-export async function baixarAudioBase64(_payload: GhlWebhookPayload): Promise<string | null> {
-  return null;
+
+// Audio formats comuns do WhatsApp: ogg/opus (Android), m4a (iOS), aac. Outros caem fora.
+const AUDIO_EXT_REGEX = /\.(ogg|opus|mp3|m4a|wav|webm|aac|amr)(\?|$|#)/i;
+
+export function ehMensagemAudio(payload: GhlWebhookPayload): boolean {
+  const urls = extrairAttachmentUrls(payload);
+  if (urls.length === 0) return false;
+  const tem = urls.some((u) => AUDIO_EXT_REGEX.test(u));
+  if (tem) {
+    console.log('[ghl][audio] mensagem com audio detectada:', urls);
+  } else {
+    // Tem attachment mas nao e audio (ex: imagem, video, doc) — log pra debug
+    console.log('[ghl][audio-debug] attachments presentes mas nao audio:', urls);
+  }
+  return tem;
 }
-export async function transcreverAudio(_base64: string): Promise<string | null> {
-  return null;
+
+export async function baixarAudioBase64(payload: GhlWebhookPayload): Promise<string | null> {
+  const urls = extrairAttachmentUrls(payload);
+  const audioUrl = urls.find((u) => AUDIO_EXT_REGEX.test(u));
+  if (!audioUrl) {
+    console.warn('[ghl][audio] sem URL de audio em attachments');
+    return null;
+  }
+  try {
+    // GHL signed URLs geralmente sao publicas (S3 presigned). Se vier 401/403,
+    // tentamos com Bearer PIT como fallback.
+    let res = await fetch(audioUrl);
+    if ((res.status === 401 || res.status === 403) && GHL_PIT_TOKEN) {
+      console.log(`[ghl][audio] retry com Bearer PIT (status ${res.status})`);
+      res = await fetch(audioUrl, {
+        headers: { 'Authorization': `Bearer ${GHL_PIT_TOKEN}`, 'Version': GHL_API_VERSION },
+      });
+    }
+    if (!res.ok) {
+      console.error(`[ghl][audio] falha ao baixar (${res.status}):`, audioUrl);
+      return null;
+    }
+    const buffer = await res.arrayBuffer();
+    return Buffer.from(buffer).toString('base64');
+  } catch (e) {
+    console.error('[ghl][audio] erro ao baixar:', e);
+    return null;
+  }
+}
+
+/**
+ * Transcreve audio usando Azure OpenAI (deployment `gpt-4o-transcribe-diarize`
+ * ou similar configurado em AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO).
+ * Endpoint: cognitiveservices.azure.com (mesmo dominio dos outros deployments).
+ * Header de auth: 'api-key' (nao 'Authorization: Bearer').
+ */
+export async function transcreverAudio(base64Audio: string): Promise<string | null> {
+  if (!AZURE_OPENAI_RESOURCE_NAME || !AZURE_OPENAI_API_KEY) {
+    console.error('[audio] AZURE_OPENAI_RESOURCE_NAME / AZURE_OPENAI_API_KEY nao configurados');
+    return null;
+  }
+  try {
+    const audioBuffer = Buffer.from(base64Audio, 'base64');
+    // Default mime audio/ogg cobre WhatsApp (Android). iOS m4a tambem aceita
+    // pelo Whisper sem precisar mudar Content-Type — o magic byte e detectado.
+    const blob = new Blob([audioBuffer], { type: 'audio/ogg' });
+    const formData = new FormData();
+    formData.append('file', blob, 'audio.ogg');
+    formData.append('language', 'pt');
+
+    const url = `https://${AZURE_OPENAI_RESOURCE_NAME}.cognitiveservices.azure.com/openai/deployments/${AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO}/audio/transcriptions?api-version=${AZURE_OPENAI_API_VERSION}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'api-key': AZURE_OPENAI_API_KEY },
+      body: formData,
+    });
+    if (!response.ok) {
+      const erro = await response.text();
+      console.error(`[audio] Erro Whisper Azure: ${response.status} - ${erro}`);
+      return null;
+    }
+    const data = await response.json();
+    const texto = data?.text?.trim();
+    if (texto) {
+      console.log(`[audio] Transcrito: "${texto.substring(0, 80)}${texto.length > 80 ? '...' : ''}"`);
+    }
+    return texto || null;
+  } catch (e) {
+    console.error('[audio] Erro ao transcrever:', e);
+    return null;
+  }
 }
 
 // =================== Helpers de mensagem (preservados da Evolution) ===================
