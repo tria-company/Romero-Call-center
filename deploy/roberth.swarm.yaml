@@ -37,10 +37,11 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=COLAR_AQUI_SERVICE_ROLE_KEY
       - SUPABASE_DB_URL=postgresql://postgres.COLAR_AQUI_PROJECT_ID:COLAR_AQUI_DB_PASSWORD_URL_ENCODED@aws-1-us-east-1.pooler.supabase.com:6543/postgres
 
-      ## 🛒 Checkout (Roberth Resende — landing serve Caminho da Rainha + Bolha RR)
-      ## A landing apresenta os 2 produtos. utm_term=caminho|bolha grava qual a Sofia recomendou.
+      ## 🛒 Checkout (Kiwify) — 1 URL por produto
+      - CHECKOUT_URL_CAMINHO=https://pay.kiwify.com.br/EEs9ePL
+      - CHECKOUT_URL_BOLHA=https://pay.kiwify.com.br/yCZ5TDa
+      # CHECKOUT_URL_PRINCIPAL: fallback legado (se as duas acima estiverem vazias)
       - CHECKOUT_URL_PRINCIPAL=https://roberthresende.com.br/checkout-rainha
-      # - CHECKOUT_URL_ORDERBUMP=  # deprecated, nao usado mais (URL unica pros 2 produtos)
       - CAMPANHA_NOME=lancamento_2026_q2
 
       ## 👥 Grupo de suporte (handoff humano)

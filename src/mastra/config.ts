@@ -37,7 +37,15 @@ export const AZURE_OPENAI_DEPLOYMENT_EMBEDDING = process.env.AZURE_OPENAI_DEPLOY
 // Mesmo endpoint /audio/transcriptions, deployment diferente.
 export const AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO = process.env.AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO || 'gpt-4o-transcribe-diarize';
 
-// Checkout (Kiwify/Eduzz/Cakto/...) — definir no briefing qual plataforma e qual URL
+// Checkout — 2 URLs Kiwify, uma por produto.
+// Sofia recomenda UM produto via decision tree e a tool enviar-checkout
+// escolhe a URL com base no parametro `produto`.
+//   - CHECKOUT_URL_CAMINHO: Caminho da Rainha (R$ 1.997)
+//   - CHECKOUT_URL_BOLHA:   Bolha RR (R$ 2.997)
+// CHECKOUT_URL_PRINCIPAL e CHECKOUT_URL_ORDERBUMP ficam por compatibilidade
+// como fallback (se as ENVs especificas estiverem vazias, cai pra essas).
+export const CHECKOUT_URL_CAMINHO = process.env.CHECKOUT_URL_CAMINHO || '';
+export const CHECKOUT_URL_BOLHA = process.env.CHECKOUT_URL_BOLHA || '';
 export const CHECKOUT_URL_PRINCIPAL = process.env.CHECKOUT_URL_PRINCIPAL || '';
 export const CHECKOUT_URL_ORDERBUMP = process.env.CHECKOUT_URL_ORDERBUMP || '';
 

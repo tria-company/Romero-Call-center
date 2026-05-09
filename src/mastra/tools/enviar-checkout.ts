@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { enviarMensagem } from '../ghl';
 import { getSessao } from '../sessao';
 import { salvarMensagem, atualizarConversa } from '../supabase';
-import { CHECKOUT_URL_PRINCIPAL } from '../config';
+import { CHECKOUT_URL_CAMINHO, CHECKOUT_URL_BOLHA, CHECKOUT_URL_PRINCIPAL } from '../config';
 
 export const enviarCheckout = createTool({
   id: 'enviar-checkout',
@@ -18,17 +18,17 @@ export const enviarCheckout = createTool({
     linkEnviado: z.string(),
   }),
   execute: async ({ telefone, motivoFechamento, produto }) => {
-    if (!CHECKOUT_URL_PRINCIPAL) {
-      console.error('[enviar-checkout] CHECKOUT_URL_PRINCIPAL nao configurada no .env');
+    // Cada produto tem URL Kiwify propria. Fallback: CHECKOUT_URL_PRINCIPAL
+    // (legado — se as ENVs especificas nao estiverem setadas, cai aqui).
+    const urlPorProduto = produto === 'caminho' ? CHECKOUT_URL_CAMINHO : CHECKOUT_URL_BOLHA;
+    const linkFinal = urlPorProduto || CHECKOUT_URL_PRINCIPAL;
+    if (!linkFinal) {
+      console.error(`[enviar-checkout] URL nao configurada pro produto "${produto}" (CHECKOUT_URL_${produto.toUpperCase()} ou CHECKOUT_URL_PRINCIPAL)`);
       return { sucesso: false, linkEnviado: '' };
     }
 
     const sessao = await getSessao(telefone);
     const conversaId = sessao?.conversaId || '';
-
-    // Link puro, sem UTMs. Rastreio de produto recomendado fica em
-    // oferta_enviada na tabela conversations_roberth (dashboard agrega de la).
-    const linkFinal = CHECKOUT_URL_PRINCIPAL;
 
     // Envia APENAS o link puro. A frase de transicao (ex: "fechado, vou te
     // mandar o link agora") e enviada pelo proprio agent.generate() como
