@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { enviarMensagem } from '../ghl';
 import { getSessao } from '../sessao';
 import { salvarMensagem, atualizarConversa } from '../supabase';
-import { CHECKOUT_URL_PRINCIPAL, CAMPANHA_NOME } from '../config';
+import { CHECKOUT_URL_PRINCIPAL } from '../config';
 
 export const enviarCheckout = createTool({
   id: 'enviar-checkout',
@@ -11,7 +11,7 @@ export const enviarCheckout = createTool({
   inputSchema: z.object({
     telefone: z.string().describe('Telefone do lead'),
     motivoFechamento: z.string().describe('Resumo curto do que destravou a venda (ex: lead solteira, padrao reconhecido, urgencia agora)'),
-    produto: z.enum(['caminho', 'bolha']).describe('Qual produto foi recomendado: "caminho" (Caminho da Rainha, R$ 1.997) ou "bolha" (Bolha RR, R$ 2.997). A landing aceita os dois mas o utm_term grava qual a Sofia recomendou pra Roberth ver no analytics.'),
+    produto: z.enum(['caminho', 'bolha']).describe('Qual produto foi recomendado: "caminho" (Caminho da Rainha, R$ 1.997) ou "bolha" (Bolha RR, R$ 2.997). Usado pra rastreio interno (oferta_enviada na conversa) — nao vai como UTM no link.'),
   }),
   outputSchema: z.object({
     sucesso: z.boolean(),
@@ -26,16 +26,9 @@ export const enviarCheckout = createTool({
     const sessao = await getSessao(telefone);
     const conversaId = sessao?.conversaId || '';
 
-    // Anexa UTM ao link para Roberth conseguir medir conversao por canal +
-    // produto recomendado (utm_term). Os 2 produtos compartilham a mesma URL
-    // de checkout — a landing apresenta os dois e a lead escolhe la.
-    const url = new URL(CHECKOUT_URL_PRINCIPAL);
-    url.searchParams.set('utm_source', 'whatsapp');
-    url.searchParams.set('utm_medium', 'agente-ia');
-    url.searchParams.set('utm_campaign', CAMPANHA_NOME);
-    url.searchParams.set('utm_term', produto);
-    url.searchParams.set('utm_content', conversaId || telefone);
-    const linkFinal = url.toString();
+    // Link puro, sem UTMs. Rastreio de produto recomendado fica em
+    // oferta_enviada na tabela conversations_roberth (dashboard agrega de la).
+    const linkFinal = CHECKOUT_URL_PRINCIPAL;
 
     // Envia APENAS o link puro. A frase de transicao (ex: "fechado, vou te
     // mandar o link agora") e enviada pelo proprio agent.generate() como

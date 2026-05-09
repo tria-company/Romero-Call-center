@@ -26,7 +26,7 @@ PRD e **incremental e dinamico** (briefing → PRD → UX → arquitetura → hi
 
 ## Boundaries
 
-- **Nunca** enviar link de checkout colado no texto — sempre via tool `enviar-checkout` (faz UTM + log).
+- **Nunca** enviar link de checkout colado no texto — sempre via tool `enviar-checkout` (registra no banco e respeita o filtro de URL).
 - **Nunca** inventar preco, prazo, bonus, desconto — se nao esta no `01_prd.md`/`02_ux-spec.md`, nao existe.
 - **Nunca** registrar agentes/tools fora do `src/mastra/index.ts`.
 - **Sempre** rodar `npm run build` antes de commitar para verificar compilacao.
