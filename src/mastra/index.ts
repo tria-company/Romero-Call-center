@@ -162,8 +162,18 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
       }
     }
   } catch (erro) {
-    console.error('[WhatsApp] Erro ao processar mensagem:', erro);
-    await enviarMensagem(numero, 'Tive um problema rapido aqui. Voce pode reenviar a ultima mensagem?');
+    // NAO enviar mensagem visivel ao lead em caso de erro — antes mandavamos
+    // 'Tive um problema rapido aqui. Voce pode reenviar a ultima mensagem?',
+    // mas isso virava loop infinito visivel quando o erro era persistente
+    // (ex: timeout repetido no Azure OpenAI sob carga). Comprovado nos
+    // relatorios do Teste 4 (ClickUp 868jjn1f4): 6 dos 9 cenarios reprovados
+    // tinham loops dessa frase.
+    //
+    // Comportamento novo: silencio. Lead manda outra coisa, proxima tentativa
+    // tenta de novo. Se persistir, o scheduler de FUP (follow-up.ts) reabre
+    // a conversa em 1h com o agente operacional. Lead nunca ve mensagem de
+    // sistema confessando erro.
+    console.error('[WhatsApp] Erro ao processar mensagem (silencioso pro lead):', erro);
   }
 }
 
