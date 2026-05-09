@@ -1,9 +1,19 @@
 // Configuracao central — projeto Roberth (agente de WhatsApp vendedor de curso)
 
-// Evolution API (WhatsApp)
+// Evolution API — DEPRECATED. Substituido por GoHighLevel (ver GHL_*).
+// Mantido apenas pra rollback rapido se precisar.
 export const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL || 'http://localhost:8080';
 export const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 export const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE_NAME || 'roberth';
+
+// GoHighLevel (canal WhatsApp via API oficial Meta).
+// PIT (Private Integration Token): Settings -> Integrations -> Private Integrations.
+// Scopes minimos: conversations.write, conversations/message.write, contacts.readonly.
+export const GHL_PIT_TOKEN = process.env.GHL_PIT_TOKEN || '';
+// Versao da API GHL (LeadConnector). 2021-04-15 e a estavel default.
+export const GHL_API_VERSION = process.env.GHL_API_VERSION || '2021-04-15';
+// Tipo padrao de mensagem pra envio. Opcoes comuns: 'WhatsApp', 'SMS', 'Email', 'GMB', 'IG', 'FB'.
+export const GHL_DEFAULT_TYPE = process.env.GHL_DEFAULT_TYPE || 'WhatsApp';
 
 // OpenAI direto (deprecated — usar Azure abaixo). Mantido para rollback.
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';

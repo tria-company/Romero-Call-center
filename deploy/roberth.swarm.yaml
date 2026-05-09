@@ -19,10 +19,17 @@ services:
       - AZURE_OPENAI_DEPLOYMENT_EMBEDDING=text-embedding-3-large
       - AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO=gpt-4o-transcribe-diarize
 
-      ## 📲 Evolution API (WhatsApp)
-      - EVOLUTION_API_URL=https://evo.triacompany.com.br
-      - EVOLUTION_API_KEY=COLAR_AQUI_EVOLUTION_KEY
-      - EVOLUTION_INSTANCE_NAME=agente_test_01
+      ## 📲 GoHighLevel (canal WhatsApp via API oficial)
+      ## PIT: Settings -> Integrations -> Private Integrations
+      ## Scopes: conversations.write, conversations/message.write, contacts.readonly
+      - GHL_PIT_TOKEN=COLAR_AQUI_GHL_PIT_TOKEN
+      - GHL_API_VERSION=2021-04-15
+      - GHL_DEFAULT_TYPE=WhatsApp
+
+      ## 📲 Evolution API — DEPRECATED (rollback fallback)
+      # - EVOLUTION_API_URL=https://evo.triacompany.com.br
+      # - EVOLUTION_API_KEY=COLAR_AQUI_EVOLUTION_KEY
+      # - EVOLUTION_INSTANCE_NAME=agente_test_01
 
       ## 🗄️ Supabase
       - SUPABASE_URL=https://COLAR_AQUI_PROJECT_ID.supabase.co

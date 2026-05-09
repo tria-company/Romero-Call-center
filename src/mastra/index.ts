@@ -5,12 +5,21 @@ import { Observability, DefaultExporter, CloudExporter, SensitiveDataFilter } fr
 // Agente unico do projeto Roberth
 import { vendedorAgent } from './agents/vendedor';
 
-// Evolution API (WhatsApp)
-import { enviarMensagem, extrairNumero, extrairTexto, foiEnviadaPeloBot, ehMensagemAudio, baixarAudioBase64, transcreverAudio } from './evolution';
-import type { EvolutionWebhookPayload } from './evolution';
+// GoHighLevel (canal WhatsApp via API oficial). Substitui Evolution.
+import {
+  enviarMensagem,
+  extrairTelefone,
+  extrairContactId,
+  extrairTexto,
+  extrairNome,
+  ehMensagemAudio,
+  baixarAudioBase64,
+  transcreverAudio,
+} from './ghl';
+import type { GhlWebhookPayload } from './ghl';
 
 // Bloqueio de IA (quando humano assume)
-import { bloquearNumero, estaBloqueado, desbloquearNumero } from './bloqueio';
+import { estaBloqueado, desbloquearNumero } from './bloqueio';
 
 // Storage compartilhado (PostgreSQL/Supabase)
 import { pgStore } from './memoria';
@@ -275,46 +284,34 @@ export const mastra = new Mastra({
         },
       },
       {
+        // URL mantida (/api/webhook/evolution) pra nao precisar reconfigurar
+        // o GHL Workflow. O parser foi trocado pra formato GHL.
         path: '/api/webhook/evolution',
         method: 'POST',
         handler: async (c) => {
           try {
-            const payload = await c.req.json() as EvolutionWebhookPayload;
+            const payload = await c.req.json() as GhlWebhookPayload;
 
-            if (payload.event !== 'messages.upsert') {
-              return c.json({ status: 'ignorado' });
+            const numero = extrairTelefone(payload);
+            const ghlContactId = extrairContactId(payload);
+            const nome = extrairNome(payload);
+            let texto = extrairTexto(payload);
+
+            // Validacao basica do payload
+            if (!numero || !ghlContactId) {
+              console.warn('[GHL] payload sem telefone ou contact_id, ignorando:', JSON.stringify(payload).slice(0, 500));
+              return c.json({ status: 'payload invalido' });
             }
 
-            // Mensagem fromMe — descobre se foi humano ou bot
-            if (payload.data?.key?.fromMe) {
-              const remoteJid = payload.data.key.remoteJid;
-              if (remoteJid.endsWith('@g.us')) {
-                return c.json({ status: 'grupo ignorado' });
-              }
-              const messageId = payload.data.key.id;
-              if (messageId && !foiEnviadaPeloBot(messageId)) {
-                const numero = extrairNumero(remoteJid);
-                await bloquearNumero(numero);
-              }
-              return c.json({ status: 'fromMe processado' });
-            }
-
-            if (payload.data.key.remoteJid.endsWith('@g.us')) {
-              return c.json({ status: 'grupo ignorado' });
-            }
-
-            const numero = extrairNumero(payload.data.key.remoteJid);
-            const nome = payload.data.pushName || 'Não identificado';
-
+            // Bloqueio manual (humano assumiu via /api/desbloquear externo, ou
+            // futuramente via outro workflow do GHL marcando bloqueio).
             if (await estaBloqueado(numero)) {
-              console.log(`[WhatsApp] IA bloqueada para ${numero}, humano atendendo`);
+              console.log(`[GHL] IA bloqueada para ${numero}, humano atendendo`);
               return c.json({ status: 'bloqueado_humano' });
             }
 
-            let texto = extrairTexto(payload);
-
+            // Audio por enquanto desabilitado (stubs retornam false/null).
             if (!texto && ehMensagemAudio(payload)) {
-              console.log(`[WhatsApp] Audio recebido de ${nome} (${numero}), transcrevendo...`);
               const base64 = await baixarAudioBase64(payload);
               if (base64) {
                 const transcricao = await transcreverAudio(base64);
@@ -330,17 +327,32 @@ export const mastra = new Mastra({
               return c.json({ status: 'sem texto' });
             }
 
-            // Comando de reset de teste (#55555): apaga sessao, conversa, memoria
-            // e responde "memoria limpa" sem passar pelo agente.
+            // Garante que a sessao tem o ghlContactId em cache antes do buffer
+            // disparar processarMensagem. Sem isso, enviarMensagem nao consegue
+            // resolver o contactId no momento do envio.
+            try {
+              const sessaoExistente = await getSessao(numero);
+              if (!sessaoExistente) {
+                await criarSessao(numero, { nome, ghlContactId, agenteAtual: 'vendedor' });
+              } else if (sessaoExistente.ghlContactId !== ghlContactId) {
+                // Atualiza ghlContactId se mudou (raro, mas pra garantir consistencia)
+                const { atualizarSessao } = await import('./sessao');
+                await atualizarSessao(numero, { ghlContactId });
+              }
+            } catch (e) {
+              console.error('[GHL] erro ao garantir sessao com ghlContactId:', e);
+            }
+
+            // Comando de reset de teste (#55555).
             if (texto.trim() === COMANDO_RESET) {
-              console.log(`[WhatsApp] Comando ${COMANDO_RESET} recebido de ${numero}, resetando...`);
+              console.log(`[GHL] Comando ${COMANDO_RESET} recebido de ${numero}, resetando...`);
               const resultado = await resetarConversaTeste(numero);
               const status = resultado.erros.length === 0 ? 'memoria limpa, pode comecar de novo' : 'memoria limpa (alguns subitens falharam, ver logs)';
               await enviarMensagem(numero, `🧹 ${status}`);
               return c.json({ status: 'reset', ...resultado });
             }
 
-            console.log(`[WhatsApp] Mensagem de ${nome} (${numero}): ${texto}`);
+            console.log(`[GHL] Mensagem de ${nome} (${numero}, contact:${ghlContactId}): ${texto}`);
 
             adicionarAoBuffer(numero, texto, nome, (num, textoCompleto, nomeCliente) => {
               processarMensagem(mastra, num, textoCompleto, nomeCliente);
@@ -348,7 +360,7 @@ export const mastra = new Mastra({
 
             return c.json({ status: 'bufferizado' });
           } catch (erro) {
-            console.error('[WhatsApp] Erro no webhook:', erro);
+            console.error('[GHL] Erro no webhook:', erro);
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
           }
         },

@@ -20,6 +20,7 @@ export interface Sessao {
   customerId: string;
   conversaId: string;
   iniciadaEm: number;
+  ghlContactId?: string;      // ID do contato no GoHighLevel (necessario pra mandar mensagem via API)
 }
 
 const cache = new Map<string, Sessao>();
@@ -52,6 +53,7 @@ export async function getSessao(telefone: string): Promise<Sessao | undefined> {
     customerId: customer.id,
     conversaId: conversa.id,
     iniciadaEm: new Date(conversa.started_at).getTime(),
+    ghlContactId: (conversa.metadata as any)?.ghl_contact_id || undefined,
   };
 
   cache.set(telefone, sessao);
@@ -90,7 +92,15 @@ export async function criarSessao(telefone: string, dados: Partial<Sessao>): Pro
     customerId,
     conversaId,
     iniciadaEm: Date.now(),
+    ghlContactId: dados.ghlContactId,
   };
+
+  // Se chegou ghlContactId na criacao, persiste no metadata pra sobreviver reinicio
+  if (dados.ghlContactId && conversaId) {
+    await atualizarConversa(conversaId, {
+      metadata: JSON.stringify({ ghl_contact_id: dados.ghlContactId }),
+    });
+  }
 
   cache.set(telefone, sessao);
   console.log(`[sessao] Criada: ${telefone} → agente: ${sessao.agenteAtual} (conversa: ${conversaId || 'sem supabase'})`);
@@ -142,7 +152,11 @@ export async function atualizarSessao(telefone: string, dados: Partial<Sessao>):
 
   if (sessao.conversaId) {
     await atualizarConversa(sessao.conversaId, {
-      metadata: JSON.stringify({ interesse: sessao.interesse, email: sessao.email }),
+      metadata: JSON.stringify({
+        interesse: sessao.interesse,
+        email: sessao.email,
+        ghl_contact_id: sessao.ghlContactId,
+      }),
     });
   }
 

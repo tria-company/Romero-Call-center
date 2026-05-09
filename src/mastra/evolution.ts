@@ -1,3 +1,17 @@
+// ============================================================================
+// ⚠️  DEPRECATED — Substituido por src/mastra/ghl.ts (GoHighLevel API oficial)
+//
+// Este arquivo nao e mais importado por nenhum codigo de producao
+// (sessao.ts, index.ts, notificacoes.ts, follow-up.ts, dashboard.ts e tools/
+// importam de ./ghl agora).
+//
+// Mantido aqui apenas pra rollback rapido caso precisemos voltar pra
+// Evolution API (basta trocar imports de './ghl' pra './evolution' nos
+// arquivos acima e re-popular as envs EVOLUTION_*).
+//
+// Pode ser deletado em definitivo quando GHL estiver provadamente estavel.
+// ============================================================================
+//
 // Funcoes para enviar/receber mensagens via Evolution API
 
 import {

@@ -1,0 +1,266 @@
+// Integracao com GoHighLevel (GHL) — substitui evolution.ts.
+//
+// Webhook: GHL Workflow "Send Webhook" action manda payload com detalhes
+// do contato + custom data (body, attachments). O trigger do workflow
+// (configurado no GHL, ex: "Customer Replied") garante que so leads
+// disparam — nao precisamos detectar fromMe localmente.
+//
+// Envio: POST https://services.leadconnectorhq.com/conversations/messages
+// com Bearer PIT (Private Integration Token). O body precisa de contactId,
+// nao telefone — por isso a funcao enviarMensagem faz lookup interno.
+//
+// Limitacao: GHL nao envia para grupos WhatsApp. Notificacoes ao grupo
+// de suporte (SUPORTE_GRUPO_JID) sao logadas mas nao entregues. Pra
+// notificar o time, considere outro canal (Slack, email, ou SMS pra
+// numero pessoal de admin).
+
+import {
+  GHL_PIT_TOKEN,
+  GHL_API_VERSION,
+  GHL_DEFAULT_TYPE,
+} from './config';
+
+const GHL_BASE_URL = 'https://services.leadconnectorhq.com';
+
+// =================== Tipos ===================
+
+export interface GhlWebhookPayload {
+  contact_id?: string;
+  first_name?: string;
+  last_name?: string;
+  full_name?: string;
+  phone?: string;
+  email?: string;
+  tags?: string | string[];
+  country?: string;
+  date_created?: string;
+  contact_type?: string;
+  message?: { type?: number; body?: string };
+  customData?: { body?: string; attachments?: string; subject?: string };
+  location?: { id?: string; name?: string };
+  contact?: any;
+  attributionSource?: any;
+  workflow?: any;
+}
+
+// =================== Helpers de extracao do payload ===================
+
+/** Extrai telefone normalizado (apenas digitos) — remove '+' e nao-digitos. */
+export function extrairTelefone(payload: GhlWebhookPayload): string {
+  const phone = payload.phone || '';
+  return phone.replace(/[^\d]/g, '');
+}
+
+/** Retorna o contact_id do GHL (chave primaria pra envio de mensagem). */
+export function extrairContactId(payload: GhlWebhookPayload): string {
+  return payload.contact_id || '';
+}
+
+/** Texto da mensagem — prefere customData.body (mapeado no workflow), fallback message.body. */
+export function extrairTexto(payload: GhlWebhookPayload): string {
+  return (payload.customData?.body || payload.message?.body || '').trim();
+}
+
+/** Nome do contato — full_name > first_name > placeholder. */
+export function extrairNome(payload: GhlWebhookPayload): string {
+  return payload.full_name || payload.first_name || 'Não identificado';
+}
+
+// =================== Audio (desabilitado por enquanto) ===================
+// O webhook do GHL Workflow nao traz audio em base64 igual a Evolution.
+// Audio chegaria via attachment URL, exigindo download autenticado + transcricao.
+// Stubs abaixo mantem compat com o handler antigo no index.ts ate adaptarmos.
+
+export function ehMensagemAudio(_payload: GhlWebhookPayload): boolean {
+  return false;
+}
+export async function baixarAudioBase64(_payload: GhlWebhookPayload): Promise<string | null> {
+  return null;
+}
+export async function transcreverAudio(_base64: string): Promise<string | null> {
+  return null;
+}
+
+// =================== Helpers de mensagem (preservados da Evolution) ===================
+
+function ehMenu(texto: string): boolean {
+  const linhas = texto.split('\n');
+  const linhasNumeradas = linhas.filter(l => /^\s*(\d️⃣|\d+\s*[-–.)]\s)/.test(l.trim()));
+  return linhasNumeradas.length >= 2;
+}
+
+function quebrarMensagem(texto: string, limite: number = 90): string[] {
+  const textoLimpo = texto.trim();
+  if (textoLimpo.length === 0) return [];
+  if (textoLimpo.length <= limite) return [textoLimpo];
+  if (ehMenu(textoLimpo)) return [textoLimpo];
+
+  const linhas = textoLimpo.split('\n');
+  const partes: string[] = [];
+  let atual = '';
+
+  for (const linha of linhas) {
+    const separador = atual ? '\n' : '';
+    if ((atual + separador + linha).length <= limite) {
+      atual += separador + linha;
+    } else {
+      if (atual) partes.push(atual);
+      atual = linha;
+    }
+  }
+  if (atual) partes.push(atual);
+
+  return partes.map(p => p.trim()).filter(p => p.length > 0);
+}
+
+// Filtro de URL — defesa em profundidade contra Sofia colar link em texto.
+const URL_REGEX = /https?:\/\/\S+/gi;
+
+// =================== Lookup telefone -> contactId ===================
+// O resto do codigo (sessao, follow-up, tools) usa telefone como chave.
+// Pra mandar mensagem via GHL precisamos de contactId. Solucao:
+// 1. Sessao guarda ghlContactId quando webhook chega (em metadata.ghl_contact_id)
+// 2. enviarMensagem() resolve via getSessao(telefone)
+// 3. Fallback: API GHL /contacts/lookup?phoneNumber=...
+
+import { getSessao } from './sessao';
+
+async function buscarContactIdPorTelefone(telefone: string): Promise<string | null> {
+  // 1. Cache via sessao em memoria (rapido)
+  try {
+    const sessao = await getSessao(telefone);
+    if (sessao?.ghlContactId) return sessao.ghlContactId;
+  } catch {
+    // ignore — segue pra fallback
+  }
+
+  // 2. Fallback API: lookup por telefone E.164
+  if (!GHL_PIT_TOKEN) return null;
+  try {
+    const phoneE164 = telefone.startsWith('+') ? telefone : `+${telefone}`;
+    const url = `${GHL_BASE_URL}/contacts/lookup?phoneNumber=${encodeURIComponent(phoneE164)}`;
+    const res = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION,
+        'Accept': 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.warn(`[ghl] lookup contactId falhou (${res.status}):`, await res.text());
+      return null;
+    }
+    const data = await res.json();
+    return data?.contacts?.[0]?.id || data?.contact?.id || null;
+  } catch (e) {
+    console.error('[ghl] erro no lookup contactId:', e);
+    return null;
+  }
+}
+
+// =================== Envio ===================
+
+async function enviarMensagemUnica(contactId: string, texto: string): Promise<void> {
+  if (!GHL_PIT_TOKEN) {
+    console.warn(`[ghl] GHL_PIT_TOKEN nao configurado — mensagem ignorada: "${texto.slice(0, 80)}"`);
+    return;
+  }
+
+  // Pequeno delay pra simular humano (1-4s proporcional ao tamanho).
+  const delay = Math.min(Math.max(texto.length * 15, 1000), 4000);
+  await new Promise((resolve) => setTimeout(resolve, delay));
+
+  try {
+    const res = await fetch(`${GHL_BASE_URL}/conversations/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        type: GHL_DEFAULT_TYPE,
+        contactId,
+        message: texto,
+      }),
+    });
+    if (!res.ok) {
+      const erroBody = await res.text();
+      console.error(`[ghl] Erro ao enviar mensagem para ${contactId}: ${res.status} - ${erroBody}`);
+    }
+  } catch (e) {
+    console.error(`[ghl] Falha ao enviar mensagem para ${contactId}:`, e);
+  }
+}
+
+// Detecta se o "telefone" passado e na verdade um JID legacy do WhatsApp (grupo, broadcast)
+// GHL nao envia pra esses formatos. Ignora silenciosamente com log claro.
+function ehGrupoOuBroadcast(numero: string): boolean {
+  return numero.includes('@g.us') || numero.includes('@broadcast');
+}
+
+/**
+ * Envia mensagem de texto para um contato no GHL.
+ * Mantem mesma assinatura da Evolution pra nao quebrar callsites (sessao,
+ * follow-up, tools, etc). Internamente faz lookup telefone -> contactId.
+ *
+ * - quebrar:false envia como mensagem unica (era usado pra grupos no WhatsApp,
+ *   no GHL nao tem efeito porque GHL ja entrega como bloco unico).
+ * - permitirUrl:true so deve ser passado pela tool enviar-checkout.
+ */
+export async function enviarMensagem(
+  numero: string,
+  texto: string,
+  opcoes: { quebrar?: boolean; permitirUrl?: boolean } = {},
+): Promise<void> {
+  const { quebrar = true, permitirUrl = false } = opcoes;
+
+  // Notificacoes ao grupo de suporte (SUPORTE_GRUPO_JID) chegam aqui — GHL
+  // nao manda pra grupo, abortar com log explicativo.
+  if (ehGrupoOuBroadcast(numero)) {
+    console.warn(`[ghl] enviarMensagem para grupo/broadcast nao suportado (${numero}). Texto: "${texto.slice(0, 100)}". Considere outro canal pra notificacoes do time.`);
+    return;
+  }
+
+  let textoLimpo = texto.trim();
+
+  // Filtro de URL — mesma logica da Evolution.
+  if (!permitirUrl && URL_REGEX.test(textoLimpo)) {
+    const urlsDetectadas = textoLimpo.match(URL_REGEX);
+    console.warn(`[ghl] URL bloqueada na resposta do agente: ${urlsDetectadas?.join(', ')}`);
+    textoLimpo = textoLimpo.replace(URL_REGEX, '').replace(/\s+/g, ' ').trim();
+  }
+  if (textoLimpo.length === 0) return;
+
+  // Resolve contactId pra mandar via API.
+  const contactId = await buscarContactIdPorTelefone(numero);
+  if (!contactId) {
+    console.error(`[ghl] Nao foi possivel resolver contactId pra ${numero} — mensagem nao enviada. Verifique se o webhook chegou primeiro pra cache do contactId.`);
+    return;
+  }
+
+  const partes = quebrar ? quebrarMensagem(textoLimpo) : [textoLimpo];
+  for (const parte of partes) {
+    await enviarMensagemUnica(contactId, parte);
+  }
+}
+
+// =================== Compat: stubs do que vinha de evolution.ts ===================
+// Mantemos exports pra nao quebrar imports durante a transicao.
+
+/** Evolution detectava self-loop via fromMe. No GHL o workflow filtra na origem. */
+export function foiEnviadaPeloBot(_messageId: string): boolean {
+  return false;
+}
+
+/**
+ * Compat: extrairNumero aceitava JID legacy "5511...@s.whatsapp.net".
+ * No GHL recebemos o payload completo. Aceita ambos pra transicao tranquila.
+ */
+export function extrairNumero(payloadOuJid: any): string {
+  if (typeof payloadOuJid === 'string') {
+    return payloadOuJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace(/[^\d]/g, '');
+  }
+  return extrairTelefone(payloadOuJid as GhlWebhookPayload);
+}

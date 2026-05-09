@@ -2,8 +2,14 @@
 // Usado por:
 //  - handoff-humano (avisa que IA pausou e humano precisa assumir)
 //  - notificar-time (avisa o time mas IA continua atendendo)
+//
+// LIMITACAO no GHL: a API oficial nao envia pra grupos do WhatsApp. Se
+// SUPORTE_GRUPO_JID for um JID de grupo (formato @g.us, herdado da Evolution),
+// o aviso e logado mas nao chega no WhatsApp. Pra notificar o time hoje:
+// olhar logs do agente OU dashboard /api/dashboard (section "Erros do agente"
+// e tabela de Conversas). Pra futuro: trocar destino pra Slack/email/SMS.
 
-import { enviarMensagem } from './evolution';
+import { enviarMensagem } from './ghl';
 import { SUPORTE_GRUPO_JID } from './config';
 
 // Cache de idempotencia: rastreia (telefone, motivo) ja notificados pra
@@ -36,22 +42,36 @@ export function jaNotificouRecentemente(telefone: string, motivo: string): boole
 }
 
 /**
- * Envia uma mensagem (multi-linha) para o grupo de suporte configurado,
- * em UMA unica mensagem (sem quebra automatica) — assim o aviso aparece
- * coeso pro time, em vez de 4-6 balões separados no WhatsApp.
- * Retorna true se SUPORTE_GRUPO_JID estiver setado e o envio nao lancar.
- * Retorna false (no-op) se nao houver grupo configurado.
+ * "Envia" um aviso ao grupo de suporte. No GHL, mensagens 1:1 com leads
+ * funcionam normalmente, MAS grupos do WhatsApp nao sao suportados pela API
+ * oficial. Se SUPORTE_GRUPO_JID for um JID de grupo (legacy Evolution), o
+ * aviso e LOGADO de forma estruturada (pra leitura no docker logs ou
+ * dashboard), mas nao e entregue como mensagem.
+ *
+ * Quando o destino e um telefone valido (sem @g.us), o aviso e enviado
+ * normalmente via GHL.
+ *
+ * Retorna true se conseguiu logar/enviar; false se SUPORTE_GRUPO_JID nao
+ * estiver configurado.
  */
 export async function enviarAvisoAoSuporte(linhas: string[]): Promise<boolean> {
   if (!SUPORTE_GRUPO_JID) {
-    console.log('[notificacoes] SUPORTE_GRUPO_JID nao configurado, pulando aviso ao grupo');
+    console.log('[notificacoes] SUPORTE_GRUPO_JID nao configurado, pulando aviso');
     return false;
   }
+
+  const ehGrupo = SUPORTE_GRUPO_JID.includes('@g.us') || SUPORTE_GRUPO_JID.includes('@broadcast');
+  if (ehGrupo) {
+    // GHL nao manda pra grupo — log estruturado pra captura via dashboard/CI.
+    console.log('[notificacoes][grupo-skip]\n' + linhas.join('\n') + '\n[/notificacoes]');
+    return true;
+  }
+
   try {
     await enviarMensagem(SUPORTE_GRUPO_JID, linhas.join('\n'), { quebrar: false });
     return true;
   } catch (e) {
-    console.error('[notificacoes] Falha ao notificar grupo de suporte:', e);
+    console.error('[notificacoes] Falha ao notificar:', e);
     return false;
   }
 }
