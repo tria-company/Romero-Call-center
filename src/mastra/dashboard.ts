@@ -179,12 +179,50 @@ const HEAD_COMUM = `
     /* Animações sutis */
     @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     .pulse-dot { animation: pulse-dot 2s infinite; }
-    /* Mobile: tabela vira card */
+    /* Mobile: tabela vira card vertical */
     @media (max-width: 640px) {
       .mobile-card-table thead { display: none; }
-      .mobile-card-table tr { display: block; padding: 12px; border-radius: 12px; background: rgba(30,41,59,0.5); margin-bottom: 8px; }
-      .mobile-card-table td { display: flex; justify-content: space-between; padding: 4px 0; border: none; }
-      .mobile-card-table td::before { content: attr(data-label); font-weight: 600; color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+      .mobile-card-table tbody { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+      .mobile-card-table tr {
+        display: flex;
+        flex-direction: column;
+        padding: 12px;
+        border-radius: 12px;
+        background: rgba(30,41,59,0.6);
+        border: 1px solid rgba(51,65,85,0.5);
+        gap: 6px;
+      }
+      .mobile-card-table td {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        padding: 0;
+        border: none;
+        font-size: 13px;
+      }
+      .mobile-card-table td::before {
+        content: attr(data-label);
+        font-weight: 600;
+        color: #94a3b8;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        flex-shrink: 0;
+      }
+      /* Primeira coluna (Lead/Quando) ganha destaque */
+      .mobile-card-table tr td:first-child {
+        flex-direction: row;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(51,65,85,0.4);
+      }
+      .mobile-card-table tr td:first-child::before { display: none; }
+      /* Tap target maior nos links */
+      .mobile-card-table a { padding: 4px 0; min-height: 32px; display: flex; align-items: center; }
+    }
+    /* Desktop sm+: tap target padrao em links de tabela */
+    @media (min-width: 641px) {
+      .mobile-card-table a { display: inline-flex; align-items: center; }
     }
   </style>
 </head>
@@ -223,13 +261,13 @@ function gerarHTMLDashboard(dados: {
     { label: 'Total', n: conversoes.total, gradient: 'from-cyan-600 to-blue-700' },
   ];
   const cardsConversoes = conversoesItems.map((item) => `
-    <div class="relative overflow-hidden rounded-2xl bg-gradient-to-br ${item.gradient} p-4 sm:p-5 shadow-lg ring-1 ring-white/10">
-      <div class="flex items-center justify-between text-white/80 text-xs uppercase tracking-wider font-medium">
+    <div class="relative overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-br ${item.gradient} p-3 sm:p-5 shadow-lg ring-1 ring-white/10">
+      <div class="flex items-center justify-between text-white/80 text-[10px] sm:text-xs uppercase tracking-wider font-medium">
         <span>${item.label}</span>
         <span class="opacity-50">${ICON.bolt}</span>
       </div>
-      <div class="text-3xl sm:text-4xl font-bold text-white mt-2">${item.n}</div>
-      <div class="text-xs text-white/60 mt-1">checkouts enviados</div>
+      <div class="text-2xl sm:text-4xl font-bold text-white mt-1 sm:mt-2">${item.n}</div>
+      <div class="text-[10px] sm:text-xs text-white/60 mt-0.5 sm:mt-1">checkouts</div>
     </div>
   `).join('');
 
@@ -260,19 +298,45 @@ function gerarHTMLDashboard(dados: {
               </span>
             </td>
             <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Lead falou">${ultimaLead}</td>
-            <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Sofia falou">${ultimaSofia}</td>
+            <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Bot falou">${ultimaSofia}</td>
             <td class="px-3 sm:px-4 py-3 text-sm text-slate-400" data-label="Inatividade">${inativ}</td>
           </tr>
         `;
       }).join('');
 
-  // ----- Objecoes -----
-  const chipsObjecoes = Object.entries(objecoesPorCategoria).length === 0
-    ? '<span class="text-slate-500 text-sm italic">nenhuma registrada</span>'
-    : Object.entries(objecoesPorCategoria)
-        .sort(([, a], [, b]) => (b as number) - (a as number))
-        .map(([cat, n]) => `<span class="inline-flex items-center gap-1.5 bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30 px-3 py-1 rounded-full text-sm">${escapeHtml(cat)}<span class="font-bold">${n}</span></span>`)
-        .join(' ');
+  // ----- Objecoes — ranking visual com barras de progresso -----
+  const totalObjecoes = Object.values(objecoesPorCategoria).reduce((s, n) => s + (n as number), 0);
+  const rankingObjecoes = Object.entries(objecoesPorCategoria).length === 0
+    ? '<div class="text-slate-500 text-sm italic px-1 py-2">nenhuma registrada ainda</div>'
+    : `<div class="space-y-2 sm:space-y-2.5">${
+        Object.entries(objecoesPorCategoria)
+          .sort(([, a], [, b]) => (b as number) - (a as number))
+          .slice(0, 6)
+          .map(([cat, n], idx) => {
+            const pct = totalObjecoes > 0 ? Math.round((n as number) / totalObjecoes * 100) : 0;
+            // Top 1 mais vibrante, demais mais sutis pra destacar o lider
+            const corBarra = idx === 0
+              ? 'bg-gradient-to-r from-amber-400 to-orange-400'
+              : idx === 1
+              ? 'bg-amber-500/80'
+              : 'bg-amber-600/60';
+            const ranking = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `<span class="text-slate-500 mono">#${idx + 1}</span>`;
+            return `
+              <div class="flex items-center gap-2 sm:gap-3">
+                <div class="text-sm w-5 text-center shrink-0">${ranking}</div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-baseline justify-between mb-1 gap-2">
+                    <span class="text-sm font-medium text-amber-200 truncate">${escapeHtml(cat)}</span>
+                    <span class="text-xs text-slate-400 mono shrink-0"><span class="text-slate-200 font-bold">${n}</span> · ${pct}%</span>
+                  </div>
+                  <div class="h-1.5 sm:h-2 bg-slate-700/50 rounded-full overflow-hidden">
+                    <div class="h-full ${corBarra} rounded-full transition-all" style="width: ${pct}%"></div>
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join('')
+      }</div>`;
 
   const linhasObjecoes = objecoesRecentes.length === 0
     ? `<tr><td colspan="4" class="text-center text-slate-400 py-10">Nenhuma objeção registrada.</td></tr>`
@@ -285,19 +349,51 @@ function gerarHTMLDashboard(dados: {
       </tr>
     `).join('');
 
-  // ----- Erros -----
+  // ----- Erros — ranking visual com barras de progresso -----
   const corErroChip = (cod: string): string => {
     if (cod === 'content_filter') return 'bg-rose-500/15 text-rose-300 ring-rose-500/30';
     if (cod === 'timeout') return 'bg-orange-500/15 text-orange-300 ring-orange-500/30';
     if (cod === 'rate_limit') return 'bg-yellow-500/15 text-yellow-300 ring-yellow-500/30';
     return 'bg-slate-500/15 text-slate-300 ring-slate-500/30';
   };
-  const chipsErros = Object.entries(errosPorCodigo).length === 0
-    ? '<span class="inline-flex items-center gap-2 text-emerald-400 text-sm">'+ICON.check+' Sem erros nas últimas 24h</span>'
-    : Object.entries(errosPorCodigo)
-        .sort(([, a], [, b]) => (b as number) - (a as number))
-        .map(([cod, n]) => `<span class="inline-flex items-center gap-1.5 ${corErroChip(cod)} ring-1 px-3 py-1 rounded-full text-sm">${escapeHtml(cod)}<span class="font-bold">${n}</span></span>`)
-        .join(' ');
+  const corErroBarra = (cod: string): string => {
+    if (cod === 'content_filter') return 'bg-gradient-to-r from-rose-400 to-rose-600';
+    if (cod === 'timeout') return 'bg-gradient-to-r from-orange-400 to-orange-600';
+    if (cod === 'rate_limit') return 'bg-gradient-to-r from-yellow-400 to-amber-500';
+    return 'bg-slate-500';
+  };
+  const corErroTexto = (cod: string): string => {
+    if (cod === 'content_filter') return 'text-rose-200';
+    if (cod === 'timeout') return 'text-orange-200';
+    if (cod === 'rate_limit') return 'text-yellow-200';
+    return 'text-slate-200';
+  };
+  const totalErros = Object.values(errosPorCodigo).reduce((s, n) => s + (n as number), 0);
+  const rankingErros = Object.entries(errosPorCodigo).length === 0
+    ? '<div class="inline-flex items-center gap-2 text-emerald-400 text-sm px-1 py-2">'+ICON.check+' Sem erros nas últimas 24h</div>'
+    : `<div class="space-y-2 sm:space-y-2.5">${
+        Object.entries(errosPorCodigo)
+          .sort(([, a], [, b]) => (b as number) - (a as number))
+          .slice(0, 6)
+          .map(([cod, n], idx) => {
+            const pct = totalErros > 0 ? Math.round((n as number) / totalErros * 100) : 0;
+            const ranking = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `<span class="text-slate-500 mono">#${idx + 1}</span>`;
+            return `
+              <div class="flex items-center gap-2 sm:gap-3">
+                <div class="text-sm w-5 text-center shrink-0">${ranking}</div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-baseline justify-between mb-1 gap-2">
+                    <span class="text-sm font-medium ${corErroTexto(cod)} truncate">${escapeHtml(cod)}</span>
+                    <span class="text-xs text-slate-400 mono shrink-0"><span class="text-slate-200 font-bold">${n}</span> · ${pct}%</span>
+                  </div>
+                  <div class="h-1.5 sm:h-2 bg-slate-700/50 rounded-full overflow-hidden">
+                    <div class="h-full ${corErroBarra(cod)} rounded-full transition-all" style="width: ${pct}%"></div>
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join('')
+      }</div>`;
 
   const linhasErros = errosRecentes.length === 0
     ? `<tr><td colspan="4" class="text-center text-slate-400 py-10">Sem erros recentes 🎉</td></tr>`
@@ -312,43 +408,43 @@ function gerarHTMLDashboard(dados: {
 
   return `<!doctype html>
 <html lang="pt-BR">
-${HEAD_COMUM.replace('</head>', `<title>Dashboard — Sofia</title><meta http-equiv="refresh" content="30"></head>`)}
+${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title><meta http-equiv="refresh" content="30"></head>`)}
 <body class="min-h-screen bg-slate-900 text-slate-100" style="background-image: radial-gradient(circle at 0% 0%, rgba(16,185,129,0.08) 0%, transparent 50%), radial-gradient(circle at 100% 0%, rgba(59,130,246,0.05) 0%, transparent 50%);">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
+  <div class="max-w-7xl mx-auto px-3 sm:px-6 py-3 sm:py-6">
     <!-- Header sticky -->
-    <header class="sticky top-0 z-10 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 mb-6 glass border-b border-slate-700/50">
-      <div class="flex items-center justify-between flex-wrap gap-2">
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-xl">👑</div>
-          <div>
-            <h1 class="text-lg sm:text-xl font-bold tracking-tight">Sofia <span class="text-slate-400 font-normal">— MCR</span></h1>
-            <p class="text-xs text-slate-400">Dashboard de operação</p>
+    <header class="sticky top-0 z-10 -mx-3 sm:-mx-6 px-3 sm:px-6 py-3 sm:py-4 mb-5 sm:mb-6 glass border-b border-slate-700/50">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
+          <div class="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-lg sm:text-xl shrink-0">👑</div>
+          <div class="min-w-0">
+            <h1 class="text-base sm:text-xl font-bold tracking-tight truncate">Rei Delas</h1>
+            <p class="text-[11px] sm:text-xs text-slate-400 truncate">Dashboard · MCR</p>
           </div>
         </div>
-        <div class="flex items-center gap-2 text-xs text-slate-400 mono">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 pulse-dot"></span>
+        <div class="flex items-center gap-1.5 text-[11px] sm:text-xs text-slate-400 mono shrink-0">
+          <span class="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-emerald-400 pulse-dot"></span>
           ${agora}
         </div>
       </div>
     </header>
 
     <!-- Conversoes -->
-    <section class="mb-8">
+    <section class="mb-6 sm:mb-8">
       <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
-        ${ICON.bolt} Conversões <span class="text-slate-500 normal-case font-normal">(link enviado)</span>
+        ${ICON.bolt} Conversões <span class="text-slate-500 normal-case font-normal text-xs">(link enviado)</span>
       </h2>
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
         ${cardsConversoes}
       </div>
     </section>
 
     <!-- Conversas ativas -->
-    <section class="mb-8">
+    <section class="mb-6 sm:mb-8">
       <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
         ${ICON.chat} Conversas ativas
-        <span class="text-slate-500 normal-case font-normal">(${conversasAtivas.length})</span>
+        <span class="text-slate-500 normal-case font-normal text-xs">(${conversasAtivas.length})</span>
       </h2>
-      <div class="rounded-2xl ring-1 ring-slate-700/50 overflow-hidden bg-slate-800/40">
+      <div class="rounded-xl sm:rounded-2xl ring-1 ring-slate-700/50 overflow-hidden bg-slate-800/40">
         <div class="overflow-x-auto scrollbar-thin">
           <table class="w-full text-left mobile-card-table">
             <thead class="bg-slate-800/60 text-[10px] uppercase tracking-wider text-slate-400 hidden sm:table-header-group">
@@ -357,7 +453,7 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Sofia</title><meta http-eq
                 <th class="px-3 sm:px-4 py-3 font-medium">Telefone</th>
                 <th class="px-3 sm:px-4 py-3 font-medium">Status</th>
                 <th class="px-3 sm:px-4 py-3 font-medium">Lead falou</th>
-                <th class="px-3 sm:px-4 py-3 font-medium">Sofia falou</th>
+                <th class="px-3 sm:px-4 py-3 font-medium">Bot falou</th>
                 <th class="px-3 sm:px-4 py-3 font-medium">Inativ.</th>
               </tr>
             </thead>
@@ -368,11 +464,14 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Sofia</title><meta http-eq
     </section>
 
     <!-- Objecoes -->
-    <section class="mb-8">
+    <section class="mb-6 sm:mb-8">
       <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
         ${ICON.target} Objeções
+        ${totalObjecoes > 0 ? `<span class="text-slate-500 normal-case font-normal text-xs">${totalObjecoes} total</span>` : ''}
       </h2>
-      <div class="mb-3 flex flex-wrap gap-1.5">${chipsObjecoes}</div>
+      <div class="rounded-xl sm:rounded-2xl ring-1 ring-slate-700/50 bg-slate-800/40 p-3 sm:p-4 mb-3">
+        ${rankingObjecoes}
+      </div>
       <div class="rounded-2xl ring-1 ring-slate-700/50 overflow-hidden bg-slate-800/40">
         <div class="overflow-x-auto scrollbar-thin">
           <table class="w-full text-left mobile-card-table">
@@ -391,11 +490,13 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Sofia</title><meta http-eq
     </section>
 
     <!-- Erros -->
-    <section class="mb-8">
+    <section class="mb-6 sm:mb-8">
       <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
-        ${ICON.alert} Erros do agente <span class="text-slate-500 normal-case font-normal">(últimas 24h)</span>
+        ${ICON.alert} Erros do agente <span class="text-slate-500 normal-case font-normal text-xs">(últimas 24h${totalErros > 0 ? ` · ${totalErros} total` : ''})</span>
       </h2>
-      <div class="mb-3 flex flex-wrap gap-1.5">${chipsErros}</div>
+      <div class="rounded-xl sm:rounded-2xl ring-1 ring-slate-700/50 bg-slate-800/40 p-3 sm:p-4 mb-3">
+        ${rankingErros}
+      </div>
       <div class="rounded-2xl ring-1 ring-slate-700/50 overflow-hidden bg-slate-800/40">
         <div class="overflow-x-auto scrollbar-thin">
           <table class="w-full text-left mobile-card-table">
@@ -413,8 +514,8 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Sofia</title><meta http-eq
       </div>
     </section>
 
-    <footer class="text-center text-xs text-slate-500 mt-12 pb-6">
-      Auto-refresh em 30s · Sofia v3 · ${agora}
+    <footer class="text-center text-[11px] sm:text-xs text-slate-500 mt-8 sm:mt-12 pb-4 sm:pb-6">
+      Auto-refresh 30s · Rei Delas · ${agora}
     </footer>
   </div>
 </body>
@@ -492,7 +593,7 @@ function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
 
   return `<!doctype html>
 <html lang="pt-BR">
-${HEAD_COMUM.replace('</head>', `<title>${escapeHtml(nome)} — Sofia</title></head>`)}
+${HEAD_COMUM.replace('</head>', `<title>${escapeHtml(nome)} — Rei Delas</title></head>`)}
 <body class="min-h-screen bg-slate-900 text-slate-100" style="background-image: radial-gradient(circle at 50% 0%, rgba(16,185,129,0.08) 0%, transparent 50%);">
   <div class="max-w-3xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
     <!-- Top bar com voltar -->
