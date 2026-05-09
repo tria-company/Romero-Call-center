@@ -311,6 +311,24 @@ export const mastra = new Mastra({
               return c.json({ status: 'bloqueado_humano' });
             }
 
+            // Garante sessao com ghlContactId em cache ANTES de qualquer
+            // fallback que possa chamar enviarMensagem. Sem isso, mensagens
+            // de fallback (audio falhou, formato nao reconhecido) caem no
+            // /contacts/lookup que as vezes retorna 400 — e o lead nao
+            // recebe aviso nenhum. Cache em sessao resolve com 0 chamadas
+            // adicionais a API.
+            try {
+              const sessaoExistente = await getSessao(numero);
+              if (!sessaoExistente) {
+                await criarSessao(numero, { nome, ghlContactId, agenteAtual: 'vendedor' });
+              } else if (sessaoExistente.ghlContactId !== ghlContactId) {
+                const { atualizarSessao } = await import('./sessao');
+                await atualizarSessao(numero, { ghlContactId });
+              }
+            } catch (e) {
+              console.error('[GHL] erro ao garantir sessao com ghlContactId:', e);
+            }
+
             // Fallback: o Workflow GHL nao popula {{message.attachments}} pra
             // mensagens de audio. Quando body+attachments vierem vazios,
             // buscamos a ultima mensagem do contato direto via API GHL.
@@ -361,22 +379,6 @@ export const mastra = new Mastra({
                 await enviarMensagem(numero, MSG_AUDIO_FALHOU).catch((e) => console.error('[GHL] Falha ao enviar fallback de mensagem nao reconhecida:', e));
               }
               return c.json({ status: 'sem texto' });
-            }
-
-            // Garante que a sessao tem o ghlContactId em cache antes do buffer
-            // disparar processarMensagem. Sem isso, enviarMensagem nao consegue
-            // resolver o contactId no momento do envio.
-            try {
-              const sessaoExistente = await getSessao(numero);
-              if (!sessaoExistente) {
-                await criarSessao(numero, { nome, ghlContactId, agenteAtual: 'vendedor' });
-              } else if (sessaoExistente.ghlContactId !== ghlContactId) {
-                // Atualiza ghlContactId se mudou (raro, mas pra garantir consistencia)
-                const { atualizarSessao } = await import('./sessao');
-                await atualizarSessao(numero, { ghlContactId });
-              }
-            } catch (e) {
-              console.error('[GHL] erro ao garantir sessao com ghlContactId:', e);
             }
 
             // Comando de reset de teste (#55555).

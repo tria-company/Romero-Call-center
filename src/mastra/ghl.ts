@@ -87,8 +87,15 @@ export async function buscarUltimaMensagem(
   locationId?: string,
 ): Promise<UltimaMensagemGhl | null> {
   if (!GHL_PIT_TOKEN || !contactId) return null;
+
+  // Race condition observada em producao: webhook chega antes da mensagem
+  // estar persistida com content na API GHL — primeira chamada retorna
+  // body="" attachments=[] type=19. Retry com backoff curto cobre o gap.
+  const TENTATIVAS = 3;
+  const ESPERA_MS = [0, 1500, 3000]; // 0, 1.5s, 3s — total ~4.5s no pior caso
+
   try {
-    // 1. Buscar conversa mais recente do contato.
+    // 1. Buscar conversa mais recente do contato (1x — nao precisa retry).
     // /conversations/search aceita locationId obrigatorio em algumas contas.
     const params = new URLSearchParams({ contactId, limit: '1' });
     if (locationId) params.set('locationId', locationId);
@@ -111,34 +118,50 @@ export async function buscarUltimaMensagem(
       return null;
     }
 
-    // 2. Buscar a ultima mensagem da conversa.
-    const msgsUrl = `${GHL_BASE_URL}/conversations/${conversationId}/messages?limit=1`;
-    const msgsRes = await fetch(msgsUrl, {
-      headers: {
-        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
-        'Version': GHL_API_VERSION,
-        'Accept': 'application/json',
-      },
-    });
-    if (!msgsRes.ok) {
-      console.error(`[ghl][api] get messages falhou (${msgsRes.status}):`, await msgsRes.text());
-      return null;
-    }
-    const msgsData = await msgsRes.json();
-    // Estrutura: messages.messages[] OU messages[]
-    const lastMsg = msgsData?.messages?.messages?.[0] || msgsData?.messages?.[0] || msgsData?.[0];
-    if (!lastMsg) {
-      console.warn('[ghl][api] resposta sem mensagens:', JSON.stringify(msgsData).slice(0, 300));
-      return null;
-    }
+    // 2. Buscar a ultima mensagem com retry — so retenta se body+attachments vazios.
+    let ultimo: UltimaMensagemGhl | null = null;
+    for (let i = 0; i < TENTATIVAS; i++) {
+      if (ESPERA_MS[i] > 0) {
+        await new Promise((r) => setTimeout(r, ESPERA_MS[i]));
+      }
+      const msgsUrl = `${GHL_BASE_URL}/conversations/${conversationId}/messages?limit=1`;
+      const msgsRes = await fetch(msgsUrl, {
+        headers: {
+          'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+          'Version': GHL_API_VERSION,
+          'Accept': 'application/json',
+        },
+      });
+      if (!msgsRes.ok) {
+        console.error(`[ghl][api] get messages falhou (${msgsRes.status}):`, await msgsRes.text());
+        return null;
+      }
+      const msgsData = await msgsRes.json();
+      // Estrutura: messages.messages[] OU messages[]
+      const lastMsg = msgsData?.messages?.messages?.[0] || msgsData?.messages?.[0] || msgsData?.[0];
+      if (!lastMsg) {
+        console.warn('[ghl][api] resposta sem mensagens:', JSON.stringify(msgsData).slice(0, 300));
+        return null;
+      }
 
-    const attachments = lastMsg.attachments || lastMsg.attachment || [];
-    return {
-      body: String(lastMsg.body || lastMsg.message || ''),
-      attachments: Array.isArray(attachments) ? attachments : (attachments ? [attachments] : []),
-      type: lastMsg.type ?? lastMsg.messageType ?? 'unknown',
-      messageType: String(lastMsg.messageType || lastMsg.type || ''),
-    };
+      const attachmentsRaw = lastMsg.attachments || lastMsg.attachment || [];
+      const attachmentsArr = Array.isArray(attachmentsRaw) ? attachmentsRaw : (attachmentsRaw ? [attachmentsRaw] : []);
+      ultimo = {
+        body: String(lastMsg.body || lastMsg.message || ''),
+        attachments: attachmentsArr,
+        type: lastMsg.type ?? lastMsg.messageType ?? 'unknown',
+        messageType: String(lastMsg.messageType || lastMsg.type || ''),
+      };
+
+      // Se conseguiu conteudo, retorna. Se body+attachments vazios, retenta.
+      if (ultimo.body || ultimo.attachments.length > 0) {
+        if (i > 0) console.log(`[ghl][api] msg recuperada na tentativa ${i + 1}/${TENTATIVAS}`);
+        return ultimo;
+      }
+      console.warn(`[ghl][api] tentativa ${i + 1}/${TENTATIVAS} retornou body+attachments vazios (type=${ultimo.type}), retentando...`);
+    }
+    // Esgotou tentativas — devolve o ultimo (vazio) pra caller decidir o que fazer.
+    return ultimo;
   } catch (e) {
     console.error('[ghl][api] erro ao buscar ultima mensagem:', e);
     return null;
