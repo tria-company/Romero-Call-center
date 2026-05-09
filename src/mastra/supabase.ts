@@ -565,6 +565,82 @@ export async function confirmarPagamento(dados: {
 }
 
 /**
+ * Funil de vendas — 5 etapas, total historico. Cada etapa retorna:
+ *   - n: quantos leads chegaram nessa etapa
+ *   - comFup: quantos desses receberam pelo menos 1 FUP automatico (1h/3h/5h ou handoff 24h)
+ *
+ * Etapas:
+ *   1. total           - todas as conversas iniciadas
+ *   2. engajou         - lead respondeu mais que so a primeira msg (last_lead_message_at > started_at)
+ *   3. comObjecao      - tem >= 1 row em objecoes_roberth (lead manifestou hesitacao real)
+ *   4. linkEnviado     - Sofia mandou checkout (link_enviado=true)
+ *   5. pago            - pagamento confirmado pelo Kiwify (pagamento_confirmado=true)
+ *
+ * Calculado em 2 queries paralelas (1 em conversations_roberth, 1 em objecoes_roberth).
+ */
+export type EtapaFunil = { n: number; comFup: number };
+export async function contarFunil(): Promise<{
+  total: EtapaFunil;
+  engajou: EtapaFunil;
+  comObjecao: EtapaFunil;
+  linkEnviado: EtapaFunil;
+  pago: EtapaFunil;
+}> {
+  const vazio: EtapaFunil = { n: 0, comFup: 0 };
+  if (!SUPABASE_URL) return { total: vazio, engajou: vazio, comObjecao: vazio, linkEnviado: vazio, pago: vazio };
+  try {
+    const [convRes, objRes] = await Promise.all([
+      fetchTimeout(
+        `${SUPABASE_URL}/rest/v1/conversations_roberth?select=id,started_at,last_lead_message_at,link_enviado,pagamento_confirmado,fup_1_sent_at,fup_3_sent_at,fup_5_sent_at,handoff_silencio_em&limit=10000`,
+        { headers: headers() },
+      ),
+      fetchTimeout(
+        `${SUPABASE_URL}/rest/v1/objecoes_roberth?select=conversation_id&limit=10000`,
+        { headers: headers() },
+      ),
+    ]);
+
+    type ConvRow = {
+      id: string;
+      started_at: string | null;
+      last_lead_message_at: string | null;
+      link_enviado: boolean | null;
+      pagamento_confirmado: boolean | null;
+      fup_1_sent_at: string | null;
+      fup_3_sent_at: string | null;
+      fup_5_sent_at: string | null;
+      handoff_silencio_em: string | null;
+    };
+
+    const conversas: ConvRow[] = convRes.ok ? await convRes.json() : [];
+    const objecoes = objRes.ok ? (await objRes.json()) as Array<{ conversation_id: string | null }> : [];
+
+    const temFup = (c: ConvRow) => Boolean(c.fup_1_sent_at || c.fup_3_sent_at || c.fup_5_sent_at || c.handoff_silencio_em);
+    const engajouFn = (c: ConvRow) => {
+      if (!c.last_lead_message_at || !c.started_at) return false;
+      return new Date(c.last_lead_message_at).getTime() > new Date(c.started_at).getTime();
+    };
+    const idsComObjecao = new Set(objecoes.map((o) => o.conversation_id).filter(Boolean));
+
+    const contar = (predicate: (c: ConvRow) => boolean): EtapaFunil => {
+      const matches = conversas.filter(predicate);
+      return { n: matches.length, comFup: matches.filter(temFup).length };
+    };
+
+    return {
+      total:        contar(() => true),
+      engajou:      contar(engajouFn),
+      comObjecao:   contar((c) => idsComObjecao.has(c.id)),
+      linkEnviado:  contar((c) => c.link_enviado === true),
+      pago:         contar((c) => c.pagamento_confirmado === true),
+    };
+  } catch (e) {
+    console.error('[supabase] contarFunil:', e);
+    return { total: vazio, engajou: vazio, comObjecao: vazio, linkEnviado: vazio, pago: vazio };
+  }
+}
+
+/**
  * Conta pagamentos confirmados em 4 janelas (espelha contarConversoes,
  * mas filtra pagamento_confirmado=true e janela em pagamento_confirmado_em).
  */

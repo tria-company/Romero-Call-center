@@ -17,6 +17,7 @@ import {
   buscarMensagensDaConversa,
   contarConversoes,
   contarPagamentosConfirmados,
+  contarFunil,
   buscarObjecoesRecentes,
   contarObjecoesPorCategoria,
   buscarErrosRecentes,
@@ -243,16 +244,18 @@ const ICON = {
 
 // =================== Dashboard principal ===================
 
+type EtapaFunilUI = { n: number; comFup: number };
 function gerarHTMLDashboard(dados: {
   conversasAtivas: any[];
   conversoes: { hoje: number; semana: number; mes: number; total: number };
   pagamentos: { hoje: number; semana: number; mes: number; total: number };
+  funil: { total: EtapaFunilUI; engajou: EtapaFunilUI; comObjecao: EtapaFunilUI; linkEnviado: EtapaFunilUI; pago: EtapaFunilUI };
   objecoesRecentes: any[];
   objecoesPorCategoria: Record<string, number>;
   errosRecentes: any[];
   errosPorCodigo: Record<string, number>;
 }): string {
-  const { conversasAtivas, conversoes, pagamentos, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
+  const { conversasAtivas, conversoes, pagamentos, funil, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
   const agora = new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   // ----- Cards de conversoes -----
@@ -290,6 +293,52 @@ function gerarHTMLDashboard(dados: {
       <div class="text-[10px] sm:text-xs text-white/60 mt-0.5 sm:mt-1">vendas pagas</div>
     </div>
   `).join('');
+
+  // ----- Funil de vendas (5 etapas com badge de FUP por etapa) -----
+  const totalTopo = funil.total.n || 1; // evita divisao por zero
+  const etapas = [
+    { label: 'Conversas',    icon: '💬', etapa: funil.total,        cor: 'from-emerald-500 to-emerald-600' },
+    { label: 'Engajou',      icon: '👋', etapa: funil.engajou,      cor: 'from-emerald-600 to-teal-600' },
+    { label: 'C/ objeção',   icon: '🎯', etapa: funil.comObjecao,   cor: 'from-teal-600 to-cyan-600' },
+    { label: 'Link enviado', icon: '🔗', etapa: funil.linkEnviado,  cor: 'from-cyan-600 to-blue-600' },
+    { label: 'Pago',         icon: '💰', etapa: funil.pago,         cor: 'from-green-600 to-emerald-700' },
+  ];
+  const conversaoTotal = funil.total.n > 0 ? Math.round((funil.pago.n / funil.total.n) * 100) : 0;
+
+  const linhasFunil = etapas.map((et, i) => {
+    const pct = funil.total.n > 0 ? (et.etapa.n / totalTopo) * 100 : 0;
+    const pctTopo = funil.total.n > 0 ? Math.round((et.etapa.n / funil.total.n) * 100) : 0;
+    const fupPctNaEtapa = et.etapa.n > 0 ? Math.round((et.etapa.comFup / et.etapa.n) * 100) : 0;
+    // Drop-off vs etapa anterior (em %)
+    let dropHtml = '';
+    if (i > 0) {
+      const anterior = etapas[i - 1].etapa.n;
+      const drop = anterior > 0 ? Math.round((1 - et.etapa.n / anterior) * 100) : 0;
+      const dropClass = drop >= 60 ? 'text-rose-400' : drop >= 35 ? 'text-amber-400' : 'text-slate-400';
+      dropHtml = `<div class="text-[10px] sm:text-xs ${dropClass} ml-[7.5rem] sm:ml-32 -mt-0.5 mb-1.5 mono">↓ ${drop}% drop</div>`;
+    }
+    return `
+      ${dropHtml}
+      <div class="flex items-center gap-2 sm:gap-3">
+        <div class="w-28 sm:w-32 shrink-0 flex items-center gap-1.5 sm:gap-2">
+          <span class="text-sm sm:text-base">${et.icon}</span>
+          <span class="text-xs sm:text-sm font-medium text-slate-200 truncate">${et.label}</span>
+        </div>
+        <div class="flex-1 bg-slate-700/30 rounded-lg overflow-hidden h-7 sm:h-8 relative ring-1 ring-slate-700/40">
+          <div class="bg-gradient-to-r ${et.cor} h-full transition-all" style="width: ${Math.max(pct, 2)}%"></div>
+          <div class="absolute inset-0 flex items-center justify-between px-2 sm:px-3 text-[11px] sm:text-xs">
+            <span class="font-mono font-semibold text-white drop-shadow">${et.etapa.n}</span>
+            <div class="flex items-center gap-1.5 sm:gap-2">
+              ${et.etapa.comFup > 0
+                ? `<span class="text-[9px] sm:text-[10px] bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/30 rounded px-1.5 py-0.5 font-mono whitespace-nowrap" title="Receberam pelo menos 1 follow-up automatico">⏰ ${et.etapa.comFup} FUP (${fupPctNaEtapa}%)</span>`
+                : ''}
+              <span class="text-white/80 font-mono">${pctTopo}%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
 
   // ----- Tabela de conversas ativas -----
   const linhasConversas = conversasAtivas.length === 0
@@ -465,6 +514,26 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title></head>`)
       </h2>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
         ${cardsPagamentos}
+      </div>
+    </section>
+
+    <!-- Funil de vendas -->
+    <section class="mb-6 sm:mb-8">
+      <h2 class="flex items-center justify-between gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+        <span class="flex items-center gap-2">
+          📊 Funil de vendas <span class="text-slate-500 normal-case font-normal text-xs">(historico total)</span>
+        </span>
+        <span class="text-xs normal-case font-normal text-slate-400 mono">
+          Conversao total: <span class="${conversaoTotal >= 10 ? 'text-emerald-300' : conversaoTotal >= 3 ? 'text-amber-300' : 'text-slate-300'} font-semibold">${conversaoTotal}%</span>
+        </span>
+      </h2>
+      <div class="rounded-xl sm:rounded-2xl bg-slate-800/40 ring-1 ring-slate-700/50 p-3 sm:p-5">
+        <div class="space-y-1.5 sm:space-y-2">
+          ${linhasFunil}
+        </div>
+        <div class="mt-3 sm:mt-4 pt-3 border-t border-slate-700/40 flex items-center gap-3 text-[10px] sm:text-xs text-slate-400">
+          <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-400/70"></span>⏰ FUP = lead recebeu 1+ follow-up automatico (1h/3h/5h ou handoff 24h)</span>
+        </div>
       </div>
     </section>
 
@@ -718,10 +787,11 @@ export async function handlerDashboard(c: any) {
   if (!verificarAuth(auth)) return respond401(c);
 
   try {
-    const [conversasAtivas, conversoes, pagamentos, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
+    const [conversasAtivas, conversoes, pagamentos, funil, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
       buscarConversasAtivas(50),
       contarConversoes(),
       contarPagamentosConfirmados(),
+      contarFunil(),
       buscarObjecoesRecentes(30),
       contarObjecoesPorCategoria(),
       buscarErrosRecentes(30),
@@ -731,6 +801,7 @@ export async function handlerDashboard(c: any) {
       conversasAtivas,
       conversoes,
       pagamentos,
+      funil,
       objecoesRecentes,
       objecoesPorCategoria,
       errosRecentes,
