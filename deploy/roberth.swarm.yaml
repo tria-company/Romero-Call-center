@@ -39,7 +39,7 @@ services:
 
       ## 🛒 Checkout (Kiwify) — 1 URL por produto
       - CHECKOUT_URL_CAMINHO=https://pay.kiwify.com.br/EEs9ePL
-      - CHECKOUT_URL_BOLHA=https://pay.kiwify.com.br/yCZ5TDa
+      - CHECKOUT_URL_BOLHA=https://pay.kiwify.com.br/ZeoCtAP
       # CHECKOUT_URL_PRINCIPAL: fallback legado (se as duas acima estiverem vazias)
       - CHECKOUT_URL_PRINCIPAL=https://roberthresende.com.br/checkout-rainha
       - CAMPANHA_NOME=lancamento_2026_q2
