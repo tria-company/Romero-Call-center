@@ -41,3 +41,8 @@ export const SUPORTE_GRUPO_JID = process.env.SUPORTE_GRUPO_JID || '';
 // Tempos
 export const JANELA_CONVERSA_FLUIDA = 2 * 60 * 60 * 1000; // 2h
 export const DURACAO_BLOQUEIO = 1 * 24 * 60 * 60 * 1000;  // 1 dia
+
+// Dashboard de metricas (Basic Auth em /api/dashboard).
+// Se ambos vazios, dashboard responde 503 (nao habilitado) — seguro por default.
+export const DASHBOARD_USER = process.env.DASHBOARD_USER || '';
+export const DASHBOARD_PASS = process.env.DASHBOARD_PASS || '';

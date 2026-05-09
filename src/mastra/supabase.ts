@@ -224,6 +224,215 @@ export async function registrarObjecao(dados: {
   } catch (e) { console.error('[supabase] Erro registrar objecao:', e); }
 }
 
+// ==================== DASHBOARD ====================
+// Helpers usados pelo handler do dashboard (src/mastra/dashboard.ts).
+// Cada visita do dashboard refaz essas queries (auto-refresh 30s) — manter
+// barato. Tudo via REST do PostgREST, mesmo padrao dos outros helpers.
+
+/**
+ * Lista conversas em atendimento ou aguardando humano, com customer embutido.
+ * Ordenada pela ultima mensagem (mais recente primeiro).
+ */
+export async function buscarConversasAtivas(limite: number = 50): Promise<any[]> {
+  if (!SUPABASE_URL) return [];
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?` +
+      `status=in.(em_atendimento,aguardando_humano)` +
+      `&ended_at=is.null` +
+      `&select=*,customers_roberth(nome,telefone)` +
+      `&order=data_ultima_mensagem.desc` +
+      `&limit=${limite}`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return [];
+    return (await res.json()) as any[];
+  } catch (e) {
+    console.error('[supabase] Erro buscarConversasAtivas:', e);
+    return [];
+  }
+}
+
+/**
+ * Busca uma conversa especifica pelo id, com customer embutido.
+ * Usado no header do viewer de conversa.
+ */
+export async function buscarConversaPorId(conversaId: string): Promise<any | null> {
+  if (!SUPABASE_URL || !conversaId) return null;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?id=eq.${conversaId}&select=*,customers_roberth(nome,telefone)&limit=1`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return null;
+    const data = await res.json() as any[];
+    return data[0] || null;
+  } catch (e) {
+    console.error('[supabase] Erro buscarConversaPorId:', e);
+    return null;
+  }
+}
+
+/**
+ * Lista todas as mensagens de uma conversa, em ordem cronologica (ASC).
+ * Inclui campos auxiliares pra renderizar badges no viewer (tool_name, tool_input, tool_output).
+ */
+export async function buscarMensagensDaConversa(conversaId: string): Promise<any[]> {
+  if (!SUPABASE_URL || !conversaId) return [];
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/messages_roberth?conversation_id=eq.${conversaId}&select=*&order=created_at.asc&limit=500`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return [];
+    return (await res.json()) as any[];
+  } catch (e) {
+    console.error('[supabase] Erro buscarMensagensDaConversa:', e);
+    return [];
+  }
+}
+
+/**
+ * Conta conversoes (link_enviado=true) em 4 janelas temporais.
+ * Faz 4 HEAD requests em paralelo com Prefer: count=exact pra contar sem trazer dados.
+ */
+export async function contarConversoes(): Promise<{ hoje: number; semana: number; mes: number; total: number }> {
+  if (!SUPABASE_URL) return { hoje: 0, semana: 0, mes: 0, total: 0 };
+  const agora = Date.now();
+  const inicioHoje = new Date(agora);
+  inicioHoje.setHours(0, 0, 0, 0);
+  const inicioSemana = new Date(agora - 7 * 24 * 60 * 60 * 1000);
+  const inicioMes = new Date(agora - 30 * 24 * 60 * 60 * 1000);
+
+  async function contar(filtroExtra: string): Promise<number> {
+    try {
+      const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?link_enviado=eq.true${filtroExtra}&select=id`;
+      const res = await fetch(url, {
+        method: 'HEAD',
+        headers: { ...headers(), 'Prefer': 'count=exact' },
+      });
+      if (!res.ok) return 0;
+      const range = res.headers.get('content-range') || '';
+      const match = range.match(/\/(\d+|\*)$/);
+      return match && match[1] !== '*' ? parseInt(match[1], 10) : 0;
+    } catch { return 0; }
+  }
+
+  const [hoje, semana, mes, total] = await Promise.all([
+    contar(`&link_enviado_em=gte.${inicioHoje.toISOString()}`),
+    contar(`&link_enviado_em=gte.${inicioSemana.toISOString()}`),
+    contar(`&link_enviado_em=gte.${inicioMes.toISOString()}`),
+    contar(''),
+  ]);
+  return { hoje, semana, mes, total };
+}
+
+/**
+ * Lista as N objecoes mais recentes (qualquer categoria) com texto + telefone.
+ */
+export async function buscarObjecoesRecentes(limite: number = 30): Promise<any[]> {
+  if (!SUPABASE_URL) return [];
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?select=*&order=created_at.desc&limit=${limite}`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return [];
+    return (await res.json()) as any[];
+  } catch (e) {
+    console.error('[supabase] Erro buscarObjecoesRecentes:', e);
+    return [];
+  }
+}
+
+/**
+ * Conta objecoes por categoria (todas as conversas, sem filtro temporal).
+ */
+export async function contarObjecoesPorCategoria(): Promise<Record<string, number>> {
+  if (!SUPABASE_URL) return {};
+  try {
+    // PostgREST nao tem GROUP BY direto. Solucao simples: traz max 1000
+    // objecoes (campo categoria so) e conta in-memory.
+    const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?select=categoria&limit=2000`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return {};
+    const data = await res.json() as Array<{ categoria: string }>;
+    const counts: Record<string, number> = {};
+    for (const o of data) {
+      counts[o.categoria] = (counts[o.categoria] || 0) + 1;
+    }
+    return counts;
+  } catch (e) {
+    console.error('[supabase] Erro contarObjecoesPorCategoria:', e);
+    return {};
+  }
+}
+
+/**
+ * Salva 1 erro do agente. Chamado pelo catch em index.ts apos timeout/falha
+ * do agent.generate. Falha silenciosa pra nao escalar (catch dentro do catch).
+ */
+export async function salvarErro(dados: {
+  telefone: string;
+  nome?: string;
+  error_message: string;
+  error_code?: string;
+  context?: any;
+  conversation_id?: string | null;
+  customer_id?: string | null;
+}): Promise<void> {
+  if (!SUPABASE_URL) return;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/errors_roberth`;
+    await fetch(url, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        telefone: dados.telefone,
+        nome: dados.nome || null,
+        error_message: dados.error_message,
+        error_code: dados.error_code || 'outro',
+        context: dados.context || null,
+        conversation_id: dados.conversation_id || null,
+        customer_id: dados.customer_id || null,
+      }),
+    });
+  } catch (e) {
+    console.error('[supabase] Erro salvarErro (silencioso):', e);
+  }
+}
+
+/**
+ * Lista os N erros mais recentes pra mostrar no dashboard.
+ */
+export async function buscarErrosRecentes(limite: number = 30): Promise<any[]> {
+  if (!SUPABASE_URL) return [];
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/errors_roberth?select=*&order=created_at.desc&limit=${limite}`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return [];
+    return (await res.json()) as any[];
+  } catch (e) {
+    console.error('[supabase] Erro buscarErrosRecentes:', e);
+    return [];
+  }
+}
+
+/**
+ * Conta erros por error_code desde uma data (default: ultimas 24h).
+ */
+export async function contarErrosPorCodigo(desdeISO?: string): Promise<Record<string, number>> {
+  if (!SUPABASE_URL) return {};
+  const desde = desdeISO || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/errors_roberth?select=error_code&created_at=gte.${desde}&limit=5000`;
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return {};
+    const data = await res.json() as Array<{ error_code: string }>;
+    const counts: Record<string, number> = {};
+    for (const e of data) {
+      const code = e.error_code || 'outro';
+      counts[code] = (counts[code] || 0) + 1;
+    }
+    return counts;
+  } catch (e) {
+    console.error('[supabase] Erro contarErrosPorCodigo:', e);
+    return {};
+  }
+}
+
 // ==================== RESET DE TESTE ====================
 // Helpers usados apenas pelo comando #55555 (resetar conversa pra testar).
 

@@ -22,7 +22,7 @@ import { getSessao, criarSessao, AGENTES_MAP, type Sessao } from './sessao';
 import { memoria } from './memoria';
 
 // Supabase (persistencia)
-import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia } from './supabase';
+import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro } from './supabase';
 
 // Buffer de mensagens (debounce 10s)
 import { adicionarAoBuffer } from './buffer';
@@ -35,6 +35,18 @@ import { iniciarFollowUpScheduler } from './follow-up';
 
 // Notificacao ao grupo de suporte em caso de erro
 import { enviarAvisoAoSuporte, jaNotificouRecentemente } from './notificacoes';
+
+// Dashboard de metricas + viewer de conversa
+import { handlerDashboard, handlerConversa } from './dashboard';
+
+// Classifica o tipo de erro do agent.generate pra metrica agregada no dashboard.
+function classificarErro(erro: any): string {
+  const msg = String(erro?.message || erro || '').toLowerCase();
+  if (msg.includes('content_filter') || msg.includes('responsibleai') || msg.includes('content management policy')) return 'content_filter';
+  if (msg.includes('timeout') || msg.includes('exceeded')) return 'timeout';
+  if (msg.includes('rate') || msg.includes('429')) return 'rate_limit';
+  return 'outro';
+}
 
 // Timeout e retry para agent.generate()
 const TIMEOUT_AGENTE = 60_000;
@@ -172,19 +184,35 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
     // relatorios do Teste 4 (ClickUp 868jjn1f4): 6 dos 9 cenarios reprovados
     // tinham loops dessa frase.
     //
-    // Comportamento novo: silencio pro lead + alerta no grupo de suporte
-    // pra que o time saiba e possa atender manualmente.
+    // Comportamento atual: silencio pro lead + alerta no grupo de suporte
+    // + persistencia em errors_roberth (pra dashboard agregar/listar).
     console.error('[WhatsApp] Erro ao processar mensagem (silencioso pro lead):', erro);
+
+    const mensagemErro = String((erro as Error)?.message || erro).slice(0, 500);
+    const errorCode = classificarErro(erro);
+
+    // Persistir no Supabase pra aparecer no dashboard (silencioso se Supabase falhar).
+    let sessaoAtual: any = null;
+    try { sessaoAtual = await getSessao(numero); } catch { /* ignore */ }
+    salvarErro({
+      telefone: numero,
+      nome: nome || sessaoAtual?.nome,
+      error_message: mensagemErro,
+      error_code: errorCode,
+      conversation_id: sessaoAtual?.conversaId || null,
+      customer_id: sessaoAtual?.customerId || null,
+      context: { texto_lead: texto?.slice(0, 200), agente_atual: sessaoAtual?.agenteAtual },
+    }).catch((e) => console.error('[supabase] Falha ao salvar erro:', e));
 
     // Notifica grupo de suporte (idempotencia de 1h por telefone — evita
     // virar spam no grupo se erro persistir turno apos turno).
     if (!jaNotificouRecentemente(numero, 'erro_agente')) {
-      const mensagemErro = String((erro as Error)?.message || erro).slice(0, 250);
       enviarAvisoAoSuporte([
         '🚨 *Erro no agente — atender o lead manualmente*',
         `Lead: ${nome || '(sem nome)'}`,
         `Telefone: ${numero}`,
-        `Erro: ${mensagemErro}`,
+        `Codigo: ${errorCode}`,
+        `Erro: ${mensagemErro.slice(0, 250)}`,
         '',
         'A IA falhou ao gerar resposta neste turno. Alguem do time precisa olhar.',
       ]).catch((e) => console.error('[notificacao] Falha ao avisar grupo:', e));
@@ -217,6 +245,18 @@ export const mastra = new Mastra({
   }),
   server: {
     apiRoutes: [
+      // Dashboard de metricas (Basic Auth via env DASHBOARD_USER/PASS)
+      {
+        path: '/api/dashboard',
+        method: 'GET',
+        handler: handlerDashboard,
+      },
+      // Viewer de uma conversa especifica em estilo WhatsApp
+      {
+        path: '/api/dashboard/conversa/:id',
+        method: 'GET',
+        handler: handlerConversa,
+      },
       // Reativa a IA manualmente quando o humano termina o atendimento
       {
         path: '/api/desbloquear',
