@@ -23,6 +23,7 @@ import {
   AZURE_OPENAI_API_VERSION,
   AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO,
 } from './config';
+import { fetchTimeout } from './http';
 
 const GHL_BASE_URL = 'https://services.leadconnectorhq.com';
 
@@ -100,7 +101,7 @@ export async function buscarUltimaMensagem(
     const params = new URLSearchParams({ contactId, limit: '1' });
     if (locationId) params.set('locationId', locationId);
     const searchUrl = `${GHL_BASE_URL}/conversations/search?${params.toString()}`;
-    const searchRes = await fetch(searchUrl, {
+    const searchRes = await fetchTimeout(searchUrl, {
       headers: {
         'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
         'Version': GHL_API_VERSION,
@@ -125,7 +126,7 @@ export async function buscarUltimaMensagem(
         await new Promise((r) => setTimeout(r, ESPERA_MS[i]));
       }
       const msgsUrl = `${GHL_BASE_URL}/conversations/${conversationId}/messages?limit=1`;
-      const msgsRes = await fetch(msgsUrl, {
+      const msgsRes = await fetchTimeout(msgsUrl, {
         headers: {
           'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
           'Version': GHL_API_VERSION,
@@ -225,10 +226,10 @@ export async function baixarAudioBase64(payload: GhlWebhookPayload): Promise<str
   try {
     // GHL signed URLs geralmente sao publicas (S3 presigned). Se vier 401/403,
     // tentamos com Bearer PIT como fallback.
-    let res = await fetch(audioUrl);
+    let res = await fetchTimeout(audioUrl);
     if ((res.status === 401 || res.status === 403) && GHL_PIT_TOKEN) {
       console.log(`[ghl][audio] retry com Bearer PIT (status ${res.status})`);
-      res = await fetch(audioUrl, {
+      res = await fetchTimeout(audioUrl, {
         headers: { 'Authorization': `Bearer ${GHL_PIT_TOKEN}`, 'Version': GHL_API_VERSION },
       });
     }
@@ -266,7 +267,7 @@ export async function transcreverAudio(base64Audio: string): Promise<string | nu
 
     const url = `https://${AZURE_OPENAI_RESOURCE_NAME}.cognitiveservices.azure.com/openai/deployments/${AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO}/audio/transcriptions?api-version=${AZURE_OPENAI_API_VERSION}`;
 
-    const response = await fetch(url, {
+    const response = await fetchTimeout(url, {
       method: 'POST',
       headers: { 'api-key': AZURE_OPENAI_API_KEY },
       body: formData,
@@ -346,7 +347,7 @@ async function buscarContactIdPorTelefone(telefone: string): Promise<string | nu
   try {
     const phoneE164 = telefone.startsWith('+') ? telefone : `+${telefone}`;
     const url = `${GHL_BASE_URL}/contacts/lookup?phoneNumber=${encodeURIComponent(phoneE164)}`;
-    const res = await fetch(url, {
+    const res = await fetchTimeout(url, {
       headers: {
         'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
         'Version': GHL_API_VERSION,
@@ -378,7 +379,7 @@ async function enviarMensagemUnica(contactId: string, texto: string): Promise<vo
   await new Promise((resolve) => setTimeout(resolve, delay));
 
   try {
-    const res = await fetch(`${GHL_BASE_URL}/conversations/messages`, {
+    const res = await fetchTimeout(`${GHL_BASE_URL}/conversations/messages`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${GHL_PIT_TOKEN}`,

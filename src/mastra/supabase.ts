@@ -1,5 +1,7 @@
 // Cliente Supabase reutilizavel para todas as operacoes de banco
 
+import { fetchTimeout } from './http';
+
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 // Usa service_role para operacoes server-side (bypassa RLS)
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -19,7 +21,7 @@ export async function buscarCustomerPorTelefone(telefone: string): Promise<any |
   if (!SUPABASE_URL) return null;
   try {
     const url = `${SUPABASE_URL}/rest/v1/customers_roberth?telefone=eq.${telefone}&select=*&limit=1`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json();
     return data[0] || null;
@@ -38,7 +40,7 @@ export async function upsertCustomer(dados: { telefone: string; nome?: string; e
     if (dados.nome) body.nome = dados.nome;
     if (dados.email) body.email = dados.email;
 
-    const res = await fetch(url, {
+    const res = await fetchTimeout(url, {
       method: 'POST',
       headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=representation' },
       body: JSON.stringify(body),
@@ -55,7 +57,7 @@ export async function criarConversa(customerId: string, _canal: string = 'whatsa
   if (!SUPABASE_URL) return null;
   try {
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth`;
-    const res = await fetch(url, {
+    const res = await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({
@@ -66,10 +68,45 @@ export async function criarConversa(customerId: string, _canal: string = 'whatsa
         data_ultima_mensagem: new Date().toISOString(),
       }),
     });
-    if (!res.ok) { console.error('[supabase] Erro criar conversa:', await res.text()); return null; }
+    if (!res.ok) {
+      const erroBody = await res.text();
+      // Codigo 23505 = unique_violation (uk_conv_ativa_por_customer da migration 04).
+      // Ocorre quando 2 webhooks pro mesmo lead chegam em paralelo: um cria a conversa,
+      // o outro tenta criar e bate na constraint. Caller deve tratar com obterOuCriarConversaAtiva.
+      const conflict = res.status === 409 || erroBody.includes('23505') || erroBody.includes('uk_conv_ativa');
+      if (conflict) {
+        console.warn(`[supabase] criar conversa: conflito unique (race) pra customer ${customerId} — caller deve buscar a existente`);
+      } else {
+        console.error('[supabase] Erro criar conversa:', erroBody);
+      }
+      return null;
+    }
     const data = await res.json();
     return data[0]?.id || null;
   } catch (e) { console.error('[supabase] Erro criar conversa:', e); return null; }
+}
+
+/**
+ * Idempotente: garante que existe (e retorna o id de) a conversa ativa do customer.
+ * Sequencia:
+ *   1. SELECT da ativa — caso comum, evita INSERT desnecessario.
+ *   2. INSERT — se nao existir.
+ *   3. SELECT de novo — se INSERT falhou por unique violation (race entre 2 webhooks).
+ *
+ * Resolve issue #1 do review de prod (race em criarSessao gerando conversations
+ * duplicadas com customer fragmentado).
+ */
+export async function obterOuCriarConversaAtiva(customerId: string): Promise<string | null> {
+  if (!customerId) return null;
+  const existente = await buscarConversaAtiva(customerId);
+  if (existente?.id) return existente.id;
+
+  const novoId = await criarConversa(customerId);
+  if (novoId) return novoId;
+
+  // Fallback pra race condition: criou em outro processo entre nosso SELECT e INSERT
+  const segundaTentativa = await buscarConversaAtiva(customerId);
+  return segundaTentativa?.id || null;
 }
 
 export async function buscarConversaAtiva(customerId: string): Promise<any | null> {
@@ -77,7 +114,7 @@ export async function buscarConversaAtiva(customerId: string): Promise<any | nul
   try {
     const limite24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&ended_at=is.null&data_ultima_mensagem=gte.${limite24h}&select=*&order=data_ultima_mensagem.desc&limit=1`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json();
     return data[0] || null;
@@ -91,7 +128,7 @@ export async function buscarConversaBloqueada(customerId: string): Promise<any |
   try {
     const limite3d = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&status=eq.aguardando_humano&ended_at=is.null&data_ultima_mensagem=gte.${limite3d}&select=*&order=data_ultima_mensagem.desc&limit=1`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json();
     return data[0] || null;
@@ -102,7 +139,7 @@ export async function atualizarConversa(conversaId: string, dados: Record<string
   if (!SUPABASE_URL) return;
   try {
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?id=eq.${conversaId}`;
-    await fetch(url, {
+    await fetchTimeout(url, {
       method: 'PATCH',
       headers: headers(),
       body: JSON.stringify({ ...dados, updated_at: new Date().toISOString(), data_ultima_mensagem: new Date().toISOString() }),
@@ -161,7 +198,7 @@ export async function buscarConversasParaFollowUp(): Promise<any[]> {
       `&last_assistant_message_at=lt.${limite1h}` +
       `&select=*,customers_roberth(telefone,nome)` +
       `&limit=200`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) {
       console.error('[supabase] buscarConversasParaFollowUp:', await res.text());
       return [];
@@ -195,7 +232,7 @@ export async function salvarMensagem(dados: {
   if (!SUPABASE_URL) return;
   try {
     const url = `${SUPABASE_URL}/rest/v1/messages_roberth`;
-    await fetch(url, {
+    await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify(dados),
@@ -216,7 +253,7 @@ export async function registrarObjecao(dados: {
   if (!SUPABASE_URL) return;
   try {
     const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth`;
-    await fetch(url, {
+    await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify(dados),
@@ -242,7 +279,7 @@ export async function buscarConversasAtivas(limite: number = 50): Promise<any[]>
       `&select=*,customers_roberth(nome,telefone)` +
       `&order=data_ultima_mensagem.desc` +
       `&limit=${limite}`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
     return (await res.json()) as any[];
   } catch (e) {
@@ -259,7 +296,7 @@ export async function buscarConversaPorId(conversaId: string): Promise<any | nul
   if (!SUPABASE_URL || !conversaId) return null;
   try {
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?id=eq.${conversaId}&select=*,customers_roberth(nome,telefone)&limit=1`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json() as any[];
     return data[0] || null;
@@ -277,7 +314,7 @@ export async function buscarMensagensDaConversa(conversaId: string): Promise<any
   if (!SUPABASE_URL || !conversaId) return [];
   try {
     const url = `${SUPABASE_URL}/rest/v1/messages_roberth?conversation_id=eq.${conversaId}&select=*&order=created_at.asc&limit=500`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
     return (await res.json()) as any[];
   } catch (e) {
@@ -301,7 +338,7 @@ export async function contarConversoes(): Promise<{ hoje: number; semana: number
   async function contar(filtroExtra: string): Promise<number> {
     try {
       const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?link_enviado=eq.true${filtroExtra}&select=id`;
-      const res = await fetch(url, {
+      const res = await fetchTimeout(url, {
         method: 'HEAD',
         headers: { ...headers(), 'Prefer': 'count=exact' },
       });
@@ -328,7 +365,7 @@ export async function buscarObjecoesRecentes(limite: number = 30): Promise<any[]
   if (!SUPABASE_URL) return [];
   try {
     const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?select=*&order=created_at.desc&limit=${limite}`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
     return (await res.json()) as any[];
   } catch (e) {
@@ -346,7 +383,7 @@ export async function contarObjecoesPorCategoria(): Promise<Record<string, numbe
     // PostgREST nao tem GROUP BY direto. Solucao simples: traz max 1000
     // objecoes (campo categoria so) e conta in-memory.
     const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?select=categoria&limit=2000`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return {};
     const data = await res.json() as Array<{ categoria: string }>;
     const counts: Record<string, number> = {};
@@ -376,7 +413,7 @@ export async function salvarErro(dados: {
   if (!SUPABASE_URL) return;
   try {
     const url = `${SUPABASE_URL}/rest/v1/errors_roberth`;
-    await fetch(url, {
+    await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({
@@ -401,7 +438,7 @@ export async function buscarErrosRecentes(limite: number = 30): Promise<any[]> {
   if (!SUPABASE_URL) return [];
   try {
     const url = `${SUPABASE_URL}/rest/v1/errors_roberth?select=*&order=created_at.desc&limit=${limite}`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
     return (await res.json()) as any[];
   } catch (e) {
@@ -418,7 +455,7 @@ export async function contarErrosPorCodigo(desdeISO?: string): Promise<Record<st
   const desde = desdeISO || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   try {
     const url = `${SUPABASE_URL}/rest/v1/errors_roberth?select=error_code&created_at=gte.${desde}&limit=5000`;
-    const res = await fetch(url, { headers: headers() });
+    const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return {};
     const data = await res.json() as Array<{ error_code: string }>;
     const counts: Record<string, number> = {};
@@ -443,7 +480,7 @@ export async function encerrarConversasDoCustomer(customerId: string): Promise<v
   if (!SUPABASE_URL || !customerId) return;
   try {
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&ended_at=is.null`;
-    await fetch(url, {
+    await fetchTimeout(url, {
       method: 'PATCH',
       headers: headers(),
       body: JSON.stringify({
@@ -463,14 +500,14 @@ export async function deletarMensagensDoCustomer(customerId: string): Promise<vo
   try {
     // Busca ids das conversas
     const urlConv = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&select=id`;
-    const resConv = await fetch(urlConv, { headers: headers() });
+    const resConv = await fetchTimeout(urlConv, { headers: headers() });
     if (!resConv.ok) return;
     const conversas = await resConv.json() as Array<{ id: string }>;
     if (conversas.length === 0) return;
     const ids = conversas.map(c => c.id).join(',');
 
     const url = `${SUPABASE_URL}/rest/v1/messages_roberth?conversation_id=in.(${ids})`;
-    await fetch(url, { method: 'DELETE', headers: headers() });
+    await fetchTimeout(url, { method: 'DELETE', headers: headers() });
   } catch (e) { console.error('[supabase] Erro deletar mensagens:', e); }
 }
 
@@ -481,6 +518,155 @@ export async function deletarObjecoesDoTelefone(telefone: string): Promise<void>
   if (!SUPABASE_URL) return;
   try {
     const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?telefone=eq.${telefone}`;
-    await fetch(url, { method: 'DELETE', headers: headers() });
+    await fetchTimeout(url, { method: 'DELETE', headers: headers() });
   } catch (e) { console.error('[supabase] Erro deletar objecoes:', e); }
+}
+
+// ==================== DEDUP DE WEBHOOK (Fix #4 do review de prod) ====================
+// Webhook do GHL Workflow as vezes dispara 2-3x por bug de rede ou retry
+// automatico. Sem dedup, isso vira respostas duplicadas pro lead.
+
+/**
+ * Tenta registrar o hash do webhook. Retorna:
+ *   true  → primeiro registro (deve processar a mensagem)
+ *   false → ja registrado nos ultimos minutos (descartar — webhook duplicado)
+ *
+ * Em caso de erro de Supabase (network, timeout), retorna true (fail-open) —
+ * preferimos resposta duplicada do que nao responder o lead.
+ */
+export async function tentarRegistrarWebhook(hash: string): Promise<boolean> {
+  if (!SUPABASE_URL || !hash) return true;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/webhook_dedup_roberth?on_conflict=hash`;
+    const res = await fetchTimeout(url, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=ignore-duplicates,return=representation' },
+      body: JSON.stringify({ hash }),
+    });
+    if (!res.ok) {
+      console.error('[supabase] tentarRegistrarWebhook falhou:', await res.text());
+      return true; // fail-open
+    }
+    const data = await res.json();
+    // Quando inserido novo: array com 1 row. Quando conflito (ja existe): array vazio.
+    return Array.isArray(data) && data.length > 0;
+  } catch (e) {
+    console.error('[supabase] tentarRegistrarWebhook erro:', e);
+    return true; // fail-open
+  }
+}
+
+/**
+ * Cleanup periodico — chamado pelo scheduler (follow-up.ts).
+ * Remove dedup hashes > 1h pra nao acumular.
+ */
+export async function limparWebhookDedupAntigos(): Promise<void> {
+  if (!SUPABASE_URL) return;
+  try {
+    const corte = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/webhook_dedup_roberth?processed_at=lt.${corte}`;
+    await fetchTimeout(url, { method: 'DELETE', headers: headers() });
+  } catch (e) { console.error('[supabase] limparWebhookDedupAntigos:', e); }
+}
+
+// ==================== BUFFER PERSISTENTE (Fix #2 do review de prod) ====================
+// Buffer em memoria perde mensagens em restart do container. Aqui persistimos
+// cada mensagem antes do debounce — worker recovery (em follow-up.ts) re-processa
+// orfas se o container que recebeu morrer antes do timer disparar.
+
+/**
+ * Insere uma mensagem no buffer persistente.
+ * Chamado em paralelo ao buffer in-memory (fire-and-forget).
+ */
+export async function inserirBufferRow(dados: {
+  telefone: string;
+  texto: string;
+  nome?: string;
+  processar_apos: string;
+}): Promise<void> {
+  if (!SUPABASE_URL) return;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth`;
+    await fetchTimeout(url, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        telefone: dados.telefone,
+        texto: dados.texto,
+        nome: dados.nome || null,
+        processar_apos: dados.processar_apos,
+      }),
+    });
+  } catch (e) { console.error('[supabase] inserirBufferRow:', e); }
+}
+
+/**
+ * Marca como processadas e devolve TODAS as mensagens pendentes do telefone
+ * cujo processar_apos ja passou. Concatena na ordem de criacao.
+ *
+ * Atomico via PATCH — se 2 processos baterem ao mesmo tempo, so 1 ganha as rows.
+ * O outro recebe array vazio e retorna null (nao processa de novo).
+ */
+export async function consumirBufferPendente(
+  telefone: string,
+): Promise<{ textoConcatenado: string; nome: string | null; quantidade: number } | null> {
+  if (!SUPABASE_URL || !telefone) return null;
+  try {
+    const agora = new Date().toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth?` +
+      `telefone=eq.${telefone}&processado=eq.false&processar_apos=lte.${agora}`;
+    const res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: { ...headers(), 'Prefer': 'return=representation' },
+      body: JSON.stringify({ processado: true, processado_em: agora }),
+    });
+    if (!res.ok) {
+      console.error('[supabase] consumirBufferPendente falhou:', await res.text());
+      return null;
+    }
+    const rows = await res.json() as Array<{ texto: string; nome: string | null; created_at: string }>;
+    if (rows.length === 0) return null;
+    rows.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    const textoConcatenado = rows.map(r => r.texto).join('\n');
+    const nome = rows[rows.length - 1]?.nome || null;
+    return { textoConcatenado, nome, quantidade: rows.length };
+  } catch (e) {
+    console.error('[supabase] consumirBufferPendente erro:', e);
+    return null;
+  }
+}
+
+/**
+ * Telefones com mensagens nao processadas e cujo processar_apos passou ha
+ * pelo menos `atrasoMinSec` segundos — provavelmente orfas (container que
+ * recebeu morreu antes do timer disparar).
+ *
+ * Worker recovery em follow-up.ts chama isso periodicamente.
+ */
+export async function buscarTelefonesComBufferOrfao(atrasoMinSec: number = 30): Promise<string[]> {
+  if (!SUPABASE_URL) return [];
+  try {
+    const corte = new Date(Date.now() - atrasoMinSec * 1000).toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth?` +
+      `processado=eq.false&processar_apos=lt.${corte}&select=telefone&limit=100`;
+    const res = await fetchTimeout(url, { headers: headers() });
+    if (!res.ok) return [];
+    const rows = await res.json() as Array<{ telefone: string }>;
+    return Array.from(new Set(rows.map(r => r.telefone)));
+  } catch (e) {
+    console.error('[supabase] buscarTelefonesComBufferOrfao:', e);
+    return [];
+  }
+}
+
+/**
+ * Cleanup: remove rows ja processadas ha mais de 30min.
+ */
+export async function limparBufferAntigo(): Promise<void> {
+  if (!SUPABASE_URL) return;
+  try {
+    const corte = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth?processado=eq.true&processado_em=lt.${corte}`;
+    await fetchTimeout(url, { method: 'DELETE', headers: headers() });
+  } catch (e) { console.error('[supabase] limparBufferAntigo:', e); }
 }

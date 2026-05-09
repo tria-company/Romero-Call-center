@@ -32,10 +32,13 @@ import { getSessao, criarSessao, AGENTES_MAP, type Sessao } from './sessao';
 import { memoria } from './memoria';
 
 // Supabase (persistencia)
-import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro } from './supabase';
+import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro, tentarRegistrarWebhook } from './supabase';
 
-// Buffer de mensagens (debounce 10s)
+// Buffer de mensagens (debounce 10s, com persistencia)
 import { adicionarAoBuffer } from './buffer';
+
+// crypto pra hash de dedup do webhook
+import { createHash } from 'crypto';
 
 // Reset de teste (#55555)
 import { resetarConversaTeste, COMANDO_RESET } from './reset';
@@ -304,6 +307,26 @@ export const mastra = new Mastra({
               return c.json({ status: 'payload invalido' });
             }
 
+            // Idempotencia: GHL Workflow as vezes dispara webhook 2-3x por bug
+            // de rede/retry automatico. Sem dedup, o mesmo payload viraria 2-3
+            // mensagens identicas pro lead. Hash inclui contact_id + conteudo
+            // (body + attachments + tipo) + bucket de tempo de 1min — webhooks
+            // duplicados na mesma janela sao descartados.
+            const conteudoBruto = JSON.stringify({
+              body: payload.customData?.body || payload.message?.body || '',
+              attachments: payload.customData?.attachments || '',
+              type: payload.message?.type ?? '',
+            });
+            const minBucket = Math.floor(Date.now() / 60_000);
+            const hashWebhook = createHash('sha1')
+              .update(`${ghlContactId}|${conteudoBruto}|${minBucket}`)
+              .digest('hex');
+            const ehNovoWebhook = await tentarRegistrarWebhook(hashWebhook);
+            if (!ehNovoWebhook) {
+              console.log(`[GHL] webhook duplicado descartado (hash=${hashWebhook.slice(0, 8)}, contact=${ghlContactId})`);
+              return c.json({ status: 'duplicado' });
+            }
+
             // Bloqueio manual (humano assumiu via /api/desbloquear externo, ou
             // futuramente via outro workflow do GHL marcando bloqueio).
             if (await estaBloqueado(numero)) {
@@ -407,8 +430,16 @@ export const mastra = new Mastra({
   },
 });
 
-// Scheduler de follow-ups (1h/3h/5h) e handoff por silencio (24h).
+// Scheduler de follow-ups (1h/3h/5h) e handoff por silencio (24h),
+// recovery do buffer persistente, e cleanups periodicos.
 // Roda em background no mesmo container — 1 replica Docker Swarm garante
 // que so 1 processo varre, sem risco de duplicacao. State no Supabase
 // sobrevive reinicio.
-iniciarFollowUpScheduler(mastra);
+//
+// O callback abaixo e o handler de buffer-recovery: se um container caiu
+// nos 10s de debounce do buffer (deixando msgs orfas no Supabase), outro
+// container pega e processa via essa funcao. Reusa o mesmo processarMensagem
+// do webhook handler.
+iniciarFollowUpScheduler(mastra, (numero, texto, nome) => {
+  return processarMensagem(mastra, numero, texto, nome);
+});

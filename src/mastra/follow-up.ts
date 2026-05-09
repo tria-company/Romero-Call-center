@@ -22,12 +22,18 @@ import {
   atualizarConversa,
   salvarMensagem,
   buscarConversasParaFollowUp,
+  buscarTelefonesComBufferOrfao,
+  consumirBufferPendente,
+  limparBufferAntigo,
+  limparWebhookDedupAntigos,
 } from './supabase';
 import { trocarAgente } from './sessao';
-import { enviarMensagem } from './evolution';
+import { enviarMensagem } from './ghl';
 import { enviarAvisoAoSuporte } from './notificacoes';
 
 const INTERVALO_SCAN = 5 * 60 * 1000;
+const INTERVALO_BUFFER_RECOVERY = 30 * 1000; // 30s — pega buffer orfao rapido
+const INTERVALO_CLEANUP = 30 * 60 * 1000;    // 30min — DELETE rows antigas
 const FUP_1H = 60 * 60 * 1000;
 const FUP_3H = 3 * FUP_1H;
 const FUP_5H = 5 * FUP_1H;
@@ -161,13 +167,72 @@ async function processarFollowUps(mastra: Mastra): Promise<void> {
   }
 }
 
-export function iniciarFollowUpScheduler(mastra: Mastra): void {
+// Callback que processa uma mensagem (mesma assinatura do processarMensagem
+// em index.ts). O worker de recovery do buffer chama isso quando encontra
+// mensagens orfas (container que recebeu o webhook morreu antes do timer).
+type ProcessarMensagemFn = (numero: string, texto: string, nome: string) => Promise<void> | void;
+
+/**
+ * Worker de recovery do buffer (Fix #2 do review de prod).
+ * Pega telefones com mensagens nao processadas ha > 30s — provavelmente
+ * orfas de container que caiu antes do setTimeout disparar. Para cada,
+ * consome (PATCH atomico) e chama o handler.
+ *
+ * Roda a cada 30s (INTERVALO_BUFFER_RECOVERY).
+ */
+async function processarBufferOrfao(processar: ProcessarMensagemFn): Promise<void> {
+  const telefones = await buscarTelefonesComBufferOrfao(30);
+  if (telefones.length === 0) return;
+
+  console.log(`[buffer-recovery] ${telefones.length} telefone(s) com buffer orfao, processando...`);
+
+  for (const telefone of telefones) {
+    try {
+      const result = await consumirBufferPendente(telefone);
+      if (!result || result.quantidade === 0) continue; // outro container ja pegou
+      console.log(`[buffer-recovery] ${telefone}: ${result.quantidade} msg(s) recuperadas`);
+      await processar(telefone, result.textoConcatenado, result.nome || '');
+    } catch (e) {
+      console.error(`[buffer-recovery] Erro processando ${telefone}:`, e);
+    }
+  }
+}
+
+/**
+ * Cleanup periodico — DELETEs em tabelas que crescem (dedup, buffer processado).
+ * Roda a cada 30min pra nao deixar lixo acumular.
+ */
+async function executarCleanups(): Promise<void> {
+  await Promise.all([
+    limparWebhookDedupAntigos().catch((e) => console.error('[cleanup] dedup:', e)),
+    limparBufferAntigo().catch((e) => console.error('[cleanup] buffer:', e)),
+  ]);
+}
+
+export function iniciarFollowUpScheduler(
+  mastra: Mastra,
+  processarMensagem?: ProcessarMensagemFn,
+): void {
   setInterval(() => {
     processarFollowUps(mastra).catch((e) =>
       console.error('[follow-up] Erro na varredura:', e),
     );
   }, INTERVALO_SCAN);
+
+  if (processarMensagem) {
+    setInterval(() => {
+      processarBufferOrfao(processarMensagem).catch((e) =>
+        console.error('[buffer-recovery] Erro na varredura:', e),
+      );
+    }, INTERVALO_BUFFER_RECOVERY);
+    console.log(`[buffer-recovery] Worker ativo (scan a cada ${INTERVALO_BUFFER_RECOVERY / 1000}s)`);
+  }
+
+  setInterval(() => {
+    executarCleanups().catch((e) => console.error('[cleanup] Erro:', e));
+  }, INTERVALO_CLEANUP);
+
   console.log(
-    `[follow-up] Scheduler ativo (scan a cada ${INTERVALO_SCAN / 60000}min)`,
+    `[follow-up] Scheduler ativo (scan FUP a cada ${INTERVALO_SCAN / 60000}min, cleanup a cada ${INTERVALO_CLEANUP / 60000}min)`,
   );
 }

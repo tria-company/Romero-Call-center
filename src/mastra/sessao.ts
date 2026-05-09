@@ -6,7 +6,7 @@ import {
   buscarCustomerPorTelefone,
   upsertCustomer,
   buscarConversaAtiva,
-  criarConversa,
+  obterOuCriarConversaAtiva,
   atualizarConversa,
 } from './supabase';
 import { JANELA_CONVERSA_FLUIDA } from './config';
@@ -79,7 +79,11 @@ export async function criarSessao(telefone: string, dados: Partial<Sessao>): Pro
 
   let conversaId = '';
   if (customerId) {
-    const id = await criarConversa(customerId, 'whatsapp');
+    // Idempotente: se ja existe conversa em_atendimento ativa, reusa.
+    // Garante uniqueness contra race entre 2 webhooks pro mesmo lead novo
+    // (a unique constraint uk_conv_ativa_por_customer rejeita o segundo INSERT
+    // e obterOuCriarConversaAtiva trata via fallback).
+    const id = await obterOuCriarConversaAtiva(customerId);
     if (id) conversaId = id;
   }
 
@@ -142,7 +146,7 @@ export async function atualizarSessao(telefone: string, dados: Partial<Sessao>):
     });
     if (customerId) {
       if (!tinhaCustomerId) {
-        const conversaId = await criarConversa(customerId, 'whatsapp');
+        const conversaId = await obterOuCriarConversaAtiva(customerId);
         if (conversaId) sessao.conversaId = conversaId;
       }
       sessao.customerId = customerId;
