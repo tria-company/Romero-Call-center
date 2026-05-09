@@ -329,6 +329,12 @@ export const mastra = new Mastra({
               }
             }
 
+            // Mensagem amigavel quando nao conseguimos entender (audio falhou
+            // OU formato nao reconhecido — sticker, imagem sem caption, etc).
+            // Idempotente em 1h pra nao virar spam se o lead mandar varios
+            // audios seguidos.
+            const MSG_AUDIO_FALHOU = 'oi! tá com muito barulho aqui e não consegui escutar direito 🙉 consegue digitar pra mim pra eu te responder?';
+
             // Audio: detecta URL de attachments, baixa, transcreve via Azure.
             if (!texto && ehMensagemAudio(payload)) {
               console.log(`[GHL] Audio recebido de ${nome} (${numero}), transcrevendo...`);
@@ -338,7 +344,9 @@ export const mastra = new Mastra({
                 if (transcricao) texto = transcricao;
               }
               if (!texto) {
-                await enviarMensagem(numero, 'Nao consegui entender o audio. Pode mandar em texto?');
+                if (!jaNotificouRecentemente(numero, 'audio_falhou')) {
+                  await enviarMensagem(numero, MSG_AUDIO_FALHOU).catch((e) => console.error('[GHL] Falha ao enviar fallback de audio:', e));
+                }
                 return c.json({ status: 'audio nao transcrito' });
               }
             }
@@ -349,6 +357,9 @@ export const mastra = new Mastra({
               console.log('[GHL][debug] mensagem sem texto apos todos fallbacks. customData:',
                 JSON.stringify(payload.customData),
                 '| message.type:', payload.message?.type);
+              if (!jaNotificouRecentemente(numero, 'audio_falhou')) {
+                await enviarMensagem(numero, MSG_AUDIO_FALHOU).catch((e) => console.error('[GHL] Falha ao enviar fallback de mensagem nao reconhecida:', e));
+              }
               return c.json({ status: 'sem texto' });
             }
 
