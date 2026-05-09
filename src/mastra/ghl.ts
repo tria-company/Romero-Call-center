@@ -70,10 +70,88 @@ export function extrairNome(payload: GhlWebhookPayload): string {
   return payload.full_name || payload.first_name || 'Não identificado';
 }
 
+// =================== Fallback API: buscar ultima mensagem ===================
+// O Workflow "Send Webhook" do GHL nao popula {{message.attachments}}/{{message.body}}
+// pra mensagens de audio do WhatsApp (vem vazio). Quando isso acontecer, buscamos
+// a ultima mensagem do contato direto via API pra recuperar attachments + body.
+
+interface UltimaMensagemGhl {
+  body: string;
+  attachments: string[];
+  type: number | string;
+  messageType: string;
+}
+
+export async function buscarUltimaMensagem(
+  contactId: string,
+  locationId?: string,
+): Promise<UltimaMensagemGhl | null> {
+  if (!GHL_PIT_TOKEN || !contactId) return null;
+  try {
+    // 1. Buscar conversa mais recente do contato.
+    // /conversations/search aceita locationId obrigatorio em algumas contas.
+    const params = new URLSearchParams({ contactId, limit: '1' });
+    if (locationId) params.set('locationId', locationId);
+    const searchUrl = `${GHL_BASE_URL}/conversations/search?${params.toString()}`;
+    const searchRes = await fetch(searchUrl, {
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION,
+        'Accept': 'application/json',
+      },
+    });
+    if (!searchRes.ok) {
+      console.error(`[ghl][api] search conversations falhou (${searchRes.status}):`, await searchRes.text());
+      return null;
+    }
+    const searchData = await searchRes.json();
+    const conversationId = searchData?.conversations?.[0]?.id;
+    if (!conversationId) {
+      console.warn('[ghl][api] nenhuma conversa encontrada pro contato', contactId);
+      return null;
+    }
+
+    // 2. Buscar a ultima mensagem da conversa.
+    const msgsUrl = `${GHL_BASE_URL}/conversations/${conversationId}/messages?limit=1`;
+    const msgsRes = await fetch(msgsUrl, {
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION,
+        'Accept': 'application/json',
+      },
+    });
+    if (!msgsRes.ok) {
+      console.error(`[ghl][api] get messages falhou (${msgsRes.status}):`, await msgsRes.text());
+      return null;
+    }
+    const msgsData = await msgsRes.json();
+    // Estrutura: messages.messages[] OU messages[]
+    const lastMsg = msgsData?.messages?.messages?.[0] || msgsData?.messages?.[0] || msgsData?.[0];
+    if (!lastMsg) {
+      console.warn('[ghl][api] resposta sem mensagens:', JSON.stringify(msgsData).slice(0, 300));
+      return null;
+    }
+
+    const attachments = lastMsg.attachments || lastMsg.attachment || [];
+    return {
+      body: String(lastMsg.body || lastMsg.message || ''),
+      attachments: Array.isArray(attachments) ? attachments : (attachments ? [attachments] : []),
+      type: lastMsg.type ?? lastMsg.messageType ?? 'unknown',
+      messageType: String(lastMsg.messageType || lastMsg.type || ''),
+    };
+  } catch (e) {
+    console.error('[ghl][api] erro ao buscar ultima mensagem:', e);
+    return null;
+  }
+}
+
 // =================== Audio ===================
 // GHL Workflow "Send Webhook" mapeou attachments={{message.attachments}}.
 // Quando o lead manda audio, attachments contem URL(s) signed (S3/CDN do GHL).
 // Lógica: detectar URL de audio -> baixar -> transcrever via Azure Whisper.
+//
+// IMPORTANTE: pro Workflow, attachments costuma vir vazio em msgs de audio.
+// O fallback `buscarUltimaMensagem` (acima) recupera via API direta.
 
 // Helper interno: extrai array de URLs do campo attachments (suporta varias formas).
 function extrairAttachmentUrls(payload: GhlWebhookPayload): string[] {

@@ -15,6 +15,7 @@ import {
   ehMensagemAudio,
   baixarAudioBase64,
   transcreverAudio,
+  buscarUltimaMensagem,
 } from './ghl';
 import type { GhlWebhookPayload } from './ghl';
 
@@ -310,6 +311,24 @@ export const mastra = new Mastra({
               return c.json({ status: 'bloqueado_humano' });
             }
 
+            // Fallback: o Workflow GHL nao popula {{message.attachments}} pra
+            // mensagens de audio. Quando body+attachments vierem vazios,
+            // buscamos a ultima mensagem do contato direto via API GHL.
+            if (!texto && !ehMensagemAudio(payload)) {
+              console.log(`[GHL] body+attachments vazios — buscando ultima msg via API pra ${ghlContactId}`);
+              const ultima = await buscarUltimaMensagem(ghlContactId, payload.location?.id);
+              if (ultima) {
+                console.log(`[GHL][api] msg recuperada. body="${ultima.body.slice(0,80)}" attachments=${JSON.stringify(ultima.attachments).slice(0,200)} type=${ultima.type}`);
+                if (ultima.body) {
+                  texto = ultima.body;
+                } else if (ultima.attachments.length > 0) {
+                  // Injeta attachments no payload pra fluir pelo path de audio
+                  payload.customData = payload.customData || {};
+                  payload.customData.attachments = ultima.attachments as any;
+                }
+              }
+            }
+
             // Audio: detecta URL de attachments, baixa, transcreve via Azure.
             if (!texto && ehMensagemAudio(payload)) {
               console.log(`[GHL] Audio recebido de ${nome} (${numero}), transcrevendo...`);
@@ -325,10 +344,9 @@ export const mastra = new Mastra({
             }
 
             if (!texto) {
-              // Diagnostico: log do customData pra ajudar a entender o formato
-              // de attachments do GHL quando body vier vazio. Util pra ajustar
-              // a regex de detecao de audio se algum formato escapar.
-              console.log('[GHL][debug] mensagem sem texto. customData:',
+              // Diagnostico final: payload completo e customData pra debug
+              // de formatos de attachment ainda nao tratados.
+              console.log('[GHL][debug] mensagem sem texto apos todos fallbacks. customData:',
                 JSON.stringify(payload.customData),
                 '| message.type:', payload.message?.type);
               return c.json({ status: 'sem texto' });
