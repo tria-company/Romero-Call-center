@@ -124,6 +124,51 @@ function payloadBase(overrides = {}) {
   checar('BANT=4: roteamento enviarMensagem=false', roteamento.stage === 'PERDIDO' && roteamento.enviarMensagem === false);
 }
 
+// ---- Caso 6: ticket pt-BR 'R$ 1.500' vira 1500 (nao 1.5) e NAO descarta por Ticket insuficiente ----
+{
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: 'R$ 1.500' }));
+  checar(`ticket pt-BR 'R$ 1.500': form.ticket=1500 (obtido ${form.ticket})`, form.ticket === 1500);
+
+  const resultado = filtro1Descarte(form);
+  checar("ticket pt-BR 'R$ 1.500': NAO descarta por Ticket insuficiente", !(resultado.descarta && resultado.motivo === 'Ticket insuficiente'));
+
+  const bant = scoreBant(form);
+  checar(`ticket pt-BR 'R$ 1.500': budget=3 (obtido ${bant.budget})`, bant.budget === 3);
+}
+
+// ---- Caso 7: ticket pt-BR com centavos '1.500,00' vira 1500 ----
+{
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: '1.500,00' }));
+  checar(`ticket pt-BR com centavos '1.500,00': form.ticket=1500 (obtido ${form.ticket})`, form.ticket === 1500);
+}
+
+// ---- Caso 8: lexico word-boundary — 'procurando' NAO descarta (nao e 'cura' isolada) ----
+{
+  const form = parseFormulario(payloadBase({
+    q07_ticket_medio: '900',
+    q14_maior_dificuldade: 'estou procurando uma forma de aplicar o metodo',
+  }));
+  const resultado = filtro1Descarte(form);
+  checar("lexico word-boundary 'procurando': descarta=false", resultado.descarta === false);
+
+  const roteamento = decidirRoteamento(form);
+  checar(
+    "lexico word-boundary 'procurando': roteamento nao e PERDIDO por lexico",
+    !(roteamento.stage === 'PERDIDO' && roteamento.motivo === 'Léxico incompatível'),
+  );
+}
+
+// ---- Caso 9: regressao — 'cura' isolada continua descartando ----
+{
+  const form = parseFormulario(payloadBase({
+    q07_ticket_medio: '900',
+    q14_maior_dificuldade: 'prometo cura para meus pacientes',
+  }));
+  const resultado = filtro1Descarte(form);
+  checar("lexico 'cura' isolada: descarta=true", resultado.descarta === true);
+  checar("lexico 'cura' isolada: motivo=Léxico incompatível", resultado.motivo === 'Léxico incompatível');
+}
+
 if (falhas.length > 0) {
   console.error('[smoke-bant] QUAL-01/02/03 FALHOU:');
   for (const f of falhas) {
