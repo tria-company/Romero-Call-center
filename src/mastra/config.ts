@@ -22,6 +22,10 @@ export const GHL_API_VERSION_V2 = process.env.GHL_API_VERSION_V2 || '2021-07-28'
 export const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || 'zEFpdSK1pMIC9d8aY4Lm';
 export const GHL_PIPELINE_ID = process.env.GHL_PIPELINE_ID || 'uVLzqVXjBjI7sACn3vKL'; // COMERCIAL USI
 export const GHL_CALENDAR_ID = process.env.GHL_CALENDAR_ID || 'nZ8n9QSZttjChj1CLwjC'; // Call Comercial USI (45min, Sidney)
+// Closers do overflow de agendamento: Sidnei primeiro, Petriv quando Sidnei sem slot
+// (ver .planning/notes/ghl-config-ids.md, secao Closers). IDs GHL, nao sao segredos.
+export const GHL_CLOSER_SIDNEI = process.env.GHL_CLOSER_SIDNEI || 'IpN8uafQzHc3Rm6LVd3g';
+export const GHL_CLOSER_PETRIV = process.env.GHL_CLOSER_PETRIV || 'rR3bhyhsMMzVssbhzxAR';
 
 // Stages do pipeline COMERCIAL USI (chave logica -> id no GHL). O Qualificador e a
 // Camila movem o card via a tool move_pipeline_stage usando estas chaves.
@@ -54,6 +58,11 @@ export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
 export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '2024-12-01-preview';
 export const AZURE_OPENAI_DEPLOYMENT_GPT41 = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41 || 'gpt-4.1';
 export const AZURE_OPENAI_DEPLOYMENT_GPT41_MINI = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41_MINI || 'gpt-4.1-mini';
+// SDR AUTON — modelos dos agentes novos (Qualificador + Camila). Mesmo azure-client.ts
+// (azure.chat(...)), sem provider novo. Se o Azure recusar por api-version, subir
+// AZURE_OPENAI_API_VERSION no .env (o default atual e 2024-12-01-preview).
+export const AZURE_OPENAI_DEPLOYMENT_GPT51 = process.env.AZURE_OPENAI_DEPLOYMENT_GPT51 || 'gpt-5.1'; // Camila
+export const AZURE_OPENAI_DEPLOYMENT_GPT5_MINI = process.env.AZURE_OPENAI_DEPLOYMENT_GPT5_MINI || 'gpt-5-mini'; // Qualificador
 // Embedding: o recurso atual tem 'text-embedding-3-large' (3072 dim).
 // Atencao: se o pgvector ja foi populado com embeddings 1536d (small), trocar
 // para 3-large quebra os indices vetoriais — limpe a tabela antes ou recrie.
