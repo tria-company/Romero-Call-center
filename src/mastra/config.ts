@@ -15,6 +15,31 @@ export const GHL_API_VERSION = process.env.GHL_API_VERSION || '2021-04-15';
 // Tipo padrao de mensagem pra envio. Opcoes comuns: 'WhatsApp', 'SMS', 'Email', 'GMB', 'IG', 'FB'.
 export const GHL_DEFAULT_TYPE = process.env.GHL_DEFAULT_TYPE || 'WhatsApp';
 
+// =================== SDR AUTON — pipeline/calendario GHL (COMERCIAL USI) ===================
+// IDs descobertos via API oficial (ver .planning/notes/ghl-config-ids.md). Nao sao segredos.
+// Endpoints de opportunities/calendars usam Version 2021-07-28 (conversations usa 2021-04-15).
+export const GHL_API_VERSION_V2 = process.env.GHL_API_VERSION_V2 || '2021-07-28';
+export const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || 'zEFpdSK1pMIC9d8aY4Lm';
+export const GHL_PIPELINE_ID = process.env.GHL_PIPELINE_ID || 'uVLzqVXjBjI7sACn3vKL'; // COMERCIAL USI
+export const GHL_CALENDAR_ID = process.env.GHL_CALENDAR_ID || 'nZ8n9QSZttjChj1CLwjC'; // Call Comercial USI (45min, Sidney)
+
+// Stages do pipeline COMERCIAL USI (chave logica -> id no GHL). O Qualificador e a
+// Camila movem o card via a tool move_pipeline_stage usando estas chaves.
+// Nota: no GHL o stage 'FORMULARIO_RESPONDIDO' esta grafado 'FOMULARIO' (typo da conta).
+export const GHL_STAGES = {
+  LEAD_NOVO: '6408b8ae-ed1a-4e8f-994a-7394d7d0cac7',
+  CONTATO_REALIZADO: '89fcc487-6b0f-4ca8-860b-ebcefb2c4673',
+  FORMULARIO_RESPONDIDO: 'ed7196f7-f8c8-4d08-8a84-f91586131392',
+  QUALIFICADO: 'bc8127ed-0d30-479a-8f36-7377c614f4a9',
+  CALL_AGENDADA: '998395cb-f190-4991-8892-e24b45cb26cb',
+  RETORNAR_CONTATO: 'c251790d-ff29-47c2-994f-304bb52ddc67',
+  NO_SHOW: '5b84348b-2e28-4b40-b11c-cc3bc10f08a4',
+  NEGOCIACAO: 'ad667da8-0e38-47d3-a865-f5d5725b4776',
+  GANHO: 'd883789c-3b0e-4638-821d-7524e1cb4ebb',
+  PERDIDO: '86a27fe8-c759-4bda-a418-072a64275627',
+} as const;
+export type GhlStage = keyof typeof GHL_STAGES;
+
 // OpenAI direto (deprecated — usar Azure abaixo). Mantido para rollback.
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
