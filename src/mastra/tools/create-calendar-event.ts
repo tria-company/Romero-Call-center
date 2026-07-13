@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   GHL_PIT_TOKEN,
   GHL_API_VERSION_V2,
+  GHL_LOCATION_ID,
   GHL_PIPELINE_ID,
   GHL_CALENDAR_ID,
   GHL_CLOSER_SIDNEI,
@@ -85,6 +86,14 @@ const STAGE_ID_TO_KEY = new Map<string, GhlStage>(
 // tools/move-pipeline-stage.ts (nao exportada de la, entao repetimos aqui
 // minimamente so pra ler o pipelineStageId atual, sem duplicar a logica de
 // mover o card).
+//
+// Gap 6/WR-02 — fim do fail-open: `null` so significa "resposta valida sem
+// opportunity" (contato ainda sem card no pipeline — SEGUIR e correto). Uma
+// falha de REQUISICAO (rede, timeout, !res.ok, exception de parse) e um caso
+// DIFERENTE — precisamos saber se o card esta em CALL_AGENDADA antes de
+// agendar de novo, e uma falha de rede nao pode ser confundida com "sem
+// opportunity". Por isso agora PROPAGA (throw) em vez de engolir e devolver
+// null — quem chama decide o retry/fail-closed.
 async function buscarStageAtual(contactId: string): Promise<GhlStage | null> {
   const url = `${GHL_BASE_URL}/opportunities/search?contact_id=${encodeURIComponent(contactId)}&pipeline_id=${encodeURIComponent(GHL_PIPELINE_ID)}`;
   const res = await fetchTimeout(url, {
@@ -95,13 +104,79 @@ async function buscarStageAtual(contactId: string): Promise<GhlStage | null> {
     },
   });
   if (!res.ok) {
-    console.error(`[create-calendar-event] GET /opportunities/search falhou (${res.status}):`, await res.text());
-    return null;
+    const erroBody = await res.text();
+    throw new Error(`GET /opportunities/search falhou (${res.status}): ${erroBody}`);
   }
   const data = await res.json();
   const stageId = data?.opportunities?.[0]?.pipelineStageId;
-  if (!stageId) return null;
+  if (!stageId) return null; // resposta valida, contato sem opportunity no pipeline — SEGUIR
   return STAGE_ID_TO_KEY.get(stageId) || null;
+}
+
+// Extrai eventos/appointments de uma resposta de GET /calendars/events —
+// mesma varredura tolerante de `extrairSlots` (shape real do payload GHL nao
+// validavel sem credenciais neste ambiente, ver checkpoint humano/UAT de fim
+// de fase): aceita tanto `{ events: [...] }` quanto um array direto na raiz,
+// e qualquer objeto aninhado ate 3 niveis com uma chave `startTime`.
+function extrairAppointments(data: unknown, profundidade = 0): Array<Record<string, unknown>> {
+  const eventos: Array<Record<string, unknown>> = [];
+  if (!data || typeof data !== 'object' || profundidade > 3) return eventos;
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      if (item && typeof item === 'object') {
+        if ('startTime' in (item as Record<string, unknown>)) eventos.push(item as Record<string, unknown>);
+        eventos.push(...extrairAppointments(item, profundidade + 1));
+      }
+    }
+    return eventos;
+  }
+  const node = data as Record<string, unknown>;
+  for (const valor of Object.values(node)) {
+    if (Array.isArray(valor) || (valor && typeof valor === 'object')) {
+      eventos.push(...extrairAppointments(valor, profundidade + 1));
+    }
+  }
+  return eventos;
+}
+
+// Gap 6/WR-01 — lado HUMANO do FUN-05 (antes so existia `marcarAgendamentoOwner`
+// com 'ia'; nunca havia um gatilho pro lado humano). GET dos appointments do
+// contato no calendario Call Comercial USI (GHL_CALENDAR_ID): se existir
+// algum com startTime FUTURO, e indicio forte de que o SDR humano ja agendou
+// a call direto no GHL (sem passar pela IA) — a IA precisa parar e marcar
+// owner='humano'. Endpoint V2 /calendars/events filtrado por calendarId +
+// contactId (shape nao validavel sem credenciais reais, ver UAT de fim de
+// fase). Falha de rede/!res.ok PROPAGA (nao devolve false) — mesmo padrao de
+// `buscarStageAtual`, quem chama decide o retry/fail-closed.
+async function buscarAppointmentFuturo(contactId: string): Promise<boolean> {
+  const agora = Date.now();
+  const params = new URLSearchParams({
+    locationId: GHL_LOCATION_ID,
+    calendarId: GHL_CALENDAR_ID,
+    contactId,
+    startTime: String(agora),
+    endTime: String(agora + 90 * 24 * 60 * 60 * 1000), // janela de 90 dias pra frente
+  });
+  const url = `${GHL_BASE_URL}/calendars/events?${params.toString()}`;
+  const res = await fetchTimeout(url, {
+    headers: {
+      'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+      'Version': GHL_API_VERSION_V2,
+      'Accept': 'application/json',
+    },
+  });
+  if (!res.ok) {
+    const erroBody = await res.text();
+    throw new Error(`GET /calendars/events falhou (${res.status}): ${erroBody}`);
+  }
+  const data = await res.json();
+  const eventos = extrairAppointments(data);
+  return eventos.some((ev) => {
+    const bruto = (ev as any).startTime ?? (ev as any).start_time;
+    if (typeof bruto !== 'string' && typeof bruto !== 'number') return false;
+    const ts = new Date(bruto as string | number).getTime();
+    return !Number.isNaN(ts) && ts > agora;
+  });
 }
 
 // Extrai os horarios livres da resposta de GET /calendars/{id}/free-slots.
@@ -177,23 +252,74 @@ export const createCalendarEvent = createTool({
       return { sucesso: false, motivo: 'contactId nao resolvido' };
     }
 
-    // FUN-05: consulta a coordenacao ANTES de qualquer tentativa real de
-    // agendar (free-slots/POST) — evita double-booking se o SDR humano ja
-    // ganhou a corrida (agendou direto no GHL).
-    try {
-      const sessao = await getSessao(telefone);
-      const stageAtual = (await buscarStageAtual(contactId)) || '';
+    // FUN-05 (Gap 6/WR-01+WR-02): consulta a coordenacao ANTES de qualquer
+    // tentativa real de agendar (free-slots/POST). Fail-CLOSED agora, nao
+    // fail-open: cada consulta (stage + appointment futuro do contato) e
+    // retentada 1x em caso de FALHA DE REQUISICAO; so segue sem confirmacao
+    // do stage se o lado humano (buscarAppointmentFuturo) confirmou
+    // explicitamente que nao ha appointment (nao ha evidencia de conflito).
+    // Se nem isso puder ser confirmado, para com 'coordenacao nao
+    // verificada' — a falha de rede deixa de ser uma brecha pra double-booking.
+    const sessao = await getSessao(telefone);
+
+    async function comRetryUmaVez<T>(fn: () => Promise<T>, label: string): Promise<{ ok: true; valor: T } | { ok: false }> {
+      try {
+        return { ok: true, valor: await fn() };
+      } catch (e1) {
+        console.error(`[create-calendar-event] ${telefone}: falha ao consultar ${label} (1a tentativa), retentando:`, e1);
+        try {
+          return { ok: true, valor: await fn() };
+        } catch (e2) {
+          console.error(`[create-calendar-event] ${telefone}: falha ao consultar ${label} (2a tentativa, desistindo):`, e2);
+          return { ok: false };
+        }
+      }
+    }
+
+    // Lado HUMANO (WR-01): se houver appointment futuro do contato no
+    // calendario, o SDR humano ja agendou direto no GHL — a IA para e marca
+    // owner='humano' (idempotente, primeiro a chegar fica).
+    const consultaAppointment = await comRetryUmaVez(() => buscarAppointmentFuturo(contactId), 'appointments do contato');
+    if (consultaAppointment.ok && consultaAppointment.valor) {
+      console.log(`[create-calendar-event] ${telefone}: appointment futuro encontrado no calendario — SDR humano ja agendou, marcando owner=humano`);
+      await marcarAgendamentoOwner(telefone, 'humano');
+      return { sucesso: false, motivo: 'humano ja agendou' };
+    }
+
+    // appointmentConfirmadoLimpo = a consulta do lado humano teve sucesso E
+    // confirmou explicitamente que NAO ha appointment futuro do contato —
+    // so essa combinacao conta como "descartou conflito" pro fallback abaixo.
+    const appointmentConfirmadoLimpo = consultaAppointment.ok && consultaAppointment.valor === false;
+
+    // Lado IA/stage (WR-02): stage atual do card + owner ja registrado na
+    // sessao (podeAgendar, dupla-acao.ts).
+    const consultaStage = await comRetryUmaVez(() => buscarStageAtual(contactId), 'stage da opportunity');
+    if (consultaStage.ok) {
+      const stageAtual = consultaStage.valor || '';
       if (!podeAgendar(stageAtual, sessao?.agendamentoOwner, 'ia')) {
         console.log(`[create-calendar-event] ${telefone}: agendamento ja resolvido por outro lado (owner=${sessao?.agendamentoOwner || '-'}, stage=${stageAtual || '-'}) — ignorando`);
         return { sucesso: false, motivo: 'agendamento ja resolvido por outro lado' };
       }
-    } catch (e) {
-      // Falha ao consultar coordenacao nao pode travar o "caminho feliz"
-      // (PROJECT.md: "se tudo mais falhar, o agendamento da call qualificada
-      // tem que funcionar") — loga e segue, o POST de appointment ainda e
-      // seguro (GHL nao duplica evento no mesmo horario/contato).
-      console.error(`[create-calendar-event] erro ao consultar coordenacao (FUN-05) para ${telefone}, seguindo mesmo assim:`, e);
+      // podeAgendar disse que pode — mas isso so cobre o lado IA/stage. Se a
+      // consulta do lado humano (buscarAppointmentFuturo) NAO foi confirmada
+      // limpa (falhou apos retry), nao da pra descartar que o SDR humano
+      // agendou direto no GHL — fail-closed tambem aqui (fecha o buraco de
+      // WR-01 nao ficar so dependente do stage).
+      if (!appointmentConfirmadoLimpo) {
+        console.error(`[create-calendar-event] ${telefone}: stage OK mas coordenacao do lado humano (appointment) nao pode ser confirmada apos retry — parando por seguranca`);
+        return { sucesso: false, motivo: 'coordenacao nao verificada' };
+      }
+    } else if (!appointmentConfirmadoLimpo) {
+      // Nao foi possivel confirmar o stage E tambem nao ha confirmacao
+      // explicita (sem retry adicional) de que nao existe appointment
+      // futuro do contato — nao da pra descartar conflito, fail-closed.
+      console.error(`[create-calendar-event] ${telefone}: coordenacao FUN-05 nao pode ser verificada apos retry — parando por seguranca (sem evidencia suficiente pra descartar conflito)`);
+      return { sucesso: false, motivo: 'coordenacao nao verificada' };
     }
+    // Caso restante: stage falhou apos retry, MAS o lado humano confirmou
+    // explicitamente (sem excecao) que nao ha appointment futuro do contato
+    // — segue o caminho feliz (PROJECT.md: "se tudo mais falhar, o
+    // agendamento da call qualificada tem que funcionar").
 
     try {
       // Gap 4/CR-05: decisao do closer por HORARIO (nao so por disponibilidade
