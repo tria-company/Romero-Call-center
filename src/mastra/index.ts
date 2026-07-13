@@ -31,6 +31,10 @@ import { logNote } from './tools/log-note';
 import { parseFormulario } from './formulario';
 import { decidirRoteamento } from './bant';
 
+// Dupla acao (QUAL-04): quando o Qualificador marca o lead como QUALIFICADO,
+// dispara a abertura proativa da Camila + a task priorizada pro SDR humano.
+import { dispararDuplaAcao } from './dupla-acao';
+
 // GoHighLevel (canal WhatsApp via API oficial). Substitui Evolution.
 import {
   enviarMensagem,
@@ -606,6 +610,24 @@ export const mastra = new Mastra({
               MAX_TENTATIVAS,
               'qualificador',
             );
+
+            // QUAL-04: lead QUALIFICADO -> dispara a DUPLA ACAO (abertura
+            // proativa da Camila no WhatsApp + task priorizada pro SDR
+            // humano). O Qualificador ja gravou bant_*/ancora_abordagem/
+            // spin_stage e moveu o card ANTES deste ponto (ele executa suas
+            // 4 tools em sequencia sincrona no agent.generate acima) —
+            // dispararDuplaAcao rele a ficha do GHL pra pegar a ancora mais
+            // fresca, mas usa `ancora` (vazio aqui; nao calculado por
+            // codigo deterministico) so como fallback de ultimo caso.
+            if (roteamento.stage === 'QUALIFICADO') {
+              dispararDuplaAcao({
+                telefone,
+                contactId,
+                nome,
+                bant: roteamento.bant,
+                ancora: '',
+              }).catch((e) => console.error(`[formulario] dispararDuplaAcao falhou para ${telefone}:`, e));
+            }
 
             return c.json({ status: 'processado', stage: roteamento.stage });
           } catch (erro) {
