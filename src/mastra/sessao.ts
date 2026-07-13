@@ -45,7 +45,7 @@ export async function getSessao(telefone: string): Promise<Sessao | undefined> {
   const conversa = await buscarConversaAtiva(customer.id);
   if (!conversa) return undefined;
 
-  const agenteConversa = conversa.agente_atual || 'vendedor';
+  const agenteConversa = enumParaAgente(conversa.agente_atual || 'vendedor');
   const ultimaMensagem = new Date(conversa.data_ultima_mensagem).getTime();
   const tempoInativo = Date.now() - ultimaMensagem;
   const conversaFluida = tempoInativo < JANELA_CONVERSA_FLUIDA;
@@ -84,19 +84,23 @@ export async function criarSessao(telefone: string, dados: Partial<Sessao>): Pro
     if (id) customerId = id;
   }
 
+  const agenteAtual = dados.agenteAtual || 'vendedor';
+
   let conversaId = '';
   if (customerId) {
     // Idempotente: se ja existe conversa em_atendimento ativa, reusa.
     // Garante uniqueness contra race entre 2 webhooks pro mesmo lead novo
     // (a unique constraint uk_conv_ativa_por_customer rejeita o segundo INSERT
-    // e obterOuCriarConversaAtiva trata via fallback).
-    const id = await obterOuCriarConversaAtiva(customerId);
+    // e obterOuCriarConversaAtiva trata via fallback). Repassa o agente ja na
+    // criacao (Gap 3/CR-01) — evita que 'camila'/'qualificador' fiquem so no
+    // cache em memoria, sem sobreviver a restart/eviction.
+    const id = await obterOuCriarConversaAtiva(customerId, agenteParaEnum(agenteAtual));
     if (id) conversaId = id;
   }
 
   const sessao: Sessao = {
     telefone,
-    agenteAtual: dados.agenteAtual || 'vendedor',
+    agenteAtual,
     nome,
     email,
     interesse: dados.interesse || '',
@@ -106,11 +110,19 @@ export async function criarSessao(telefone: string, dados: Partial<Sessao>): Pro
     ghlContactId: dados.ghlContactId,
   };
 
-  // Se chegou ghlContactId na criacao, persiste no metadata pra sobreviver reinicio
-  if (dados.ghlContactId && conversaId) {
-    await atualizarConversa(conversaId, {
-      metadata: JSON.stringify({ ghl_contact_id: dados.ghlContactId }),
-    });
+  // Se chegou ghlContactId na criacao, persiste no metadata pra sobreviver
+  // reinicio. Tambem corrige agente_atual quando a conversa foi REUSADA
+  // (obterOuCriarConversaAtiva so grava o agente na criacao de uma conversa
+  // nova; se ja existia uma ativa com outro agente, este PATCH sincroniza).
+  if (conversaId && (dados.ghlContactId || agenteAtual !== 'vendedor')) {
+    const patch: Record<string, any> = {};
+    if (dados.ghlContactId) {
+      patch.metadata = JSON.stringify({ ghl_contact_id: dados.ghlContactId });
+    }
+    if (agenteAtual !== 'vendedor') {
+      patch.agente_atual = agenteParaEnum(agenteAtual);
+    }
+    await atualizarConversa(conversaId, patch);
   }
 
   cache.set(telefone, sessao);
@@ -232,7 +244,24 @@ export const AGENTES_MAP: Record<string, string> = {
 export function agenteParaEnum(agente: string): string {
   const mapa: Record<string, string> = {
     vendedor: 'vendedor',
+    qualificador: 'qualificador',
+    camila: 'camila',
     humano: 'atendimento_humano',
   };
   return mapa[agente] || 'vendedor';
+}
+
+// Inverso de agenteParaEnum — reconstroi o agente logico a partir do valor
+// persistido no enum Postgres `agente_tipo_roberth`. Fecha o Gap 3/CR-01:
+// sem isso, 'atendimento_humano' nunca voltava como 'humano' apos restart
+// (getSessao lia o valor cru do enum), quebrando a pausa da IA em leads
+// escalados por sofrimento agudo.
+export function enumParaAgente(enumValor: string): string {
+  const mapa: Record<string, string> = {
+    vendedor: 'vendedor',
+    qualificador: 'qualificador',
+    camila: 'camila',
+    atendimento_humano: 'humano',
+  };
+  return mapa[enumValor] || 'vendedor';
 }

@@ -53,7 +53,7 @@ export async function upsertCustomer(dados: { telefone: string; nome?: string; e
 
 // ==================== CONVERSATIONS ====================
 
-export async function criarConversa(customerId: string, _canal: string = 'whatsapp'): Promise<string | null> {
+export async function criarConversa(customerId: string, _canal: string = 'whatsapp', agenteEnum: string = 'vendedor'): Promise<string | null> {
   if (!SUPABASE_URL) return null;
   try {
     const url = `${SUPABASE_URL}/rest/v1/conversations_roberth`;
@@ -64,7 +64,7 @@ export async function criarConversa(customerId: string, _canal: string = 'whatsa
         customer_id: customerId,
         canal: 'whatsapp',
         status: 'em_atendimento',
-        agente_atual: 'vendedor',
+        agente_atual: agenteEnum,
         data_ultima_mensagem: new Date().toISOString(),
       }),
     });
@@ -96,12 +96,12 @@ export async function criarConversa(customerId: string, _canal: string = 'whatsa
  * Resolve issue #1 do review de prod (race em criarSessao gerando conversations
  * duplicadas com customer fragmentado).
  */
-export async function obterOuCriarConversaAtiva(customerId: string): Promise<string | null> {
+export async function obterOuCriarConversaAtiva(customerId: string, agenteEnum?: string): Promise<string | null> {
   if (!customerId) return null;
   const existente = await buscarConversaAtiva(customerId);
   if (existente?.id) return existente.id;
 
-  const novoId = await criarConversa(customerId);
+  const novoId = await criarConversa(customerId, 'whatsapp', agenteEnum || 'vendedor');
   if (novoId) return novoId;
 
   // Fallback pra race condition: criou em outro processo entre nosso SELECT e INSERT
