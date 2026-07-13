@@ -93,9 +93,33 @@ export const CAMPANHA_NOME = process.env.CAMPANHA_NOME || 'lancamento';
 export const KIWIFY_TOKEN_CAMINHO = process.env.KIWIFY_TOKEN_CAMINHO || '';
 export const KIWIFY_TOKEN_BOLHA = process.env.KIWIFY_TOKEN_BOLHA || '';
 
-// JID do grupo de suporte que recebe notificacao quando a IA chama handoff humano.
-// Formato: '<id>@g.us'. Vazio = sem notificacao (apenas pausa a IA).
+// Telefone 1:1 (E.164, ex: '5511999999999') do responsavel de plantao que
+// recebe o aviso quando a IA escala pra humano (inclusive sofrimento agudo
+// / CVV 188). EXIGENCIA: precisa ser um telefone 1:1 valido — a API oficial
+// do GHL NAO entrega mensagem pra grupo de WhatsApp (constraint documentada
+// no CLAUDE.md do projeto). NAO usar JID de grupo (formato '<id>@g.us',
+// herdado da Evolution) nem '@broadcast' aqui: o aviso seria apenas logado
+// (ver notificacoes.ts, enviarAvisoAoSuporte), nunca entregue de fato.
+// Vazio = notificacao 1:1 desabilitada; a escalacao ainda garante sinal
+// humano-visivel via task URGENTE + move RETORNAR_CONTATO (ver Gap 7/CR-07
+// em escalate-to-human.ts) — mas o aviso direto ao plantonista nao ocorre.
 export const SUPORTE_GRUPO_JID = process.env.SUPORTE_GRUPO_JID || '';
+
+if (!SUPORTE_GRUPO_JID) {
+  console.warn(
+    '[config] SUPORTE_GRUPO_JID vazio: a notificacao 1:1 do grupo de suporte esta DESABILITADA. ' +
+      'Em escalacoes (inclusive sofrimento agudo/CVV 188), o unico sinal humano-visivel sera a ' +
+      'task URGENTE + move de card pra RETORNAR_CONTATO (escalate-to-human.ts). Configure um ' +
+      'telefone 1:1 (E.164) do responsavel de plantao pra tambem receber o aviso direto.',
+  );
+} else if (SUPORTE_GRUPO_JID.includes('@g.us') || SUPORTE_GRUPO_JID.includes('@broadcast')) {
+  console.warn(
+    `[config] SUPORTE_GRUPO_JID="${SUPORTE_GRUPO_JID}" parece ser um JID de GRUPO do WhatsApp. ` +
+      'O GHL (API oficial) NAO entrega mensagens pra grupos WhatsApp — esse aviso sera apenas ' +
+      'logado, nunca chega no plantonista. Troque SUPORTE_GRUPO_JID pra um telefone 1:1 (E.164), ' +
+      'sem "@g.us"/"@broadcast".',
+  );
+}
 
 // Tempos
 export const JANELA_CONVERSA_FLUIDA = 2 * 60 * 60 * 1000; // 2h
