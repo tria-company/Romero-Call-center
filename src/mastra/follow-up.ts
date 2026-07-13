@@ -1,13 +1,13 @@
 // Scheduler de follow-ups e handoff por silencio.
 //
 // Comportamento:
-//   - A cada 5min, varre conversations_roberth onde a Sofia foi a ultima a
+//   - A cada 5min, varre auton_sdr_conversations onde a Sofia foi a ultima a
 //     falar e o lead silenciou >= 1h, 3h, 5h ou 24h.
 //   - 1h/3h/5h: gera mensagem de FUP via LLM (com historico via Memory) e
 //     envia ao lead. Marca fup_N_sent_at pra nao duplicar no proximo tick.
 //   - 24h: dispara handoff pro humano (mesma rotina do tool handoff-humano).
 //
-// State persistido em conversations_roberth (migration 02_follow_up.sql):
+// State persistido em auton_sdr_conversations (migration 02_follow_up.sql):
 //   last_assistant_message_at, last_lead_message_at,
 //   fup_1_sent_at, fup_3_sent_at, fup_5_sent_at, handoff_silencio_em.
 //
@@ -62,7 +62,7 @@ async function enviarFollowUp(
   conv: any,
   horas: 1 | 3 | 5,
 ): Promise<void> {
-  const customer = conv.customers_roberth;
+  const customer = conv.auton_sdr_customers;
   const telefone = customer?.telefone;
   if (!telefone) {
     console.warn(`[follow-up] conversa ${conv.id} sem telefone, pulando`);
@@ -110,7 +110,7 @@ async function enviarFollowUp(
 }
 
 async function dispararHandoffPorSilencio(conv: any): Promise<void> {
-  const customer = conv.customers_roberth;
+  const customer = conv.auton_sdr_customers;
   const telefone = customer?.telefone;
   if (!telefone) {
     console.warn(`[follow-up] conversa ${conv.id} sem telefone pra handoff, pulando`);

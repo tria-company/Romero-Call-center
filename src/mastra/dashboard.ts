@@ -355,7 +355,7 @@ function gerarHTMLDashboard(dados: {
   const linhasConversas = conversasAtivas.length === 0
     ? `<tr><td colspan="6" class="text-center text-slate-400 py-10">Nenhuma conversa ativa.</td></tr>`
     : conversasAtivas.map((c) => {
-        const customer = c.customers_roberth || {};
+        const customer = c.auton_sdr_customers || {};
         const nome = customer.nome || '(sem nome)';
         const tel = customer.telefone || '—';
         const status = c.status;
@@ -674,7 +674,7 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title></head>`)
 // =================== Viewer de conversa ===================
 
 function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
-  const customer = conversa.customers_roberth || {};
+  const customer = conversa.auton_sdr_customers || {};
   const nome = customer.nome || '(sem nome)';
   const telefone = customer.telefone || '—';
   const status = conversa.status;

@@ -9,7 +9,7 @@ Aqui vive o codigo do agente vendedor (Sofia) e toda a infra de WhatsApp/Supabas
 | `index.ts` | Bootstrap do Mastra: registra o agente, configura logger, observability, webhook Evolution e endpoint de desbloqueio. |
 | `agents/vendedor.ts` | Agente unico — persona, instrucoes, blacklist, tools. |
 | `tools/salvar-sessao.ts` | Persiste nome/email/interesse do lead. |
-| `tools/registrar-objecao.ts` | Loga objecao do lead em `objecoes_roberth`. |
+| `tools/registrar-objecao.ts` | Loga objecao do lead em `auton_sdr_objecoes`. |
 | `tools/enviar-checkout.ts` | Envia o link de checkout com UTM e marca `link_enviado=true` na conversa. |
 | `tools/handoff-humano.ts` | Pausa a IA — humano assume. |
 | `evolution.ts` | Cliente Evolution API: enviar texto, simular digitacao, transcrever audio (Whisper), detectar mensagem do bot. |

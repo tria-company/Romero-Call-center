@@ -252,7 +252,7 @@ export function agenteParaEnum(agente: string): string {
 }
 
 // Inverso de agenteParaEnum — reconstroi o agente logico a partir do valor
-// persistido no enum Postgres `agente_tipo_roberth`. Fecha o Gap 3/CR-01:
+// persistido no enum Postgres `auton_sdr_agente_tipo`. Fecha o Gap 3/CR-01:
 // sem isso, 'atendimento_humano' nunca voltava como 'humano' apos restart
 // (getSessao lia o valor cru do enum), quebrando a pausa da IA em leads
 // escalados por sofrimento agudo.

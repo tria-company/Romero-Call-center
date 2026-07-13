@@ -367,7 +367,7 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
     // tinham loops dessa frase.
     //
     // Comportamento atual: silencio pro lead + alerta no grupo de suporte
-    // + persistencia em errors_roberth (pra dashboard agregar/listar).
+    // + persistencia em auton_sdr_errors (pra dashboard agregar/listar).
     console.error('[WhatsApp] Erro ao processar mensagem (silencioso pro lead):', erro);
 
     const mensagemErro = String((erro as Error)?.message || erro).slice(0, 500);

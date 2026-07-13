@@ -20,7 +20,7 @@ function headers(): Record<string, string> {
 export async function buscarCustomerPorTelefone(telefone: string): Promise<any | null> {
   if (!SUPABASE_URL) return null;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/customers_roberth?telefone=eq.${telefone}&select=*&limit=1`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_customers?telefone=eq.${telefone}&select=*&limit=1`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json();
@@ -31,7 +31,7 @@ export async function buscarCustomerPorTelefone(telefone: string): Promise<any |
 export async function upsertCustomer(dados: { telefone: string; nome?: string; email?: string }): Promise<string | null> {
   if (!SUPABASE_URL) return null;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/customers_roberth?on_conflict=telefone`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_customers?on_conflict=telefone`;
 
     const body: Record<string, string> = {
       telefone: dados.telefone,
@@ -56,7 +56,7 @@ export async function upsertCustomer(dados: { telefone: string; nome?: string; e
 export async function criarConversa(customerId: string, _canal: string = 'whatsapp', agenteEnum: string = 'vendedor'): Promise<string | null> {
   if (!SUPABASE_URL) return null;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations`;
     const res = await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
@@ -113,7 +113,7 @@ export async function buscarConversaAtiva(customerId: string): Promise<any | nul
   if (!SUPABASE_URL) return null;
   try {
     const limite24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&ended_at=is.null&data_ultima_mensagem=gte.${limite24h}&select=*&order=data_ultima_mensagem.desc&limit=1`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?customer_id=eq.${customerId}&ended_at=is.null&data_ultima_mensagem=gte.${limite24h}&select=*&order=data_ultima_mensagem.desc&limit=1`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json();
@@ -127,7 +127,7 @@ export async function buscarConversaBloqueada(customerId: string): Promise<any |
   if (!SUPABASE_URL) return null;
   try {
     const limite3d = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&status=eq.aguardando_humano&ended_at=is.null&data_ultima_mensagem=gte.${limite3d}&select=*&order=data_ultima_mensagem.desc&limit=1`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?customer_id=eq.${customerId}&status=eq.aguardando_humano&ended_at=is.null&data_ultima_mensagem=gte.${limite3d}&select=*&order=data_ultima_mensagem.desc&limit=1`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json();
@@ -138,7 +138,7 @@ export async function buscarConversaBloqueada(customerId: string): Promise<any |
 export async function atualizarConversa(conversaId: string, dados: Record<string, any>): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?id=eq.${conversaId}`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?id=eq.${conversaId}`;
     await fetchTimeout(url, {
       method: 'PATCH',
       headers: headers(),
@@ -192,14 +192,14 @@ export async function buscarConversasParaFollowUp(): Promise<any[]> {
     const limite1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     // Filtro pagamento_confirmado=is.false: leads que ja compraram nao
     // recebem FUP nem handoff por silencio (migration 05 adicionou a coluna).
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?` +
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?` +
       `status=eq.em_atendimento` +
       `&ended_at=is.null` +
       `&handoff_silencio_em=is.null` +
       `&pagamento_confirmado=is.false` +
       `&last_assistant_message_at=not.is.null` +
       `&last_assistant_message_at=lt.${limite1h}` +
-      `&select=*,customers_roberth(telefone,nome)` +
+      `&select=*,auton_sdr_customers(telefone,nome)` +
       `&limit=200`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) {
@@ -234,7 +234,7 @@ export async function salvarMensagem(dados: {
 }): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/messages_roberth`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_messages`;
     await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
@@ -255,7 +255,7 @@ export async function registrarObjecao(dados: {
 }): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_objecoes`;
     await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
@@ -276,10 +276,10 @@ export async function registrarObjecao(dados: {
 export async function buscarConversasAtivas(limite: number = 50): Promise<any[]> {
   if (!SUPABASE_URL) return [];
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?` +
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?` +
       `status=in.(em_atendimento,aguardando_humano)` +
       `&ended_at=is.null` +
-      `&select=*,customers_roberth(nome,telefone)` +
+      `&select=*,auton_sdr_customers(nome,telefone)` +
       `&order=data_ultima_mensagem.desc` +
       `&limit=${limite}`;
     const res = await fetchTimeout(url, { headers: headers() });
@@ -298,7 +298,7 @@ export async function buscarConversasAtivas(limite: number = 50): Promise<any[]>
 export async function buscarConversaPorId(conversaId: string): Promise<any | null> {
   if (!SUPABASE_URL || !conversaId) return null;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?id=eq.${conversaId}&select=*,customers_roberth(nome,telefone)&limit=1`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?id=eq.${conversaId}&select=*,auton_sdr_customers(nome,telefone)&limit=1`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json() as any[];
@@ -316,7 +316,7 @@ export async function buscarConversaPorId(conversaId: string): Promise<any | nul
 export async function buscarMensagensDaConversa(conversaId: string): Promise<any[]> {
   if (!SUPABASE_URL || !conversaId) return [];
   try {
-    const url = `${SUPABASE_URL}/rest/v1/messages_roberth?conversation_id=eq.${conversaId}&select=*&order=created_at.asc&limit=500`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_messages?conversation_id=eq.${conversaId}&select=*&order=created_at.asc&limit=500`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
     return (await res.json()) as any[];
@@ -340,7 +340,7 @@ export async function contarConversoes(): Promise<{ hoje: number; semana: number
 
   async function contar(filtroExtra: string): Promise<number> {
     try {
-      const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?link_enviado=eq.true${filtroExtra}&select=id`;
+      const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?link_enviado=eq.true${filtroExtra}&select=id`;
       const res = await fetchTimeout(url, {
         method: 'HEAD',
         headers: { ...headers(), 'Prefer': 'count=exact' },
@@ -367,7 +367,7 @@ export async function contarConversoes(): Promise<{ hoje: number; semana: number
 export async function buscarObjecoesRecentes(limite: number = 30): Promise<any[]> {
   if (!SUPABASE_URL) return [];
   try {
-    const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?select=*&order=created_at.desc&limit=${limite}`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_objecoes?select=*&order=created_at.desc&limit=${limite}`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
     return (await res.json()) as any[];
@@ -385,7 +385,7 @@ export async function contarObjecoesPorCategoria(): Promise<Record<string, numbe
   try {
     // PostgREST nao tem GROUP BY direto. Solucao simples: traz max 1000
     // objecoes (campo categoria so) e conta in-memory.
-    const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?select=categoria&limit=2000`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_objecoes?select=categoria&limit=2000`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return {};
     const data = await res.json() as Array<{ categoria: string }>;
@@ -415,7 +415,7 @@ export async function salvarErro(dados: {
 }): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/errors_roberth`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_errors`;
     await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
@@ -440,7 +440,7 @@ export async function salvarErro(dados: {
 export async function buscarErrosRecentes(limite: number = 30): Promise<any[]> {
   if (!SUPABASE_URL) return [];
   try {
-    const url = `${SUPABASE_URL}/rest/v1/errors_roberth?select=*&order=created_at.desc&limit=${limite}`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_errors?select=*&order=created_at.desc&limit=${limite}`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
     return (await res.json()) as any[];
@@ -457,7 +457,7 @@ export async function contarErrosPorCodigo(desdeISO?: string): Promise<Record<st
   if (!SUPABASE_URL) return {};
   const desde = desdeISO || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   try {
-    const url = `${SUPABASE_URL}/rest/v1/errors_roberth?select=error_code&created_at=gte.${desde}&limit=5000`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_errors?select=error_code&created_at=gte.${desde}&limit=5000`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return {};
     const data = await res.json() as Array<{ error_code: string }>;
@@ -476,7 +476,7 @@ export async function contarErrosPorCodigo(desdeISO?: string): Promise<Record<st
 // ==================== KIWIFY / PAGAMENTO CONFIRMADO ====================
 // Webhook do Kiwify chama esses helpers quando uma compra e aprovada.
 // Migration 05 adicionou as colunas pagamento_confirmado, pagamento_confirmado_em,
-// kiwify_order_id, valor_pago em conversations_roberth.
+// kiwify_order_id, valor_pago em auton_sdr_conversations.
 
 export type ConfirmarPagamentoResult =
   | { novo: true; nome: string | null; conversaId: string }
@@ -513,7 +513,7 @@ export async function confirmarPagamento(dados: {
   let conversaId: string | null = null;
   let nomeCustomer: string | null = customer.nome || null;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?` +
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?` +
       `customer_id=eq.${customer.id}&select=id&order=data_ultima_mensagem.desc&limit=1`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (res.ok) {
@@ -530,7 +530,7 @@ export async function confirmarPagamento(dados: {
   // 3. Marca a conversa. Unique index uk_conv_kiwify_order rejeita duplicata
   // (Kiwify retry com mesmo order_id) — caimos no fallback.
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?id=eq.${conversaId}`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?id=eq.${conversaId}`;
     const agora = new Date().toISOString();
     const body: Record<string, any> = {
       pagamento_confirmado: true,
@@ -582,7 +582,7 @@ export async function contarFunil(): Promise<{
 }> {
   if (!SUPABASE_URL) return { total: 0, engajou: 0, linkEnviado: 0, pago: 0 };
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?select=id,started_at,last_lead_message_at,link_enviado,pagamento_confirmado&limit=10000`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?select=id,started_at,last_lead_message_at,link_enviado,pagamento_confirmado&limit=10000`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return { total: 0, engajou: 0, linkEnviado: 0, pago: 0 };
     const conversas = await res.json() as Array<{
@@ -627,7 +627,7 @@ export async function contarFollowUps(): Promise<{
   const vazio = { fup1: 0, fup3: 0, fup5: 0, handoff24h: 0, leadsComFup: 0 };
   if (!SUPABASE_URL) return vazio;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?select=id,fup_1_sent_at,fup_3_sent_at,fup_5_sent_at,handoff_silencio_em&limit=10000`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?select=id,fup_1_sent_at,fup_3_sent_at,fup_5_sent_at,handoff_silencio_em&limit=10000`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return vazio;
     const conversas = await res.json() as Array<{
@@ -666,7 +666,7 @@ export async function contarPagamentosConfirmados(): Promise<{ hoje: number; sem
 
   async function contar(filtroExtra: string): Promise<number> {
     try {
-      const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?pagamento_confirmado=eq.true${filtroExtra}&select=id`;
+      const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?pagamento_confirmado=eq.true${filtroExtra}&select=id`;
       const res = await fetchTimeout(url, {
         method: 'HEAD',
         headers: { ...headers(), 'Prefer': 'count=exact' },
@@ -696,7 +696,7 @@ export async function contarPagamentosConfirmados(): Promise<{ hoje: number; sem
 export async function encerrarConversasDoCustomer(customerId: string): Promise<void> {
   if (!SUPABASE_URL || !customerId) return;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&ended_at=is.null`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?customer_id=eq.${customerId}&ended_at=is.null`;
     await fetchTimeout(url, {
       method: 'PATCH',
       headers: headers(),
@@ -716,14 +716,14 @@ export async function deletarMensagensDoCustomer(customerId: string): Promise<vo
   if (!SUPABASE_URL || !customerId) return;
   try {
     // Busca ids das conversas
-    const urlConv = `${SUPABASE_URL}/rest/v1/conversations_roberth?customer_id=eq.${customerId}&select=id`;
+    const urlConv = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?customer_id=eq.${customerId}&select=id`;
     const resConv = await fetchTimeout(urlConv, { headers: headers() });
     if (!resConv.ok) return;
     const conversas = await resConv.json() as Array<{ id: string }>;
     if (conversas.length === 0) return;
     const ids = conversas.map(c => c.id).join(',');
 
-    const url = `${SUPABASE_URL}/rest/v1/messages_roberth?conversation_id=in.(${ids})`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_messages?conversation_id=in.(${ids})`;
     await fetchTimeout(url, { method: 'DELETE', headers: headers() });
   } catch (e) { console.error('[supabase] Erro deletar mensagens:', e); }
 }
@@ -734,7 +734,7 @@ export async function deletarMensagensDoCustomer(customerId: string): Promise<vo
 export async function deletarObjecoesDoTelefone(telefone: string): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/objecoes_roberth?telefone=eq.${telefone}`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_objecoes?telefone=eq.${telefone}`;
     await fetchTimeout(url, { method: 'DELETE', headers: headers() });
   } catch (e) { console.error('[supabase] Erro deletar objecoes:', e); }
 }
@@ -754,7 +754,7 @@ export async function deletarObjecoesDoTelefone(telefone: string): Promise<void>
 export async function tentarRegistrarWebhook(hash: string): Promise<boolean> {
   if (!SUPABASE_URL || !hash) return true;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/webhook_dedup_roberth?on_conflict=hash`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_webhook_dedup?on_conflict=hash`;
     const res = await fetchTimeout(url, {
       method: 'POST',
       headers: { ...headers(), 'Prefer': 'resolution=ignore-duplicates,return=representation' },
@@ -781,7 +781,7 @@ export async function limparWebhookDedupAntigos(): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
     const corte = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const url = `${SUPABASE_URL}/rest/v1/webhook_dedup_roberth?processed_at=lt.${corte}`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_webhook_dedup?processed_at=lt.${corte}`;
     await fetchTimeout(url, { method: 'DELETE', headers: headers() });
   } catch (e) { console.error('[supabase] limparWebhookDedupAntigos:', e); }
 }
@@ -803,7 +803,7 @@ export async function inserirBufferRow(dados: {
 }): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
-    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_webhook_buffer`;
     await fetchTimeout(url, {
       method: 'POST',
       headers: headers(),
@@ -830,7 +830,7 @@ export async function consumirBufferPendente(
   if (!SUPABASE_URL || !telefone) return null;
   try {
     const agora = new Date().toISOString();
-    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth?` +
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_webhook_buffer?` +
       `telefone=eq.${telefone}&processado=eq.false&processar_apos=lte.${agora}`;
     const res = await fetchTimeout(url, {
       method: 'PATCH',
@@ -864,7 +864,7 @@ export async function buscarTelefonesComBufferOrfao(atrasoMinSec: number = 30): 
   if (!SUPABASE_URL) return [];
   try {
     const corte = new Date(Date.now() - atrasoMinSec * 1000).toISOString();
-    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth?` +
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_webhook_buffer?` +
       `processado=eq.false&processar_apos=lt.${corte}&select=telefone&limit=100`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return [];
@@ -883,7 +883,7 @@ export async function limparBufferAntigo(): Promise<void> {
   if (!SUPABASE_URL) return;
   try {
     const corte = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-    const url = `${SUPABASE_URL}/rest/v1/webhook_buffer_roberth?processado=eq.true&processado_em=lt.${corte}`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_webhook_buffer?processado=eq.true&processado_em=lt.${corte}`;
     await fetchTimeout(url, { method: 'DELETE', headers: headers() });
   } catch (e) { console.error('[supabase] limparBufferAntigo:', e); }
 }

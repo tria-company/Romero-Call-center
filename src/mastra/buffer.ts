@@ -3,7 +3,7 @@
 // envia varias mensagens em sequencia.
 //
 // Fix #2 do review de prod: persistencia paralela no Supabase (tabela
-// webhook_buffer_roberth). Cada msg adicionada ao buffer em memoria tambem
+// auton_sdr_webhook_buffer). Cada msg adicionada ao buffer em memoria tambem
 // e gravada no DB. Quando o timer dispara, lemos do DB com PATCH atomico
 // (consumirBufferPendente) — captura msgs do nosso container OU de outros.
 // Worker recovery (em follow-up.ts) pega orfas se o container que recebeu
