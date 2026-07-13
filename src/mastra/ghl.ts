@@ -334,7 +334,7 @@ const URL_REGEX = /https?:\/\/\S+/gi;
 
 import { getSessao } from './sessao';
 
-async function buscarContactIdPorTelefone(telefone: string): Promise<string | null> {
+export async function buscarContactIdPorTelefone(telefone: string): Promise<string | null> {
   // 1. Cache via sessao em memoria (rapido)
   try {
     const sessao = await getSessao(telefone);
