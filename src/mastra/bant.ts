@@ -27,8 +27,12 @@ export const ICP_PROFISSOES_STEMS = [
 
 // Lexico proibido no campo aberto do form (Filtro 1) — mesma familia do
 // lexico banido da Camila (playbook Sec.12), aplicado aqui ao texto livre
-// das respostas abertas do lead.
-const LEXICO_PROIBIDO = ['vibracao', 'mindset', 'cura', 'milagre', 'hack'];
+// das respostas abertas do lead. Word-boundary (\b) evita falso-positivo
+// em substrings legitimas do pt-BR (ex: 'cura' dentro de 'procura'/
+// 'procurando'/'procurava' — CR-04 do 01-REVIEW.md). O texto ja passa por
+// normalizarTexto (remove acentos), entao \b funciona sobre ASCII puro.
+// SEM flag 'g' — evita estado residual de lastIndex entre chamadas (IN-06).
+const LEXICO_PROIBIDO_REGEX = /\b(vibracao|mindset|cura|milagre|hack)\b/;
 
 const REGEX_MARCAS_DIACRITICAS = new RegExp('[\\u0300-\\u036f]', 'g');
 
@@ -68,8 +72,7 @@ export function filtro1Descarte(form: FormularioParseado): ResultadoDescarte {
   }
 
   const textoAbertoNormalizado = normalizarTexto(form.lexicoTexto);
-  const termoProibido = LEXICO_PROIBIDO.find((termo) => textoAbertoNormalizado.includes(termo));
-  if (termoProibido) {
+  if (LEXICO_PROIBIDO_REGEX.test(textoAbertoNormalizado)) {
     return { descarta: true, motivo: 'Léxico incompatível' };
   }
 
