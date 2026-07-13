@@ -180,10 +180,12 @@ export async function encerrarSessao(telefone: string): Promise<void> {
 }
 
 // Mapa do ID logico do agente -> chave registrada no Mastra
-// Projeto Roberth tem 1 agente: vendedor. 'humano' nao e um agente Mastra,
-// e tratado no index.ts como pausa da IA.
+// Projeto Roberth tinha 1 agente: vendedor. SDR AUTON adiciona
+// 'qualificador' (processa o form 14q em modo batch — 01-04). 'humano' nao
+// e um agente Mastra, e tratado no index.ts como pausa da IA.
 export const AGENTES_MAP: Record<string, string> = {
   vendedor: 'vendedorAgent',
+  qualificador: 'qualificadorAgent',
   humano: 'humano',
 };
 

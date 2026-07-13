@@ -2,8 +2,15 @@ import { Mastra } from '@mastra/core/mastra';
 import { PinoLogger } from '@mastra/loggers';
 import { Observability, DefaultExporter, CloudExporter, SensitiveDataFilter } from '@mastra/observability';
 
-// Agente unico do projeto Roberth
+// Agente do projeto Roberth (Closer)
 import { vendedorAgent } from './agents/vendedor';
+
+// Agente Qualificador (SDR AUTON) — processa o form 14q em modo batch (01-04)
+import { qualificadorAgent } from './agents/qualificador';
+
+// Modulos puros do fluxo de qualificacao SDR AUTON (parse do form + BANT/roteamento)
+import { parseFormulario } from './formulario';
+import { decidirRoteamento } from './bant';
 
 // GoHighLevel (canal WhatsApp via API oficial). Substitui Evolution.
 import {
@@ -239,6 +246,7 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
 export const mastra = new Mastra({
   agents: {
     vendedorAgent,
+    qualificadorAgent,
   },
   storage: pgStore,
   logger: new PinoLogger({
@@ -376,6 +384,97 @@ export const mastra = new Mastra({
             return c.json({ status: 'confirmado', orderId, produto });
           } catch (erro) {
             console.error('[kiwify] Erro no webhook:', erro);
+            return c.json({ status: 'erro', mensagem: String(erro) }, 500);
+          }
+        },
+      },
+      // Webhook do formulario de 14 perguntas (SDR AUTON — dispara no submit
+      // do GHL Workflow, stage "Formulario respondido"). Parse + BANT +
+      // roteamento sao 100% deterministicos (formulario.ts/bant.ts, sem
+      // LLM); o qualificadorAgent so EXECUTA as gravacoes (bant_*, ancora,
+      // spin_stage, motivo_perdido) + o move de card com o resultado ja
+      // pronto. QUAL-02: se o roteamento for PERDIDO, nenhuma mensagem e
+      // enviada ao lead (o Qualificador nao tem tool de envio de WhatsApp).
+      {
+        path: '/api/webhook/formulario',
+        method: 'POST',
+        handler: async (c) => {
+          try {
+            const payload = await c.req.json() as Record<string, unknown>;
+
+            // Telefone/nome/contactId: aceita variantes comuns de payload
+            // (GHL Workflow costuma mandar {{contact.phone}}/{{contact.name}}
+            // como texto puro no corpo do POST). Formato exato e Claude's
+            // Discretion (01-CONTEXT.md).
+            const contatoBruto = (payload.contact as Record<string, unknown>) || {};
+            const telefoneRaw = String(payload.telefone || payload.phone || contatoBruto.phone || '');
+            const telefone = telefoneRaw.replace(/[^\d]/g, '');
+            const nomeBruto = String(payload.nome || payload.name || contatoBruto.name || '');
+            const nome = nomeBruto || 'Não identificado';
+            const contactId = String(payload.contactId || payload.contact_id || contatoBruto.id || '') || undefined;
+
+            if (!telefone) {
+              console.warn('[formulario] payload sem telefone, ignorando:', JSON.stringify(payload).slice(0, 400));
+              return c.json({ status: 'payload invalido' }, 400);
+            }
+
+            const form = parseFormulario(payload as any);
+            const roteamento = decidirRoteamento(form);
+
+            console.log(
+              `[formulario] ${telefone} -> ${roteamento.stage}` +
+              (roteamento.stage === 'PERDIDO' ? ` (${roteamento.motivo})` : '') +
+              (roteamento.bant ? ` bant_total=${roteamento.bant.total}` : ''),
+            );
+
+            // Garante sessao com ghlContactId em cache ANTES de invocar o
+            // agente — mesma logica do webhook de mensagens — pra tools do
+            // Qualificador (read-lead-ficha, gravar-bant-fields, etc)
+            // resolverem contactId sem lookup extra via API.
+            try {
+              const sessaoExistente = await getSessao(telefone);
+              if (!sessaoExistente) {
+                await criarSessao(telefone, { nome, ghlContactId: contactId, agenteAtual: 'qualificador' });
+              } else if (contactId && sessaoExistente.ghlContactId !== contactId) {
+                const { atualizarSessao } = await import('./sessao');
+                await atualizarSessao(telefone, { ghlContactId: contactId });
+              }
+            } catch (e) {
+              console.error('[formulario] erro ao garantir sessao:', e);
+            }
+
+            // Prompt de entrada do Qualificador: o resultado de
+            // decidirRoteamento ja vem PRONTO (o agente nao recalcula BANT
+            // nem reavalia o Filtro 1/2 — so executa as gravacoes e o move
+            // de card com o que o codigo deterministico decidiu).
+            const promptPartes = [
+              `Telefone: ${telefone}`,
+              `Stage decidido: ${roteamento.stage}`,
+            ];
+            if (roteamento.stage === 'PERDIDO') {
+              promptPartes.push(`Motivo: ${roteamento.motivo}`);
+            }
+            if (roteamento.bant) {
+              const { budget, authority, need, timing, total } = roteamento.bant;
+              promptPartes.push(`BANT: budget=${budget} authority=${authority} need=${need} timing=${timing} total=${total}`);
+            }
+            promptPartes.push(
+              `Ancora 08 (aplicou Metodo ADS?): ${form.q08 || '(nao respondeu)'}`,
+              `Ancora 12 (modulo que ficou/interrompido): ${form.q12 || '(nao respondeu)'}`,
+              `Ancora 14 (maior dificuldade hoje): ${form.q14 || '(nao respondeu)'}`,
+            );
+            const prompt = promptPartes.join('\n');
+
+            const agent = mastra.getAgent('qualificadorAgent');
+            await comRetry(
+              () => comTimeout(agent.generate(prompt), TIMEOUT_AGENTE, 'qualificador'),
+              MAX_TENTATIVAS,
+              'qualificador',
+            );
+
+            return c.json({ status: 'processado', stage: roteamento.stage });
+          } catch (erro) {
+            console.error('[formulario] Erro no webhook:', erro);
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
           }
         },
