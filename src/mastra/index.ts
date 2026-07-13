@@ -8,6 +8,25 @@ import { vendedorAgent } from './agents/vendedor';
 // Agente Qualificador (SDR AUTON) — processa o form 14q em modo batch (01-04)
 import { qualificadorAgent } from './agents/qualificador';
 
+// Agente Camila (SDR AUTON) — conduz o SPIN, saida em JSON estrito (01-05)
+import { camilaAgent } from './agents/camila';
+
+// Schema JSON estrito da Camila + parse seguro (01-05, CAM-03)
+import { parseSaidaCamila } from './camila-schema';
+
+// Tools GHL do allowlist da Camila — o dispatcher (despacharSaidaCamila,
+// abaixo) e o UNICO executor real dessas tools quando a Camila as declara
+// em tools_a_executar[] (contrato travado em 01-CONTEXT.md: a Camila nunca
+// executa tool nativamente, evita dupla execucao).
+import { readLeadFicha } from './tools/read-lead-ficha';
+import { readConversationHistory } from './tools/read-conversation-history';
+import { sendWhatsappMessage } from './tools/send-whatsapp-message';
+import { updateContactField } from './tools/update-contact-field';
+import { movePipelineStage } from './tools/move-pipeline-stage';
+import { createTask } from './tools/create-task';
+import { escalateToHuman } from './tools/escalate-to-human';
+import { logNote } from './tools/log-note';
+
 // Modulos puros do fluxo de qualificacao SDR AUTON (parse do form + BANT/roteamento)
 import { parseFormulario } from './formulario';
 import { decidirRoteamento } from './bant';
@@ -98,6 +117,102 @@ async function comRetry<T>(fn: () => Promise<T>, tentativas: number, label: stri
   throw new Error(`[retry] ${label} esgotou tentativas`);
 }
 
+// Mapa tool-id (allowlist da Camila, camila-schema.ts) -> executor real da
+// tool. `create_calendar_event` fica de fora de proposito — essa tool ainda
+// nao existe (entra na 01-07); se a Camila declarar essa chave, o
+// dispatcher loga e ignora (nao quebra o resto do despacho).
+type ExecutorTool = (args: Record<string, unknown>) => Promise<unknown>;
+
+const CAMILA_TOOLS_EXECUTORES: Record<string, ExecutorTool> = {
+  read_lead_ficha: (args) => readLeadFicha.execute!(args as any, {} as any),
+  read_conversation_history: (args) => readConversationHistory.execute!(args as any, {} as any),
+  send_whatsapp_message: (args) => sendWhatsappMessage.execute!(args as any, {} as any),
+  update_contact_field: (args) => updateContactField.execute!(args as any, {} as any),
+  move_pipeline_stage: (args) => movePipelineStage.execute!(args as any, {} as any),
+  create_task: (args) => createTask.execute!(args as any, {} as any),
+  escalate_to_human: (args) => escalateToHuman.execute!(args as any, {} as any),
+  log_note: (args) => logNote.execute!(args as any, {} as any),
+};
+
+/**
+ * Dispatcher do JSON estrito da Camila (CAM-03 runtime). Parseia a saida
+ * bruta do LLM (parseSaidaCamila), executa cada item de tools_a_executar[]
+ * (1x cada, aqui — nunca a propria Camila) e envia mensagens[] respeitando
+ * delay_ms[]. Funcao EXPORTADA e reutilizavel (01-CONTEXT.md: "Dispatcher
+ * reutilizavel") — a abertura proativa da Camila (01-06) chama a mesma
+ * funcao com o texto bruto gerado pelo agente, sem duplicar essa logica.
+ *
+ * T-05-JSON: se o parse falhar (JSON malformado ou schema invalido), NAO
+ * envia nada ao lead — loga + notifica suporte (idempotente) em vez de
+ * arriscar mandar lixo pro WhatsApp. Retorna `true` quando pelo menos 1
+ * mensagem foi de fato enviada ao lead (usado pelo caller pra decidir se
+ * persiste o turno / atualiza o relogio de silencio do follow-up).
+ */
+export async function despacharSaidaCamila(numero: string, textoLLM: string): Promise<boolean> {
+  const resultado = parseSaidaCamila(textoLLM);
+
+  if (!resultado.ok) {
+    console.error(`[camila][dispatch] JSON invalido para ${numero}: ${resultado.erro}`);
+    if (!jaNotificouRecentemente(numero, 'camila_json_invalido')) {
+      enviarAvisoAoSuporte([
+        '🚨 *Camila gerou JSON invalido — atender o lead manualmente*',
+        `Telefone: ${numero}`,
+        `Erro: ${resultado.erro.slice(0, 250)}`,
+        '',
+        'Nenhuma mensagem foi enviada ao lead neste turno (fallback seguro, T-05-JSON).',
+      ]).catch((e) => console.error('[camila][dispatch] Falha ao avisar grupo:', e));
+    }
+    return false;
+  }
+
+  const { data } = resultado;
+
+  // 1) Executa tools_a_executar. `telefone` SEMPRE vem do numero confiavel
+  // do processo (nunca do que o LLM escreveu em args.telefone) — defesa
+  // contra a Camila hallucinando ou trocando o telefone por engano.
+  for (const item of data.tools_a_executar) {
+    const executor = CAMILA_TOOLS_EXECUTORES[item.tool];
+    if (!executor) {
+      console.warn(`[camila][dispatch] tool "${item.tool}" ainda sem executor no dispatcher (ex: create_calendar_event, 01-07) — ignorando`);
+      continue;
+    }
+    try {
+      const args = { ...item.args, telefone: numero };
+      const saida = await executor(args);
+      console.log(`[camila][dispatch] ${numero} <- tool ${item.tool}: ${JSON.stringify(saida).slice(0, 200)}`);
+    } catch (e) {
+      console.error(`[camila][dispatch] erro ao executar tool ${item.tool} para ${numero}:`, e);
+    }
+  }
+
+  // 2) Envia mensagens[] respeitando delay_ms[] (indice a indice).
+  for (let i = 0; i < data.mensagens.length; i++) {
+    const atraso = data.delay_ms?.[i];
+    if (atraso && atraso > 0) {
+      await new Promise((resolve) => setTimeout(resolve, atraso));
+    }
+    await enviarMensagem(numero, data.mensagens[i]);
+  }
+
+  // 3) Grava spin_stage = proximo_estado (best-effort — nao bloqueia o
+  // restante do turno se a chamada falhar; a Camila pode ja ter declarado
+  // o mesmo valor via tools_a_executar, gravar de novo e idempotente).
+  try {
+    await updateContactField.execute!(
+      { telefone: numero, chave: 'spin_stage', valor: data.proximo_estado } as any,
+      {} as any,
+    );
+  } catch (e) {
+    console.error(`[camila][dispatch] falha ao gravar spin_stage=${data.proximo_estado} para ${numero}:`, e);
+  }
+
+  if (data.sinal_alerta) {
+    console.log(`[camila][dispatch] sinal_alerta=${data.sinal_alerta} para ${numero} (log_interno: ${data.log_interno || '-'})`);
+  }
+
+  return data.mensagens.length > 0;
+}
+
 async function processarMensagem(mastraRef: Mastra, numero: string, texto: string, nome: string) {
   try {
     let sessao = await getSessao(numero);
@@ -184,7 +299,26 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
       sessao.agenteAtual,
     );
 
-    if (resposta.text) {
+    if (sessao.agenteAtual === 'camila') {
+      // Camila responde em JSON estrito (camila-schema.ts) — o dispatcher
+      // parseia, executa tools_a_executar e envia mensagens[] com delay.
+      // JSON invalido -> despacharSaidaCamila ja trata como silencio
+      // seguro (T-05-JSON); NAO cai no path de texto livre abaixo.
+      const enviouAlgo = await despacharSaidaCamila(numero, resposta.text || '');
+
+      if (enviouAlgo && sessao.conversaId) {
+        salvarMensagem({
+          conversation_id: sessao.conversaId,
+          role: 'assistant',
+          content: resposta.text,
+          agent_table: sessao.agenteAtual,
+        });
+        // Camila falou: inicia (ou reinicia) o relogio de silencio, mesmo
+        // mecanismo do vendedor (Sofia) — reusa marcarMsgSofia (coluna
+        // generica de "ultima msg do agente", nome legado do projeto).
+        marcarMsgSofia(sessao.conversaId);
+      }
+    } else if (resposta.text) {
       await enviarMensagem(numero, resposta.text);
 
       if (sessao.conversaId) {
@@ -247,6 +381,7 @@ export const mastra = new Mastra({
   agents: {
     vendedorAgent,
     qualificadorAgent,
+    camilaAgent,
   },
   storage: pgStore,
   logger: new PinoLogger({
