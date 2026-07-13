@@ -2,6 +2,8 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { getSessao, trocarAgente } from '../sessao';
 import { enviarAvisoAoSuporte, jaNotificouRecentemente } from '../notificacoes';
+import { createTask } from './create-task';
+import { movePipelineStage } from './move-pipeline-stage';
 
 // Motivos AUTON (playbook §15 "Bandeiras vermelhas" + §4 protocolo de
 // escalacao tripla). O LLM pode mandar texto livre, mas normalizamos pra
@@ -54,6 +56,54 @@ async function notificarGrupoSuporte(
   }
 }
 
+// Gap 7 (CR-07): acionamento humano GARANTIDO, independente de
+// SUPORTE_GRUPO_JID/notificarGrupoSuporte (que so entrega se for telefone
+// 1:1 valido — GHL nao manda pra grupo WhatsApp). Toda escalacao (inclusive
+// sofrimento agudo/CVV 188) precisa deixar um sinal humano-visivel no GHL:
+// task URGENTE (Filtro 3, prioridadePorBant >= 10) + card movido pro stage
+// RETORNAR_CONTATO. Cada acionamento tem try/catch proprio (mesmo espirito
+// de dupla-acao.ts) — uma falha nao impede a outra nem a pausa da IA.
+async function acionarHumanoGarantido(
+  telefone: string,
+  motivo: string,
+  resumo: string | undefined,
+): Promise<void> {
+  // Idempotencia: 1 acionamento garantido por contato+motivo (janela 1h) —
+  // evita task/move duplicados se o LLM chamar escalate 2x na mesma sessao.
+  if (jaNotificouRecentemente(telefone, `escalate-task:${motivo}`)) {
+    console.log(`[escalate-to-human] ${telefone} (${motivo}): acionamento garantido ja disparado recentemente, ignorando`);
+    return;
+  }
+
+  const motivoLegivel = rotularMotivo(motivo);
+  const chaveNormalizada = motivo.trim().toLowerCase().replace(/\s+/g, '_');
+  const ehSofrimentoAgudo = chaveNormalizada === 'sofrimento_agudo';
+
+  const titulo = `ESCALACAO URGENTE - ${motivoLegivel}`;
+  const corpoPartes = [`Lead escalado da IA (Camila) para atendimento humano. Motivo: ${motivoLegivel}.`];
+  if (resumo) corpoPartes.push(`Resumo: ${resumo}`);
+  if (ehSofrimentoAgudo) {
+    corpoPartes.push('ATENCAO: sofrimento psicologico agudo — protocolo CVV 188. Contato humano IMEDIATO necessario.');
+  }
+  corpoPartes.push('A IA ja pausou as respostas para este numero (trocarAgente humano).');
+  const corpo = corpoPartes.join('\n');
+
+  try {
+    // bantTotal alto o suficiente pra forcar prioridade URGENTE
+    // (prioridadePorBant >= 10) independente do score real do lead — toda
+    // escalacao e, por definicao, prioridade maxima pro humano de plantao.
+    await createTask.execute!({ telefone, titulo, corpo, bantTotal: 12 } as any, {} as any);
+  } catch (e) {
+    console.error(`[escalate-to-human] falha ao criar task URGENTE para ${telefone}:`, e);
+  }
+
+  try {
+    await movePipelineStage.execute!({ telefone, stage: 'RETORNAR_CONTATO' } as any, {} as any);
+  } catch (e) {
+    console.error(`[escalate-to-human] falha ao mover card para RETORNAR_CONTATO para ${telefone}:`, e);
+  }
+}
+
 export const escalateToHuman = createTool({
   id: 'escalate-to-human',
   description:
@@ -77,11 +127,15 @@ export const escalateToHuman = createTool({
   execute: async ({ telefone, motivo, resumo }) => {
     console.log(`[escalate-to-human] ${telefone} → humano (${motivo})`);
     await trocarAgente(telefone, 'humano');
+    // Acionamento garantido (Gap 7/CR-07): task URGENTE + move RETORNAR_CONTATO,
+    // sempre — nao depende de SUPORTE_GRUPO_JID estar configurado.
+    await acionarHumanoGarantido(telefone, motivo, resumo);
+    // Canal adicional best-effort (grupo de suporte via GHL, se configurado).
     await notificarGrupoSuporte(telefone, motivo, resumo);
     return {
       sucesso: true,
       mensagem:
-        'Lead encaminhado para atendente humano. A IA pausou as respostas para esse numero e o grupo de suporte foi notificado.',
+        'Lead encaminhado para atendente humano. A IA pausou as respostas para esse numero, uma task URGENTE foi criada e o card foi movido para RETORNAR_CONTATO.',
     };
   },
 });
