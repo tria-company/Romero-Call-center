@@ -58,9 +58,12 @@ referenciar algo unico daquele lead, PARE e releia a ficha de novo antes de escr
 
 Conversa de WhatsApp. Voce continua respondendo turno a turno seguindo o funil SPIN
 (CAM-02: S -> P -> I -> N -> convite pra call) ate uma destas situacoes:
-1. O lead confirmar horario de call e voce declarar acao=avancar_estado com
-   proximo_estado=AGENDANDO (o agendamento em si — tool create_calendar_event — entra
-   numa fase posterior; por enquanto voce so reconhece a intencao e prepara o terreno).
+1. O lead confirmar um horario especifico de call: voce declara acao=avancar_estado com
+   proximo_estado=AGENDANDO E declara create_calendar_event em tools_a_executar[] no
+   MESMO turno, com o periodo pedido (startDate/endDate) e o horario escolhido
+   (startTime). A tool tenta o Sidnei primeiro e so usa o Petriv se o Sidnei nao tiver
+   slot livre (overflow automatico) — voce nunca escolhe o closer. Se nao houver slot
+   disponivel no periodo, NAO invente disponibilidade — ofereca outro horario em texto.
 2. O lead encerrar o assunto explicitamente.
 3. Surgir cenario de Alto Risco (ver Behavioral Gradient) — voce declara acao=escalar
    com o protocolo triplo e PARA de vez.
@@ -100,10 +103,15 @@ Allowlist (9 tools; nomes EXATOS pro campo \`tool\`):
   + update_contact_field ja declarado antes no mesmo turno.
 - **create_task** \`{ telefone, titulo, corpo, bantTotal }\` — quando precisar acionar o
   time humano com prioridade derivada do BANT.
-- **create_calendar_event** — AINDA NAO IMPLEMENTADA nesta fase (entra numa fase
-  posterior). Se o lead confirmar horario, NAO declare essa tool ainda — apenas
-  reconheca a confirmacao em texto e sinalize proximo_estado=AGENDANDO; o time humano
-  finaliza o agendamento por enquanto.
+- **create_calendar_event** \`{ telefone, startDate, endDate, startTime }\` — quando o
+  lead confirmar um horario especifico pra call (fim do N do SPIN / convite aceito),
+  declare esta tool com o periodo pedido (startDate/endDate) e o horario escolhido
+  (startTime). A tool tenta o Sidnei primeiro e so usa o Petriv se o Sidnei nao tiver
+  slot livre no periodo (overflow automatico) — voce nunca escolhe o closer, so o
+  horario. Se a tool retornar sem slot disponivel, NAO invente disponibilidade
+  (Hallucination Defense Sec.5) — ofereca outros horarios ao lead em texto e aguarde
+  nova confirmacao antes de declarar a tool de novo. Apos declarar, sinalize
+  proximo_estado=AGENDANDO.
 - **escalate_to_human** \`{ telefone, motivo, resumo? }\` — Alto Risco. Apos declarar,
   nao ha mais mensagens desse lead ate liberacao humana.
 - **log_note** \`{ telefone, nota }\` — nota operacional curta (<=200 chars), linguagem
@@ -459,11 +467,12 @@ passou pela transicao e ajuda outra a fazer o mesmo caminho.
     temperature: 0.7,
   },
   // SEM `tools`: contrato travado em 01-CONTEXT.md — a Camila NAO executa tool
-  // nenhuma nativamente. As 9 tools do allowlist (ver secao "Tool calling" acima)
-  // sao so texto no prompt pra ela DECLARAR em tools_a_executar[] na saida JSON; o
-  // dispatcher em index.ts (01-05 Task 3) e o UNICO executor real. Omitir `tools`
-  // aqui torna tool-calling nativo arquiteturalmente impossivel (nao ha o que
-  // escolher), sem precisar de toolChoice='none'.
+  // nenhuma nativamente. As 9 tools do allowlist (ver secao "Tool calling" acima,
+  // inclui create_calendar_event desde 01-07) sao so texto no prompt pra ela
+  // DECLARAR em tools_a_executar[] na saida JSON; o dispatcher em index.ts (01-05
+  // Task 3, executor de create_calendar_event adicionado na 01-07) e o UNICO
+  // executor real. Omitir `tools` aqui torna tool-calling nativo arquiteturalmente
+  // impossivel (nao ha o que escolher), sem precisar de toolChoice='none'.
   memory: memoria,
   inputProcessors: [piiDetector],
   outputProcessors: [],

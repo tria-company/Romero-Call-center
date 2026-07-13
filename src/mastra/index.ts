@@ -24,6 +24,7 @@ import { sendWhatsappMessage } from './tools/send-whatsapp-message';
 import { updateContactField } from './tools/update-contact-field';
 import { movePipelineStage } from './tools/move-pipeline-stage';
 import { createTask } from './tools/create-task';
+import { createCalendarEvent } from './tools/create-calendar-event';
 import { escalateToHuman } from './tools/escalate-to-human';
 import { logNote } from './tools/log-note';
 
@@ -122,9 +123,10 @@ async function comRetry<T>(fn: () => Promise<T>, tentativas: number, label: stri
 }
 
 // Mapa tool-id (allowlist da Camila, camila-schema.ts) -> executor real da
-// tool. `create_calendar_event` fica de fora de proposito — essa tool ainda
-// nao existe (entra na 01-07); se a Camila declarar essa chave, o
-// dispatcher loga e ignora (nao quebra o resto do despacho).
+// tool. `create_calendar_event` (01-07): a tool ja existe
+// (tools/create-calendar-event.ts) e o executor foi adicionado aqui — antes
+// da 01-07 essa chave ficava de fora de proposito, e se a Camila
+// declarasse, o dispatcher logava e ignorava.
 type ExecutorTool = (args: Record<string, unknown>) => Promise<unknown>;
 
 const CAMILA_TOOLS_EXECUTORES: Record<string, ExecutorTool> = {
@@ -134,6 +136,7 @@ const CAMILA_TOOLS_EXECUTORES: Record<string, ExecutorTool> = {
   update_contact_field: (args) => updateContactField.execute!(args as any, {} as any),
   move_pipeline_stage: (args) => movePipelineStage.execute!(args as any, {} as any),
   create_task: (args) => createTask.execute!(args as any, {} as any),
+  create_calendar_event: (args) => createCalendarEvent.execute!(args as any, {} as any),
   escalate_to_human: (args) => escalateToHuman.execute!(args as any, {} as any),
   log_note: (args) => logNote.execute!(args as any, {} as any),
 };
@@ -177,7 +180,7 @@ export async function despacharSaidaCamila(numero: string, textoLLM: string): Pr
   for (const item of data.tools_a_executar) {
     const executor = CAMILA_TOOLS_EXECUTORES[item.tool];
     if (!executor) {
-      console.warn(`[camila][dispatch] tool "${item.tool}" ainda sem executor no dispatcher (ex: create_calendar_event, 01-07) — ignorando`);
+      console.warn(`[camila][dispatch] tool "${item.tool}" ainda sem executor no dispatcher — ignorando`);
       continue;
     }
     try {

@@ -21,9 +21,11 @@ import { z } from 'zod';
 // e o UNICO executor, evita dupla execucao/double-booking).
 //
 // create_calendar_event entra no enum porque faz parte do allowlist do
-// playbook, mas o dispatcher (01-05 Task 3) ainda NAO tem handler pra ele —
-// a tool de calendario e a 01-07. Se a Camila declarar essa tool antes da
-// 01-07, o dispatcher loga e ignora (nao quebra o resto do despacho).
+// playbook; desde 01-07 o dispatcher (index.ts) ja tem handler real pra ele
+// (tools/create-calendar-event.ts, overflow Sidnei->Petriv + move
+// CALL_AGENDADA). Se algum item futuro do enum ainda nao tiver handler no
+// dispatcher, o comportamento seguro e o mesmo: loga e ignora (nao quebra o
+// resto do despacho).
 export const CAMILA_TOOL_ALLOWLIST = [
   'read_lead_ficha',
   'read_conversation_history',
