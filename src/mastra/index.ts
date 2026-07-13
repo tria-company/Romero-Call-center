@@ -402,6 +402,31 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
   }
 }
 
+// construirHashFormulario (Gap 5/CR-06, CAM-01/QUAL-04): hash de dedup do
+// webhook do formulario 14q. Mesmo padrao do webhook de mensagens
+// (/api/webhook/evolution): sha1 sobre `telefone|<conteudo estavel>|minBucket`.
+// O conteudo estavel e um JSON deterministico SO dos campos do form
+// (chaves q01..q14, ordenadas) — NUNCA timestamps/IDs volateis do GHL, que
+// mudariam entre retries do mesmo submit e furariam o dedup. Se o payload
+// nao tiver nenhuma chave q##_ (variante de shape), cai num fallback com as
+// demais chaves ordenadas, filtrando nomes tipicamente volateis.
+// minBucket = Math.floor(Date.now()/60_000) (janela de 1 min): 2-3 retries
+// do GHL Workflow caem no mesmo bucket e viram 1 processamento so; um
+// re-submit legitimo minutos depois gera hash novo.
+// Function declaration (hoisted) e corpo autocontido (so usa createHash +
+// args) de proposito: o smoke-webhook-formulario-dedup.mjs extrai o corpo
+// por regex e reconstroi via new Function — mesmo padrao de smoke-coordenacao.
+export function construirHashFormulario(telefone: string, payload: Record<string, unknown>, minBucket: number): string {
+  const chavesForm = Object.keys(payload).filter((chave) => /^q\d{2}/.test(chave)).sort();
+  const chavesEstaveis = chavesForm.length > 0
+    ? chavesForm
+    : Object.keys(payload).filter((chave) => !/(timestamp|date|created|updated|workflow|attribution|event|message)/i.test(chave)).sort();
+  const conteudoEstavel = JSON.stringify(chavesEstaveis.map((chave) => [chave, String(payload[chave] ?? '')]));
+  return createHash('sha1')
+    .update(`${telefone}|${conteudoEstavel}|${minBucket}`)
+    .digest('hex');
+}
+
 export const mastra = new Mastra({
   agents: {
     vendedorAgent,
@@ -578,6 +603,21 @@ export const mastra = new Mastra({
               return c.json({ status: 'payload invalido' }, 400);
             }
 
+            // Gap 5/CR-06: idempotencia. O GHL Workflow dispara o webhook
+            // 2-3x por retry — sem dedup, cada disparo re-executa o
+            // Qualificador + dispararDuplaCao => 2-3 aberturas proativas
+            // da Camila (viola CAM-01). Dedup ANTES de qualquer efeito
+            // colateral, mesmo padrao do /api/webhook/evolution.
+            // tentarRegistrarWebhook e fail-open por design (T-01-10-05):
+            // preferimos abertura duplicada rara a nao abrir nunca.
+            const minBucket = Math.floor(Date.now() / 60_000);
+            const hashForm = construirHashFormulario(telefone, payload, minBucket);
+            const ehNovoForm = await tentarRegistrarWebhook(hashForm);
+            if (!ehNovoForm) {
+              console.log(`[formulario] webhook duplicado descartado (hash=${hashForm.slice(0, 8)}, telefone=${telefone})`);
+              return c.json({ status: 'duplicado' });
+            }
+
             const form = parseFormulario(payload as any);
             const roteamento = decidirRoteamento(form);
 
@@ -625,32 +665,46 @@ export const mastra = new Mastra({
             );
             const prompt = promptPartes.join('\n');
 
-            const agent = mastra.getAgent('qualificadorAgent');
-            await comRetry(
-              () => comTimeout(agent.generate(prompt), TIMEOUT_AGENTE, 'qualificador'),
-              MAX_TENTATIVAS,
-              'qualificador',
-            );
+            // Gap 5/CR-06 (T-01-10-03): pipeline pesado ASSINCRONO. O
+            // agent.generate do Qualificador leva ate ~3min no pior caso
+            // (timeout 60s x 3 tentativas) — segurar a resposta HTTP esse
+            // tempo todo estoura o timeout do GHL Workflow e AUMENTA os
+            // retries (retro-alimentando o proprio problema de duplicacao).
+            // Parse + roteamento deterministico + sessao ja rodaram acima
+            // (baratos, sincronos); daqui pra frente e fire-and-forget com
+            // .catch de log, mesmo padrao ja usado por dispararDuplaAcao.
+            (async () => {
+              const agent = mastra.getAgent('qualificadorAgent');
+              await comRetry(
+                () => comTimeout(agent.generate(prompt), TIMEOUT_AGENTE, 'qualificador'),
+                MAX_TENTATIVAS,
+                'qualificador',
+              );
 
-            // QUAL-04: lead QUALIFICADO -> dispara a DUPLA ACAO (abertura
-            // proativa da Camila no WhatsApp + task priorizada pro SDR
-            // humano). O Qualificador ja gravou bant_*/ancora_abordagem/
-            // spin_stage e moveu o card ANTES deste ponto (ele executa suas
-            // 4 tools em sequencia sincrona no agent.generate acima) —
-            // dispararDuplaAcao rele a ficha do GHL pra pegar a ancora mais
-            // fresca, mas usa `ancora` (vazio aqui; nao calculado por
-            // codigo deterministico) so como fallback de ultimo caso.
-            if (roteamento.stage === 'QUALIFICADO') {
-              dispararDuplaAcao({
-                telefone,
-                contactId,
-                nome,
-                bant: roteamento.bant,
-                ancora: '',
-              }).catch((e) => console.error(`[formulario] dispararDuplaAcao falhou para ${telefone}:`, e));
-            }
+              // QUAL-04: lead QUALIFICADO -> dispara a DUPLA ACAO (abertura
+              // proativa da Camila no WhatsApp + task priorizada pro SDR
+              // humano). O Qualificador ja gravou bant_*/ancora_abordagem/
+              // spin_stage e moveu o card ANTES deste ponto (ele executa suas
+              // 4 tools em sequencia sincrona no agent.generate acima) —
+              // dispararDuplaAcao rele a ficha do GHL pra pegar a ancora mais
+              // fresca, mas usa `ancora` (vazio aqui; nao calculado por
+              // codigo deterministico) so como fallback de ultimo caso.
+              // So chega aqui no PRIMEIRO disparo (dedup acima ja descartou
+              // os retries do GHL) => abertura UNICA da Camila (CAM-01).
+              if (roteamento.stage === 'QUALIFICADO') {
+                dispararDuplaAcao({
+                  telefone,
+                  contactId,
+                  nome,
+                  bant: roteamento.bant,
+                  ancora: '',
+                }).catch((e) => console.error(`[formulario] dispararDuplaAcao falhou para ${telefone}:`, e));
+              }
+            })().catch((e) => console.error(`[formulario] pipeline do Qualificador falhou para ${telefone}:`, e));
 
-            return c.json({ status: 'processado', stage: roteamento.stage });
+            // Resposta IMEDIATA (202 Accepted): o GHL so precisa saber que o
+            // submit foi aceito; o processamento segue em background.
+            return c.json({ status: 'aceito', stage: roteamento.stage }, 202);
           } catch (erro) {
             console.error('[formulario] Erro no webhook:', erro);
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
