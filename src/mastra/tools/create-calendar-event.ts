@@ -47,6 +47,33 @@ export function escolherCloser(
   return null;
 }
 
+/**
+ * Gap 4/CR-05 — valida se `startTime` (horario ISO 8601 proposto pelo LLM,
+ * NAO confiavel) esta de fato entre os slots livres reais retornados por
+ * GET /calendars/{id}/free-slots. Sem essa checagem a tool escolhia o closer
+ * so pela DISPONIBILIDADE DE PERIODO (`escolherCloser` checa `length > 0`) e
+ * criava o appointment no `startTime` do LLM sem garantir que aquele horario
+ * especifico estivesse livre — double-booking em cima de compromisso
+ * existente do closer, ou horario alucinado fora do periodo.
+ *
+ * Normaliza por INSTANTE (epoch via `new Date(x).getTime()`), nao por string
+ * — slots e startTime podem vir com timezone/offset diferentes representando
+ * o MESMO instante (ex: '...17:00:00Z' === '...14:00:00-03:00'). `NaN`
+ * (data invalida em qualquer lado) nunca conta como match.
+ *
+ * Funcao PURA — sem I/O, sem dependencia de modulo — pro smoke script
+ * (scripts/smoke-starttime-validacao.mjs) extrair o corpo real via regex,
+ * mesmo padrao de `escolherCloser`/scripts/smoke-overflow.mjs.
+ */
+export function slotContemHorario(slots: string[], startTime: string): boolean {
+  const alvo = new Date(startTime).getTime();
+  if (Number.isNaN(alvo)) return false;
+  return slots.some((slot) => {
+    const instante = new Date(slot).getTime();
+    return !Number.isNaN(instante) && instante === alvo;
+  });
+}
+
 // Mapa reverso stageId -> chave logica, pra resolver o stage ATUAL do card
 // antes de consultar podeAgendar (FUN-05) — precisamos saber se o card ja
 // esta em CALL_AGENDADA antes de tentar agendar de novo.
@@ -134,6 +161,9 @@ export const createCalendarEvent = createTool({
     motivo: z.string().optional(),
     closer: z.enum(['sidnei', 'petriv']).optional(),
     startTime: z.string().optional(),
+    // Gap 4/CR-05: quando nenhum closer tem o startTime pedido, devolve os
+    // slots livres (Sidnei+Petriv) pra Camila ofertar alternativas ao lead.
+    slotsDisponiveis: z.array(z.string()).optional(),
   }),
   execute: async ({ telefone, startDate, endDate, startTime }) => {
     if (!GHL_PIT_TOKEN) {
@@ -166,12 +196,34 @@ export const createCalendarEvent = createTool({
     }
 
     try {
+      // Gap 4/CR-05: decisao do closer por HORARIO (nao so por disponibilidade
+      // de periodo). Sidnei tem prioridade absoluta — so buscamos os slots do
+      // Petriv quando o startTime pedido NAO estiver entre os slots do Sidnei
+      // (mesmo que o Sidnei tenha OUTROS slots livres no periodo). Isso fecha
+      // o buraco onde `escolherCloser` escolhia o Sidnei so por `length > 0` e
+      // o POST usava o startTime do LLM sem checar se aquele horario especifico
+      // estava livre pra ele (double-booking em cima de compromisso existente,
+      // ou horario alucinado). `escolherCloser` (FUN-06, decisao por PERIODO)
+      // continua exportada e testada por scripts/smoke-overflow.mjs — nao
+      // regride, so deixa de ser a fonte da decisao final de closer aqui.
       const slotsSidnei = await buscarFreeSlots(GHL_CLOSER_SIDNEI, startDate, endDate);
-      const slotsPetriv = slotsSidnei.length > 0 ? [] : await buscarFreeSlots(GHL_CLOSER_PETRIV, startDate, endDate);
-      const escolha = escolherCloser(slotsSidnei, slotsPetriv);
+      let escolha: EscolhaCloser | null = null;
+      let slotsPetriv: string[] = [];
+      if (slotContemHorario(slotsSidnei, startTime)) {
+        escolha = { closerId: GHL_CLOSER_SIDNEI, closer: 'sidnei' };
+      } else {
+        slotsPetriv = await buscarFreeSlots(GHL_CLOSER_PETRIV, startDate, endDate);
+        if (slotContemHorario(slotsPetriv, startTime)) {
+          escolha = { closerId: GHL_CLOSER_PETRIV, closer: 'petriv' };
+        }
+      }
       if (!escolha) {
-        console.log(`[create-calendar-event] ${telefone}: sem slot livre no periodo ${startDate}~${endDate} (Sidnei e Petriv)`);
-        return { sucesso: false, motivo: 'sem slot' };
+        console.log(`[create-calendar-event] ${telefone}: startTime ${startTime} nao esta livre pra Sidnei nem Petriv (periodo ${startDate}~${endDate})`);
+        return {
+          sucesso: false,
+          motivo: 'horario indisponivel',
+          slotsDisponiveis: [...slotsSidnei, ...slotsPetriv],
+        };
       }
 
       const res = await fetchTimeout(`${GHL_BASE_URL}/calendars/events/appointments`, {
