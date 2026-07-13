@@ -21,6 +21,12 @@ export interface Sessao {
   conversaId: string;
   iniciadaEm: number;
   ghlContactId?: string;      // ID do contato no GoHighLevel (necessario pra mandar mensagem via API)
+  // FUN-05 (coordenacao SDR AUTON, 01-06): quem "ganhou a corrida" de
+  // agendar a call primeiro — 'ia' (Camila, via create_calendar_event,
+  // 01-07) ou 'humano' (SDR direto no GHL). Setado 1x (primeiro a chegar
+  // fica) e consultado por dupla-acao.ts#podeAgendar antes de qualquer
+  // tentativa real de agendamento pela IA.
+  agendamentoOwner?: 'ia' | 'humano';
 }
 
 const cache = new Map<string, Sessao>();
@@ -54,6 +60,7 @@ export async function getSessao(telefone: string): Promise<Sessao | undefined> {
     conversaId: conversa.id,
     iniciadaEm: new Date(conversa.started_at).getTime(),
     ghlContactId: (conversa.metadata as any)?.ghl_contact_id || undefined,
+    agendamentoOwner: (conversa.metadata as any)?.agendamento_owner || undefined,
   };
 
   cache.set(telefone, sessao);
@@ -160,11 +167,42 @@ export async function atualizarSessao(telefone: string, dados: Partial<Sessao>):
         interesse: sessao.interesse,
         email: sessao.email,
         ghl_contact_id: sessao.ghlContactId,
+        agendamento_owner: sessao.agendamentoOwner,
       }),
     });
   }
 
   console.log(`[sessao] Dados atualizados: ${telefone} → ${sessao.nome || '(sem nome)'}`);
+}
+
+// FUN-05: marca quem "ganhou a corrida" de agendar a call primeiro. Idempotente
+// por design — so seta se ainda nao houver owner (o primeiro a chegar fica;
+// chamadas subsequentes do MESMO lado ou do lado perdedor nao sobrescrevem).
+// Persiste no mesmo metadata JSON da conversa (sobrevive reinicio, mesmo
+// padrao de ghl_contact_id/interesse acima).
+export async function marcarAgendamentoOwner(telefone: string, quem: 'ia' | 'humano'): Promise<void> {
+  const sessao = cache.get(telefone);
+  if (!sessao) return;
+  if (sessao.agendamentoOwner) {
+    console.log(`[sessao] agendamentoOwner ja setado (${sessao.agendamentoOwner}) para ${telefone}, ignorando tentativa de ${quem}`);
+    return;
+  }
+
+  sessao.agendamentoOwner = quem;
+  cache.set(telefone, sessao);
+
+  if (sessao.conversaId) {
+    await atualizarConversa(sessao.conversaId, {
+      metadata: JSON.stringify({
+        interesse: sessao.interesse,
+        email: sessao.email,
+        ghl_contact_id: sessao.ghlContactId,
+        agendamento_owner: quem,
+      }),
+    });
+  }
+
+  console.log(`[sessao] Agendamento owner marcado: ${telefone} → ${quem}`);
 }
 
 export async function encerrarSessao(telefone: string): Promise<void> {

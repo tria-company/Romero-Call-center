@@ -13,8 +13,13 @@
 //   (B) cria uma task pro SDR humano, priorizada pelo score BANT (Filtro 3,
 //       ja implementado em tools/create-task.ts via prioridadePorBant).
 //
-// A regra de COORDENACAO (FUN-05, "quem agenda primeiro move o stage; o
-// outro para") entra neste mesmo arquivo na proxima task (podeAgendar).
+// FUN-05 (coordenacao): quem agendar a call primeiro — a IA (Camila, via
+// create_calendar_event, tool que entra na 01-07) ou o SDR humano
+// diretamente no GHL — move o stage pra CALL_AGENDADA; o outro PARA.
+// `podeAgendar`, no fim deste arquivo, e a funcao PURA que resolve esse
+// "quem chega primeiro" e sera consultada pela 01-07 antes de qualquer
+// tentativa real de agendamento pela IA. O owner (quem ganhou a corrida)
+// fica gravado na sessao via `marcarAgendamentoOwner` (sessao.ts).
 
 import { trocarAgente } from './sessao';
 import { camilaAgent } from './agents/camila';
@@ -165,4 +170,33 @@ async function dispararTaskPriorizada(args: { telefone: string; bant: ScoreBant 
     sucesso: boolean;
   };
   return !!resultado?.sucesso;
+}
+
+// ==================== FUN-05 — Coordenacao de agendamento ====================
+
+export type AgendamentoOwner = 'ia' | 'humano';
+
+/**
+ * Funcao PURA (sem I/O) — consultada pela 01-07 (agendamento) antes de
+ * qualquer tentativa real de criar a call/mover o card pra CALL_AGENDADA.
+ * Regra (playbook Sec.7 "Coordenacao: quem agendar primeiro (IA ou SDR
+ * humano) move o stage; o outro para"):
+ *   - card ja esta em CALL_AGENDADA -> ninguem mais agenda (false pra
+ *     qualquer `quem`, mesmo se for o mesmo lado que ja agendou —
+ *     idempotencia: mover pra CALL_AGENDADA 2x nao pode gerar efeito
+ *     duplicado, ex: 2 eventos de calendario ou 2 notificacoes).
+ *   - `ownerAtual` ja setado por OUTRO lado (diferente de `quem`) -> false
+ *     pro lado que chegou depois (ele PARA, mesmo que o stage ainda nao
+ *     tenha refletido CALL_AGENDADA por um instante de race).
+ *   - `ownerAtual` vazio/undefined OU igual a `quem` -> true (pode tentar
+ *     agendar; se for igual a `quem`, e o mesmo lado retentando, seguro).
+ */
+export function podeAgendar(
+  stageAtual: string,
+  ownerAtual: AgendamentoOwner | undefined,
+  quem: AgendamentoOwner,
+): boolean {
+  if (stageAtual === 'CALL_AGENDADA') return false;
+  if (ownerAtual && ownerAtual !== quem) return false;
+  return true;
 }
