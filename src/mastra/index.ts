@@ -260,6 +260,24 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
       return;
     }
 
+    // Gap 2/CR-02 (QUAL-02 sustentado): o Qualificador e um agente BATCH que
+    // roda uma vez por submissao de formulario (webhook /api/webhook/formulario)
+    // e cuja saida e log tecnico interno (bant_*, spin_stage, motivo_perdido) —
+    // NUNCA uma mensagem pro lead. Um lead roteado como PERDIDO fica com
+    // agenteAtual='qualificador' indefinidamente (nao ha trigger que o troque
+    // pra outro agente). Sem esta guarda, qualquer mensagem que ele mande depois
+    // cairia no roteamento normal (AGENTES_MAP['qualificador'] -> qualificadorAgent),
+    // o agent.generate() rodaria de novo turno-a-turno (T-01-10-04: lead ganhando
+    // acesso conversacional a um agente com tools reais de gravacao/move de card)
+    // e o ramo nao-Camila (`else if (resposta.text)`) enviaria o log interno
+    // direto pro WhatsApp do lead — vazando dado que deveria ficar so no CRM.
+    // Fica em silencio absoluto, igual ao humano; NAO reroteamos pra 'vendedor'
+    // (Sofia) pois isso vazaria a persona errada pro lead USI (mesmo risco do Gap 3).
+    if (sessao.agenteAtual === 'qualificador') {
+      console.log(`[WhatsApp] ${numero} em estado 'qualificador' (batch) — IA silenciada, mensagem ignorada`);
+      return;
+    }
+
     const agenteKey = AGENTES_MAP[sessao.agenteAtual] || 'vendedorAgent';
     const agent = mastraRef.getAgent(agenteKey);
     console.log(`[WhatsApp] Roteando para: ${sessao.agenteAtual} (${agenteKey})`);
