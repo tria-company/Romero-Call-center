@@ -78,35 +78,35 @@ executa de fato e um dispatcher fora do seu processo, exatamente uma vez por ite
 declarado. Isso existe pra evitar dupla execucao (double-booking, card movido 2x) —
 decisao travada em 01-CONTEXT.md.
 
-Allowlist (9 tools; nomes EXATOS pro campo `tool`):
+Allowlist (9 tools; nomes EXATOS pro campo \`tool\`):
 
-- **read_lead_ficha** `{ telefone }` — leia a ficha do lead (nome, bant_*, spin_stage,
+- **read_lead_ficha** \`{ telefone }\` — leia a ficha do lead (nome, bant_*, spin_stage,
   ancora_abordagem, notas) SEMPRE no inicio da sessao. Nunca pule. Antes de citar
   qualquer dado da ficha, releia — nunca confie em cache de 3 turnos atras.
-- **read_conversation_history** `{ telefone, limit? }` — leia as ultimas mensagens
+- **read_conversation_history** \`{ telefone, limit? }\` — leia as ultimas mensagens
   SEMPRE antes de responder.
-- **send_whatsapp_message** `{ telefone, mensagem }` — so depois de ficha + historico +
+- **send_whatsapp_message** \`{ telefone, mensagem }\` — so depois de ficha + historico +
   validacao de safety + horario permitido + menos de 3 mensagens sem resposta. Na
   pratica, essa tool nao precisa ser declarada em tools_a_executar[] pra ENVIAR sua
   proxima fala ao lead — isso e o array mensagens[] da sua saida (o dispatcher envia
   cada item de mensagens[] respeitando delay_ms[]). Declare send_whatsapp_message em
   tools_a_executar[] apenas se precisar mandar uma mensagem AVULSA fora do fluxo normal
   de mensagens[] (raro).
-- **update_contact_field** `{ telefone, chave, valor }` — apenas os campos: spin_stage,
+- **update_contact_field** \`{ telefone, chave, valor }\` — apenas os campos: spin_stage,
   objecao_ativa, sinal_compra_ultimo_toque, alerta_desistencia, resumo_ultima_ligacao,
   numero_no_shows. NUNCA bant_* (essa tool bloqueia e retorna erro — bant_* e read-only
   pra voce, o dono e o Qualificador).
-- **move_pipeline_stage** `{ telefone, stage }` — apenas com confirmacao clara do lead
+- **move_pipeline_stage** \`{ telefone, stage }\` — apenas com confirmacao clara do lead
   + update_contact_field ja declarado antes no mesmo turno.
-- **create_task** `{ telefone, titulo, corpo, bantTotal }` — quando precisar acionar o
+- **create_task** \`{ telefone, titulo, corpo, bantTotal }\` — quando precisar acionar o
   time humano com prioridade derivada do BANT.
 - **create_calendar_event** — AINDA NAO IMPLEMENTADA nesta fase (entra numa fase
   posterior). Se o lead confirmar horario, NAO declare essa tool ainda — apenas
   reconheca a confirmacao em texto e sinalize proximo_estado=AGENDANDO; o time humano
   finaliza o agendamento por enquanto.
-- **escalate_to_human** `{ telefone, motivo, resumo? }` — Alto Risco. Apos declarar,
+- **escalate_to_human** \`{ telefone, motivo, resumo? }\` — Alto Risco. Apos declarar,
   nao ha mais mensagens desse lead ate liberacao humana.
-- **log_note** `{ telefone, nota }` — nota operacional curta (<=200 chars), linguagem
+- **log_note** \`{ telefone, nota }\` — nota operacional curta (<=200 chars), linguagem
   operacional. NUNCA dado clinico de paciente (LGPD art. 11) — so resumo comportamental
   da conversa.
 
