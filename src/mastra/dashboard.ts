@@ -16,7 +16,6 @@ import {
   buscarConversaPorId,
   buscarMensagensDaConversa,
   contarConversoes,
-  contarPagamentosConfirmados,
   contarFunil,
   contarFollowUps,
   buscarObjecoesRecentes,
@@ -248,15 +247,14 @@ const ICON = {
 function gerarHTMLDashboard(dados: {
   conversasAtivas: any[];
   conversoes: { hoje: number; semana: number; mes: number; total: number };
-  pagamentos: { hoje: number; semana: number; mes: number; total: number };
-  funil: { total: number; engajou: number; linkEnviado: number; pago: number };
+  funil: { total: number; engajou: number; linkEnviado: number };
   followUps: { fup1: number; fup3: number; fup5: number; handoff24h: number; leadsComFup: number };
   objecoesRecentes: any[];
   objecoesPorCategoria: Record<string, number>;
   errosRecentes: any[];
   errosPorCodigo: Record<string, number>;
 }): string {
-  const { conversasAtivas, conversoes, pagamentos, funil, followUps, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
+  const { conversasAtivas, conversoes, funil, followUps, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
   const agora = new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   // ----- Cards de conversoes -----
@@ -277,33 +275,14 @@ function gerarHTMLDashboard(dados: {
     </div>
   `).join('');
 
-  // ----- Cards de pagamentos confirmados (Kiwify) -----
-  const pagamentosItems = [
-    { label: 'Hoje', n: pagamentos.hoje, gradient: 'from-green-500 to-green-700' },
-    { label: 'Semana', n: pagamentos.semana, gradient: 'from-green-600 to-emerald-700' },
-    { label: 'Mês', n: pagamentos.mes, gradient: 'from-emerald-700 to-green-800' },
-    { label: 'Total', n: pagamentos.total, gradient: 'from-green-800 to-emerald-900' },
-  ];
-  const cardsPagamentos = pagamentosItems.map((item) => `
-    <div class="relative overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-br ${item.gradient} p-3 sm:p-5 shadow-lg ring-1 ring-white/10">
-      <div class="flex items-center justify-between text-white/80 text-[10px] sm:text-xs uppercase tracking-wider font-medium">
-        <span>${item.label}</span>
-        <span class="opacity-50">💰</span>
-      </div>
-      <div class="text-2xl sm:text-4xl font-bold text-white mt-1 sm:mt-2">${item.n}</div>
-      <div class="text-[10px] sm:text-xs text-white/60 mt-0.5 sm:mt-1">vendas pagas</div>
-    </div>
-  `).join('');
-
-  // ----- Funil de vendas (4 etapas, simples) -----
+  // ----- Funil de vendas (3 etapas, simples) -----
   const totalTopo = funil.total || 1; // evita divisao por zero
   const etapas = [
     { label: 'Conversas',    icon: '💬', n: funil.total,       cor: 'from-emerald-500 to-emerald-600' },
     { label: 'Engajou',      icon: '👋', n: funil.engajou,     cor: 'from-emerald-600 to-teal-600' },
     { label: 'Link enviado', icon: '🔗', n: funil.linkEnviado, cor: 'from-cyan-600 to-blue-600' },
-    { label: 'Pago',         icon: '💰', n: funil.pago,        cor: 'from-green-600 to-emerald-700' },
   ];
-  const conversaoTotal = funil.total > 0 ? Math.round((funil.pago / funil.total) * 100) : 0;
+  const conversaoTotal = funil.total > 0 ? Math.round((funil.linkEnviado / funil.total) * 100) : 0;
 
   const linhasFunil = etapas.map((et, i) => {
     const pct = funil.total > 0 ? (et.n / totalTopo) * 100 : 0;
@@ -515,16 +494,6 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title></head>`)
       </h2>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
         ${cardsConversoes}
-      </div>
-    </section>
-
-    <!-- Pagamentos confirmados (Kiwify webhook) -->
-    <section class="mb-6 sm:mb-8">
-      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
-        💰 Pagamentos confirmados <span class="text-slate-500 normal-case font-normal text-xs">(Kiwify aprovou)</span>
-      </h2>
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
-        ${cardsPagamentos}
       </div>
     </section>
 
@@ -805,10 +774,9 @@ export async function handlerDashboard(c: any) {
   if (!verificarAuth(auth)) return respond401(c);
 
   try {
-    const [conversasAtivas, conversoes, pagamentos, funil, followUps, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
+    const [conversasAtivas, conversoes, funil, followUps, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
       buscarConversasAtivas(50),
       contarConversoes(),
-      contarPagamentosConfirmados(),
       contarFunil(),
       contarFollowUps(),
       buscarObjecoesRecentes(30),
@@ -819,7 +787,6 @@ export async function handlerDashboard(c: any) {
     const html = gerarHTMLDashboard({
       conversasAtivas,
       conversoes,
-      pagamentos,
       funil,
       followUps,
       objecoesRecentes,
