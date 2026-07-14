@@ -143,6 +143,7 @@ import { enviarAvisoAoSuporte, jaNotificouRecentemente } from './notificacoes';
 
 // CR-01: token fail-closed do webhook do formulario 14q
 import { FORMULARIO_WEBHOOK_TOKEN } from './config';
+import { GHL_STAGES } from './config';
 
 // T-03-01: token fail-closed do webhook de gravacao de call/ligacao (Fase 3)
 import { GRAVACAO_WEBHOOK_TOKEN } from './config';
@@ -1384,7 +1385,7 @@ export const mastra = new Mastra({
 
             // Resposta IMEDIATA (202 Accepted): o GHL so precisa saber que o
             // submit foi aceito; o processamento segue em background.
-            return c.json({ status: 'aceito', stage: roteamento.stage }, 202);
+            return c.json({ status: 'aceito', stage: roteamento.stage, stage_id: GHL_STAGES[roteamento.stage] }, 202);
           } catch (erro) {
             console.error('[formulario] Erro no webhook:', erro);
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);

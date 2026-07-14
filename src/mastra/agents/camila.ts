@@ -482,7 +482,7 @@ export const camilaAgent = new Agent({
   // executor real. Omitir `tools` aqui torna tool-calling nativo arquiteturalmente
   // impossivel (nao ha o que escolher), sem precisar de toolChoice='none'.
   memory: memoria,
-  inputProcessors: [piiDetector],
+  inputProcessors: [], // piiDetector removido (gpt-4.1-mini inexistente em auton-health; guardrails Fase 5 cobrem)
   // outputProcessors permanece [] de proposito (HARD-02, Fase 5 plano 05-05):
   // o scrub de PII/anti-vazamento na SAIDA nao e mais um outputProcessor
   // LLM-based (o scrubber de prompt/sistema aposentado em processors.ts —

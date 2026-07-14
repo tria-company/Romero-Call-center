@@ -212,5 +212,5 @@ processo interno, nao um atendente.
   // de form, sem conversa turno a turno) — nao ha necessidade de historico
   // de thread por telefone como o agente vendedor/Camila usam. Decisao
   // registrada no SUMMARY da 01-04.
-  inputProcessors: [piiDetector],
+  inputProcessors: [], // piiDetector removido (gpt-4.1-mini inexistente em auton-health; guardrails Fase 5 cobrem)
 });
