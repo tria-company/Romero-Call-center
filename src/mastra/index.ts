@@ -60,7 +60,7 @@ import {
 } from './ghl';
 import type { GhlWebhookPayload, TipoGravacao } from './ghl';
 import { contatoTemTag } from './ghl';
-import { TAG_PAUSAR_AGENTE } from './config';
+import { TAG_PAUSAR_AGENTE, CAMILA_ATIVA } from './config';
 
 // GRAV-04: filtro de anonimizacao LGPD fail-closed da transcricao de gravacao
 import { anonimizarTranscricao } from './anonimizacao';
@@ -604,6 +604,14 @@ async function processarMensagem(mastraRef: Mastra, numero: string, texto: strin
     // (Sofia) pois isso vazaria a persona errada pro lead USI (mesmo risco do Gap 3).
     if (sessao.agenteAtual === 'qualificador') {
       console.log(`[WhatsApp] ${numero} em estado 'qualificador' (batch) — IA silenciada, mensagem ignorada`);
+      return;
+    }
+
+    // Interruptor global: CAMILA_ATIVA=false desliga a Camila conversacional.
+    // Leads em estado 'camila' ficam em silencio (humano atende). A qualificacao
+    // (Qualificador upstream) segue funcional — este guard so afeta a conversa.
+    if (!CAMILA_ATIVA && sessao.agenteAtual === 'camila') {
+      console.log(`[WhatsApp] ${numero} — Camila DESATIVADA (CAMILA_ATIVA=false), mensagem ignorada (so qualificacao ativa)`);
       return;
     }
 
@@ -1375,8 +1383,13 @@ export const mastra = new Mastra({
                   ]).catch((e) => console.error('[formulario] falha ao avisar suporte do re-submit em SPIN:', e));
                 }
               } else if (roteamento.stage === 'QUALIFICADO') {
+                // Interruptor global: Camila desativada -> so qualificacao (o
+                // Qualificador ja gravou bant_*/ancora/spin_stage e moveu o card
+                // pra QUALIFICADO acima); sem abertura proativa da Camila.
+                if (!CAMILA_ATIVA) {
+                  console.log(`[formulario] ${telefone} QUALIFICADO — Camila DESATIVADA (CAMILA_ATIVA=false): so qualificacao, sem abertura proativa.`);
                 // Pausa por tag: nao abre proativamente se o contato tem a tag.
-                if (contactId && await contatoTemTag(contactId, TAG_PAUSAR_AGENTE)) {
+                } else if (contactId && await contatoTemTag(contactId, TAG_PAUSAR_AGENTE)) {
                   console.log(`[formulario] ${telefone} QUALIFICADO mas contato ${contactId} tem tag '${TAG_PAUSAR_AGENTE}' — abertura proativa suprimida`);
                 } else {
                   dispararDuplaAcao({

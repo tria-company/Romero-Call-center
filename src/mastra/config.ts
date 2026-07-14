@@ -187,6 +187,13 @@ export const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || '';
 // Removida a tag, a IA volta a operar. Fonte da verdade = tags do contato no GHL.
 export const TAG_PAUSAR_AGENTE = (process.env.TAG_PAUSAR_AGENTE || 'pausar-agente').trim().toLowerCase();
 
+// Interruptor global da Camila (agente conversacional). CAMILA_ATIVA=false
+// desativa a Camila TEMPORARIAMENTE: sem abertura proativa no lead QUALIFICADO
+// e sem responder mensagens (leads em estado 'camila' ficam em silencio, humano
+// atende). A QUALIFICACAO segue 100% funcional — o Qualificador continua
+// pontuando BANT, gravando bant_*/ancora/spin_stage e movendo o card. Default: ativa.
+export const CAMILA_ATIVA = (process.env.CAMILA_ATIVA || 'true').trim().toLowerCase() !== 'false';
+
 if (!ADMIN_API_TOKEN) {
   console.warn(
     '[config] ADMIN_API_TOKEN vazio: o endpoint /api/desbloquear esta DESABILITADO (fail-closed) — ' +
