@@ -194,6 +194,14 @@ export const TAG_PAUSAR_AGENTE = (process.env.TAG_PAUSAR_AGENTE || 'pausar-agent
 // pontuando BANT, gravando bant_*/ancora/spin_stage e movendo o card. Default: ativa.
 export const CAMILA_ATIVA = (process.env.CAMILA_ATIVA || 'true').trim().toLowerCase() !== 'false';
 
+// Interruptor dos SCHEDULERS automaticos (rodam em background, independentes da
+// Camila conversacional). SCHEDULERS_ATIVOS=false NAO liga nenhum deles no boot:
+// lembretes de call (D-1/H-1/5min), recuperacao de no-show, resgate 48h,
+// follow-up/buffer-recovery e cleanup. Use junto com CAMILA_ATIVA=false pra
+// silencio TOTAL de saida (a qualificacao/CRM segue, sem mandar nada pro lead).
+// Default: ativos.
+export const SCHEDULERS_ATIVOS = (process.env.SCHEDULERS_ATIVOS || 'true').trim().toLowerCase() !== 'false';
+
 if (!ADMIN_API_TOKEN) {
   console.warn(
     '[config] ADMIN_API_TOKEN vazio: o endpoint /api/desbloquear esta DESABILITADO (fail-closed) — ' +

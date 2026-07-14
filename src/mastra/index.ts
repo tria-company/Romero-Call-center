@@ -60,7 +60,7 @@ import {
 } from './ghl';
 import type { GhlWebhookPayload, TipoGravacao } from './ghl';
 import { contatoTemTag } from './ghl';
-import { TAG_PAUSAR_AGENTE, CAMILA_ATIVA } from './config';
+import { TAG_PAUSAR_AGENTE, CAMILA_ATIVA, SCHEDULERS_ATIVOS } from './config';
 
 // GRAV-04: filtro de anonimizacao LGPD fail-closed da transcricao de gravacao
 import { anonimizarTranscricao } from './anonimizacao';
@@ -1765,12 +1765,18 @@ export const mastra = new Mastra({
 // nos 10s de debounce do buffer (deixando msgs orfas no Supabase), outro
 // container pega e processa via essa funcao. Reusa o mesmo processarMensagem
 // do webhook handler.
-iniciarFollowUpScheduler(mastra, (numero, texto, nome) => {
-  return processarMensagem(mastra, numero, texto, nome);
-});
+// Interruptor global: SCHEDULERS_ATIVOS=false nao liga NENHUM scheduler de
+// background (follow-up/buffer-recovery/cleanup + lembretes/no-show/resgate).
+if (SCHEDULERS_ATIVOS) {
+  iniciarFollowUpScheduler(mastra, (numero, texto, nome) => {
+    return processarMensagem(mastra, numero, texto, nome);
+  });
 
-// Scheduler dos lembretes de call agendada (TOOL-08/FUN-02): D-1 (24h antes),
-// H-1 (1h antes) e 5min antes. O toque 1 (confirmacao imediata) ja disparou
-// no momento do agendamento (tools/schedule-reminder.ts). State no Supabase
-// (auton_sdr_call_reminders) sobrevive reinicio, mesmo padrao do follow-up.
-iniciarLembretesScheduler(mastra);
+  // Scheduler dos lembretes de call agendada (TOOL-08/FUN-02): D-1 (24h antes),
+  // H-1 (1h antes) e 5min antes. O toque 1 (confirmacao imediata) ja disparou
+  // no momento do agendamento (tools/schedule-reminder.ts). State no Supabase
+  // (auton_sdr_call_reminders) sobrevive reinicio, mesmo padrao do follow-up.
+  iniciarLembretesScheduler(mastra);
+} else {
+  console.log('[schedulers] DESATIVADOS (SCHEDULERS_ATIVOS=false) — sem lembretes, no-show, resgate, follow-up ou buffer-recovery');
+}
