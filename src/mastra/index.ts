@@ -59,6 +59,8 @@ import {
   persistirTranscricaoContato,
 } from './ghl';
 import type { GhlWebhookPayload, TipoGravacao } from './ghl';
+import { contatoTemTag } from './ghl';
+import { TAG_PAUSAR_AGENTE } from './config';
 
 // GRAV-04: filtro de anonimizacao LGPD fail-closed da transcricao de gravacao
 import { anonimizarTranscricao } from './anonimizacao';
@@ -1373,13 +1375,18 @@ export const mastra = new Mastra({
                   ]).catch((e) => console.error('[formulario] falha ao avisar suporte do re-submit em SPIN:', e));
                 }
               } else if (roteamento.stage === 'QUALIFICADO') {
-                dispararDuplaAcao({
-                  telefone,
-                  contactId,
-                  nome: nomeReal,
-                  bant: roteamento.bant,
-                  ancora: '',
-                }).catch((e) => console.error(`[formulario] dispararDuplaAcao falhou para ${telefone}:`, e));
+                // Pausa por tag: nao abre proativamente se o contato tem a tag.
+                if (contactId && await contatoTemTag(contactId, TAG_PAUSAR_AGENTE)) {
+                  console.log(`[formulario] ${telefone} QUALIFICADO mas contato ${contactId} tem tag '${TAG_PAUSAR_AGENTE}' — abertura proativa suprimida`);
+                } else {
+                  dispararDuplaAcao({
+                    telefone,
+                    contactId,
+                    nome: nomeReal,
+                    bant: roteamento.bant,
+                    ancora: '',
+                  }).catch((e) => console.error(`[formulario] dispararDuplaAcao falhou para ${telefone}:`, e));
+                }
               }
             })().catch((e) => console.error(`[formulario] pipeline do Qualificador falhou para ${telefone}:`, e));
 
@@ -1569,6 +1576,13 @@ export const mastra = new Mastra({
             if (await estaBloqueado(numero)) {
               console.log(`[GHL] IA bloqueada para ${numero}, humano atendendo`);
               return c.json({ status: 'bloqueado_humano' });
+            }
+
+            // Pausa por tag: se o contato tem a tag TAG_PAUSAR_AGENTE no GHL, a
+            // IA nao responde (handoff humano por tag). Fonte da verdade = GHL.
+            if (ghlContactId && await contatoTemTag(ghlContactId, TAG_PAUSAR_AGENTE)) {
+              console.log(`[GHL] contato ${ghlContactId} tem tag '${TAG_PAUSAR_AGENTE}' — IA pausada, nao responde`);
+              return c.json({ status: 'pausado_por_tag' });
             }
 
             // Garante sessao com ghlContactId em cache ANTES de qualquer

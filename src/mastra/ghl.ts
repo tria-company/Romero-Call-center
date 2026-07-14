@@ -547,6 +547,36 @@ const URL_REGEX = /https?:\/\/\S+/gi;
 
 import { getSessao } from './sessao';
 
+/**
+ * Checa se um contato do GHL tem uma tag especifica (case-insensitive).
+ * Usado pra pausar a IA por tag (ex: 'pausar-agente'). FAIL-OPEN: se a leitura
+ * falhar (GHL fora, token invalido, rede), retorna false — um erro de leitura
+ * NAO deve silenciar a IA pra todos os leads; a pausa e a excecao, nao o default.
+ */
+export async function contatoTemTag(contactId: string, tag: string): Promise<boolean> {
+  if (!GHL_PIT_TOKEN || !contactId) return false;
+  const alvo = tag.trim().toLowerCase();
+  try {
+    const res = await fetchTimeout(`${GHL_BASE_URL}/contacts/${contactId}`, {
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION,
+        'Accept': 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.warn(`[tag-pausa] GET /contacts/${contactId} falhou (${res.status}) — fail-open (IA segue ativa)`);
+      return false;
+    }
+    const data = await res.json();
+    const tags = (data && data.contact && data.contact.tags) || [];
+    return Array.isArray(tags) && tags.some((t: unknown) => String(t).trim().toLowerCase() === alvo);
+  } catch (e) {
+    console.warn(`[tag-pausa] erro ao ler tags de ${contactId} — fail-open:`, e);
+    return false;
+  }
+}
+
 export async function buscarContactIdPorTelefone(telefone: string): Promise<string | null> {
   // 1. Cache via sessao em memoria (rapido)
   try {

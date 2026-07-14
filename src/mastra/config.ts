@@ -178,6 +178,11 @@ if (!EVOLUTION_WEBHOOK_TOKEN) {
 // x-admin-token). Token vazio = endpoint DESABILITADO (401 pra todo POST).
 export const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || '';
 
+// Tag no contato do GHL que PAUSA a IA: enquanto estiver presente no contato, a
+// Camila nao responde mensagens nem abre proativamente (handoff humano por tag).
+// Removida a tag, a IA volta a operar. Fonte da verdade = tags do contato no GHL.
+export const TAG_PAUSAR_AGENTE = (process.env.TAG_PAUSAR_AGENTE || 'pausar-agente').trim().toLowerCase();
+
 if (!ADMIN_API_TOKEN) {
   console.warn(
     '[config] ADMIN_API_TOKEN vazio: o endpoint /api/desbloquear esta DESABILITADO (fail-closed) — ' +
