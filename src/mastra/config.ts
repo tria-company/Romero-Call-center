@@ -73,7 +73,11 @@ export const AZURE_OPENAI_DEPLOYMENT_GPT5_MINI = process.env.AZURE_OPENAI_DEPLOY
 export const AZURE_OPENAI_DEPLOYMENT_EMBEDDING = process.env.AZURE_OPENAI_DEPLOYMENT_EMBEDDING || 'text-embedding-3-large';
 // Transcricao: 'gpt-4o-transcribe-diarize' substitui Whisper no Azure moderno.
 // Mesmo endpoint /audio/transcriptions, deployment diferente.
-export const AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO = process.env.AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO || 'gpt-4o-transcribe-diarize';
+// whisper (transcricao simples, 1 locutor) — ideal pra nota de voz de WhatsApp.
+// O gpt-4o-transcribe-diarize alucinava "falantes" em audio de 1 pessoa so
+// (verificado 2026-07-14). Diarize fica reservado pra gravacao de call
+// (multi-locutor) se/quando for plugado via env separada.
+export const AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO = process.env.AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO || 'whisper';
 
 // Identificador da campanha do lancamento — vai como utm_campaign no link
 export const CAMPANHA_NOME = process.env.CAMPANHA_NOME || 'lancamento';
