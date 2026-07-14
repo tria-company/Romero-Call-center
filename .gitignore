@@ -10,3 +10,6 @@ dist
 .vercel
 .cursor
 pino-detection.js
+
+# arquivos locais com segredos (URLs de webhook etc.)
+*.local.md

@@ -8,6 +8,7 @@ import {
   AZURE_OPENAI_RESOURCE_NAME,
   AZURE_OPENAI_API_KEY,
   AZURE_OPENAI_API_VERSION,
+  AZURE_OPENAI_HOST,
 } from './config';
 
 if (!AZURE_OPENAI_RESOURCE_NAME || !AZURE_OPENAI_API_KEY) {
@@ -17,14 +18,14 @@ if (!AZURE_OPENAI_RESOURCE_NAME || !AZURE_OPENAI_API_KEY) {
   );
 }
 
-// O recurso atual (Cognitive Services unificado) usa o dominio
-// 'cognitiveservices.azure.com' em vez de 'openai.azure.com' (legacy).
-// Junto com useDeploymentBasedUrls=true, a URL final fica
-// <baseURL>/deployments/<deployment>/chat/completions?api-version=...
-// que e o formato que azure.chat() espera (compativel com api-version
-// 2024-12-01-preview e modelo gpt-4.1).
+// Host configuravel via AZURE_OPENAI_HOST (default openai.azure.com — o
+// recurso auton-health NAO resolve em cognitiveservices.azure.com; ENOTFOUND
+// verificado em 2026-07-14). Junto com useDeploymentBasedUrls=true, a URL
+// final fica <baseURL>/deployments/<deployment>/chat/completions?api-version=...
+// que e o formato que azure.chat() espera (compativel com 2024-12-01-preview
+// e modelos gpt-5.x).
 export const azure = createAzure({
-  baseURL: `https://${AZURE_OPENAI_RESOURCE_NAME}.cognitiveservices.azure.com/openai`,
+  baseURL: `https://${AZURE_OPENAI_RESOURCE_NAME}.${AZURE_OPENAI_HOST}/openai`,
   apiKey: AZURE_OPENAI_API_KEY,
   apiVersion: AZURE_OPENAI_API_VERSION,
   useDeploymentBasedUrls: true,

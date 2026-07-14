@@ -4,9 +4,9 @@ name: Deploy na VPS (Docker Swarm)
 #
 # Pre-requisito: o primeiro deploy precisa ter sido feito manualmente
 # (ver docs/deploy-vps-ubuntu.md). Este workflow assume que ja existe:
-#   - /opt/Agent-Roberth (clone do repo)
-#   - ~/roberth.yaml (com secrets reais editados)
-#   - stack 'roberth' deployada pelo menos uma vez
+#   - /opt/sdr-auton (clone do repo)
+#   - ~/sdr-auton.yaml (com secrets reais editados)
+#   - stack 'sdr-auton' deployada pelo menos uma vez
 #
 # Secrets necessarios em Settings -> Secrets and variables -> Actions:
 #   - VPS_HOST: IP publico da VPS (84.46.244.167)
@@ -32,21 +32,21 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -e
-            cd /opt/Agent-Roberth
-            # Stash mudanças locais (geralmente edicoes em deploy/roberth.swarm.yaml
-            # com credenciais reais que substituem os placeholders COLAR_AQUI_*).
+            cd /opt/sdr-auton
+            # Stash mudanças locais (geralmente edicoes em deploy/sdr-auton.swarm.yaml
+            # com credenciais reais que substituem os placeholders ${VAR}).
             # Sem isso, git pull --ff-only falha quando a VPS tem yaml editado.
             # As envs em runtime ficam no docker service, nao dependem do yaml local.
             git stash --include-untracked || true
             git pull --ff-only
-            docker build -t agent-roberth:latest .
+            docker build -t agent-sdr-auton:latest .
             # stack deploy nao detecta mudanca quando so a imagem 'latest'
             # tem novo conteudo (mesmo digest no spec). Por isso forcamos o
             # service update -- assim a task e recriada com a imagem nova.
-            if docker service ls --filter name=roberth_agent_roberth --format '{{.Name}}' | grep -q roberth_agent_roberth; then
-              docker service update --force --image agent-roberth:latest roberth_agent_roberth
+            if docker service ls --filter name=sdr-auton_agent_sdr_auton --format '{{.Name}}' | grep -q sdr-auton_agent_sdr_auton; then
+              docker service update --force --image agent-sdr-auton:latest sdr-auton_agent_sdr_auton
             else
-              docker stack deploy --resolve-image=never -c ~/roberth.yaml roberth
+              docker stack deploy --resolve-image=never -c ~/sdr-auton.yaml sdr-auton
             fi
             sleep 5
-            docker service ps roberth_agent_roberth --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -5
+            docker service ps sdr-auton_agent_sdr_auton --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -5

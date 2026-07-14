@@ -3,7 +3,7 @@
 --
 -- Decisao do usuario (2026-07-13, quick task 260713-t0f): o SDR AUTON Health
 -- NAO usa Kiwify. O webhook de confirmacao de pagamento Kiwify e legado do
--- funil do curso do "Projeto Roberth" (bot Closer) — o SDR AUTON e um SDR
+-- funil do curso do ex-bot Closer "Roberth" — o SDR AUTON e um SDR
 -- (qualifica + agenda call com um closer humano, nao fecha venda dentro do
 -- proprio fluxo), entao nao existe "pagamento aprovado pelo Kiwify" no dominio
 -- dele. O codigo (src/mastra/supabase.ts, index.ts, dashboard.ts, follow-up.ts)

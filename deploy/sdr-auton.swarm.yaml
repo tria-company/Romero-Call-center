@@ -1,0 +1,110 @@
+version: "3.7"
+services:
+
+## --------------------------- SDR AUTON --------------------------- ##
+
+  agent_sdr_auton:
+    image: agent-sdr-auton:latest ## Build local na VPS: docker build -t agent-sdr-auton:latest /opt/sdr-auton
+
+    networks:
+      - public_network ## Nome da rede interna
+
+    environment:
+      ## 🤖 LLM (Azure OpenAI). Modelos ativos: GPT-5.1 (Camila) / GPT-5-mini (Qualificador).
+      - AZURE_OPENAI_RESOURCE_NAME=${AZURE_OPENAI_RESOURCE_NAME}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}
+      - AZURE_OPENAI_DEPLOYMENT_GPT51=${AZURE_OPENAI_DEPLOYMENT_GPT51}
+      - AZURE_OPENAI_DEPLOYMENT_GPT5_MINI=${AZURE_OPENAI_DEPLOYMENT_GPT5_MINI}
+      - AZURE_OPENAI_DEPLOYMENT_EMBEDDING=${AZURE_OPENAI_DEPLOYMENT_EMBEDDING}
+      - AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO=${AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO}
+
+      ## 📲 GoHighLevel (canal WhatsApp via API oficial)
+      ## PIT: Settings -> Integrations -> Private Integrations
+      ## Scopes: conversations.write, conversations/message.write, contacts.readonly
+      - GHL_PIT_TOKEN=${GHL_PIT_TOKEN}
+      - GHL_API_VERSION=${GHL_API_VERSION}
+      - GHL_DEFAULT_TYPE=${GHL_DEFAULT_TYPE}
+
+      ## 📲 SDR AUTON — pipeline/calendario GHL (COMERCIAL USI)
+      - GHL_API_VERSION_V2=${GHL_API_VERSION_V2}
+      - GHL_LOCATION_ID=${GHL_LOCATION_ID}
+      - GHL_PIPELINE_ID=${GHL_PIPELINE_ID}
+      - GHL_CALENDAR_ID=${GHL_CALENDAR_ID}
+      - GHL_CLOSER_SIDNEI=${GHL_CLOSER_SIDNEI}
+      - GHL_CLOSER_PETRIV=${GHL_CLOSER_PETRIV}
+
+      ## 📲 Evolution API — DEPRECATED (rollback fallback, ver config.ts)
+      # - EVOLUTION_API_URL=${EVOLUTION_API_URL}
+      # - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      # - EVOLUTION_INSTANCE_NAME=${EVOLUTION_INSTANCE_NAME}
+
+      ## 🗄️ Supabase (banco dedicado do SDR AUTON)
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+
+      ## 🔗 Webhooks (fail-closed — token vazio desabilita o endpoint, ver config.ts)
+      - FORMULARIO_WEBHOOK_TOKEN=${FORMULARIO_WEBHOOK_TOKEN}
+      - GRAVACAO_WEBHOOK_TOKEN=${GRAVACAO_WEBHOOK_TOKEN}
+      - GRAVACAO_HOSTS_PERMITIDOS=${GRAVACAO_HOSTS_PERMITIDOS}
+      - EVOLUTION_WEBHOOK_TOKEN=${EVOLUTION_WEBHOOK_TOKEN}
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN}
+      - RESET_TELEFONES_PERMITIDOS=${RESET_TELEFONES_PERMITIDOS}
+
+      ## 👥 Suporte (handoff humano) — telefone 1:1 (E.164), NAO JID de grupo
+      - SUPORTE_GRUPO_JID=${SUPORTE_GRUPO_JID}
+
+      ## 📊 Dashboard de metricas (Basic Auth em /api/dashboard)
+      ## Se ambos vazios, dashboard responde 503 (desabilitado por default)
+      - DASHBOARD_USER=${DASHBOARD_USER}
+      - DASHBOARD_PASS=${DASHBOARD_PASS}
+
+      ## 🏷️ Campanha / ambiente
+      - CAMPANHA_NOME=${CAMPANHA_NOME}
+      - NODE_ENV=production
+      - TZ=America/Sao_Paulo
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+
+      ## ⚙️ Tunables opcionais de resiliencia/cache (defaults no codigo — so
+      ## descomentar se precisar sobrescrever, ver resiliencia.ts/cache-semantico.ts)
+      # - SDR_CACHE_LIMIAR=${SDR_CACHE_LIMIAR}
+      # - SDR_CACHE_TTL_MS=${SDR_CACHE_TTL_MS}
+      # - SDR_CACHE_MAX_POR_LEAD=${SDR_CACHE_MAX_POR_LEAD}
+      # - SDR_BREAKER_LIMIAR_FALHAS=${SDR_BREAKER_LIMIAR_FALHAS}
+      # - SDR_BREAKER_COOLDOWN_MS=${SDR_BREAKER_COOLDOWN_MS}
+      # - SDR_BULKHEAD_LIMITE=${SDR_BULKHEAD_LIMITE}
+      # - SDR_BULKHEAD_FILA_MAX=${SDR_BULKHEAD_FILA_MAX}
+      # - SDR_RETRY_BASE_MS=${SDR_RETRY_BASE_MS}
+      # - SDR_RETRY_TETO_MS=${SDR_RETRY_TETO_MS}
+      # - SDR_IDEMPOTENCIA_JANELA_MS=${SDR_IDEMPOTENCIA_JANELA_MS}
+      # - SDR_RESILIENCIA_TENTATIVAS=${SDR_RESILIENCIA_TENTATIVAS}
+      # - SDR_RESILIENCIA_TIMEOUT_MS=${SDR_RESILIENCIA_TIMEOUT_MS}
+
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.agent_sdr_auton.rule=Host(`sdr-auton.${VPS_HOST_IP}.sslip.io`)
+        - traefik.http.routers.agent_sdr_auton.entrypoints=websecure
+        - traefik.http.routers.agent_sdr_auton.priority=1
+        - traefik.http.routers.agent_sdr_auton.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.agent_sdr_auton.service=agent_sdr_auton
+        - traefik.http.services.agent_sdr_auton.loadbalancer.server.port=4111
+        - traefik.http.services.agent_sdr_auton.loadbalancer.passHostHeader=1
+
+## --------------------------- SDR AUTON --------------------------- ##
+
+networks:
+  public_network: ## Nome da rede interna
+    external: true
+    name: public_network ## Nome da rede interna

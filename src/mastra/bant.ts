@@ -31,8 +31,20 @@ export const ICP_PROFISSOES_STEMS = [
 // em substrings legitimas do pt-BR (ex: 'cura' dentro de 'procura'/
 // 'procurando'/'procurava' — CR-04 do 01-REVIEW.md). O texto ja passa por
 // normalizarTexto (remove acentos), entao \b funciona sobre ASCII puro.
+// Cobertura de plural/flexao (WR-01 do 01-REVIEW.md, 2a rodada): a versao
+// anterior so casava a forma exata singular ('cura', 'milagre', 'hack',
+// 'mindset', 'vibracao'), entao 'curas'/'milagres'/'hacks'/'mindsets'
+// escapavam do descarte. `\w*` apos o radical cobre flexao/plural SEM
+// reintroduzir o bug de substring do CR-04: o `\b` INICIAL continua exigindo
+// inicio de palavra, entao 'procura'/'procurando'/'procurava' (onde 'cura'
+// aparece precedida por 'pro', um caractere de palavra) NAO casam — o \b so
+// bate quando 'cura'/'curas' comeca a propria palavra. `curas?` cobre
+// cura/curas; `milagr\w*` cobre milagre/milagres/milagrosa/milagrosos;
+// `hacks?` cobre hack/hacks; `mindset\w*` cobre mindset/mindsets;
+// `vibraca\w*`/`vibracion\w*` cobrem vibracao/vibracoes/vibracional/etc
+// (apos normalizarTexto remover acentos, 'vibração'->'vibracao').
 // SEM flag 'g' — evita estado residual de lastIndex entre chamadas (IN-06).
-const LEXICO_PROIBIDO_REGEX = /\b(vibracao|mindset|cura|milagre|hack)\b/;
+const LEXICO_PROIBIDO_REGEX = /\b(vibraca\w*|vibracion\w*|mindset\w*|curas?|milagr\w*|hacks?)\b/;
 
 const REGEX_MARCAS_DIACRITICAS = new RegExp('[\\u0300-\\u036f]', 'g');
 

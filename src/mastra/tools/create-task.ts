@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { GHL_PIT_TOKEN, GHL_API_VERSION_V2 } from '../config';
 import { fetchTimeout } from '../http';
 import { buscarContactIdPorTelefone } from '../ghl';
-import { jaNotificouRecentemente } from '../notificacoes';
+import { consultarNotificacao, registrarNotificacao } from '../notificacoes';
 
 const GHL_BASE_URL = 'https://services.leadconnectorhq.com';
 
@@ -43,9 +43,15 @@ export const createTask = createTool({
     motivo: z.string().optional(),
   }),
   execute: async ({ telefone, titulo, corpo, bantTotal }) => {
-    // Idempotencia: nao duplica task se a mesma chamada (contato+titulo)
-    // ja rodou recentemente (mesmo padrao do notificar-time.ts).
-    if (jaNotificouRecentemente(telefone, `create-task:${titulo}`)) {
+    // Idempotencia com consult/register SPLIT (CR-01, 3a rodada): a consulta
+    // aqui e READ-ONLY — a janela so e registrada la embaixo, APOS o POST na
+    // GHL confirmar sucesso real (res.ok). Registrar ANTES da tentativa
+    // (padrao antigo, jaNotificouRecentemente) fazia o retry pos-falha
+    // devolver {sucesso:true} FAKE sem criar task nenhuma — exatamente o que
+    // quebrava o retry honesto de acionarHumanoGarantido (escalate-to-human).
+    // Efeito colateral desejado nos demais callers (dispatcher, dupla-acao):
+    // uma criacao que FALHOU nao consome a janela e pode ser retentada.
+    if (consultarNotificacao(telefone, `create-task:${titulo}`)) {
       console.log(`[create-task] ${telefone} (${titulo}): task ja criada recentemente, ignorando`);
       return { sucesso: true };
     }
@@ -80,6 +86,9 @@ export const createTask = createTool({
         console.error(`[create-task] POST /contacts/${contactId}/tasks falhou (${res.status}):`, erroBody);
         return { sucesso: false, motivo: `GHL respondeu ${res.status}` };
       }
+      // Sucesso REAL confirmado — so agora a janela de idempotencia e
+      // registrada (retries futuros da mesma chamada viram no-op honesto).
+      registrarNotificacao(telefone, `create-task:${titulo}`);
       console.log(`[create-task] ${telefone} (${contactId}) <- "${titulo}" prioridade=${prioridade} dueDate=${dueDate}`);
       return { sucesso: true };
     } catch (e) {

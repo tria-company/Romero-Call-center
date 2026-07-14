@@ -53,7 +53,7 @@ export async function upsertCustomer(dados: { telefone: string; nome?: string; e
 
 // ==================== CONVERSATIONS ====================
 
-export async function criarConversa(customerId: string, _canal: string = 'whatsapp', agenteEnum: string = 'vendedor'): Promise<string | null> {
+export async function criarConversa(customerId: string, _canal: string = 'whatsapp', agenteEnum: string = 'atendimento_humano'): Promise<string | null> {
   if (!SUPABASE_URL) return null;
   try {
     const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations`;
@@ -101,7 +101,7 @@ export async function obterOuCriarConversaAtiva(customerId: string, agenteEnum?:
   const existente = await buscarConversaAtiva(customerId);
   if (existente?.id) return existente.id;
 
-  const novoId = await criarConversa(customerId, 'whatsapp', agenteEnum || 'vendedor');
+  const novoId = await criarConversa(customerId, 'whatsapp', agenteEnum || 'atendimento_humano');
   if (novoId) return novoId;
 
   // Fallback pra race condition: criou em outro processo entre nosso SELECT e INSERT
@@ -128,6 +128,24 @@ export async function buscarConversaBloqueada(customerId: string): Promise<any |
   try {
     const limite3d = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
     const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?customer_id=eq.${customerId}&status=eq.aguardando_humano&ended_at=is.null&data_ultima_mensagem=gte.${limite3d}&select=*&order=data_ultima_mensagem.desc&limit=1`;
+    const res = await fetchTimeout(url, { headers: headers() });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data[0] || null;
+  } catch { return null; }
+}
+
+// WR-01 (3a rodada): conversa aberta aguardando humano SEM janela de tempo.
+// Diferente de buscarConversaAtiva (24h) e buscarConversaBloqueada (3 dias),
+// a pausa de crise (CR-03) precisa valer enquanto a conversa nao for
+// encerrada/desbloqueada por um humano: um lead escalado por sofrimento
+// agudo pode ficar em silencio por dias, e um re-submit do formulario NAO
+// pode reativar o pipeline da IA so porque data_ultima_mensagem envelheceu.
+// Usado pelo guard do webhook /api/webhook/formulario (index.ts, CR-03).
+export async function buscarConversaAguardandoHumano(customerId: string): Promise<any | null> {
+  if (!SUPABASE_URL) return null;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?customer_id=eq.${customerId}&status=eq.aguardando_humano&ended_at=is.null&select=*&order=data_ultima_mensagem.desc&limit=1`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) return null;
     const data = await res.json();
@@ -177,45 +195,391 @@ export async function marcarMsgSofia(conversaId: string): Promise<void> {
   });
 }
 
+// WR-04 (4a rodada): buscarConversasParaFollowUp foi REMOVIDA — o scheduler
+// de FUP 1h/3h/5h/handoff-24h da Sofia (Closer) que era o unico caller foi
+// deletado no rewrite de follow-up.ts (CLEAN-01). Se um re-engajamento
+// pre-call do SDR for implementado (item deferido, ver SUMMARY do plano
+// 04-01), escrever uma query nova com os criterios do SDR — nao ressuscitar
+// a do Closer.
+
+// ==================== CALL REMINDERS (TOOL-08/FUN-02) ====================
+// Helpers usados por tools/schedule-reminder.ts (persistencia + confirmacao
+// imediata) e pelo scheduler em lembretes.ts (toques D-1/H-1/5min).
+// Migration: docs/sql/auton_sdr/07_call_reminders.sql
+
 /**
- * Busca conversas elegiveis pra envio de FUP ou handoff por silencio.
- * Critericos: status em_atendimento, sem handoff de silencio ja disparado,
- * ultima mensagem da Sofia ha pelo menos 1h. O caller checa qual FUP
- * dispara (1h/3h/5h/24h) com base nas colunas fup_*_sent_at.
+ * Upsert (on_conflict=telefone) da call agendada. Reschedule (nova call pro
+ * mesmo telefone) atualiza call_start_at, volta status='agendada' e ZERA
+ * os flags d1/h1/m5_sent_at — mesmo padrao de reset de marcarMsgLead (o
+ * relogio dos 3 toques temporizados comeca do zero pra nova data).
+ * confirmacao_sent_at NAO e zerada aqui — quem marca ela e a propria tool
+ * schedule-reminder, logo em seguida a este upsert.
  *
- * Retorna conversas com customer (telefone, nome) embutido pra evitar
- * round-trip extra por linha.
+ * CR-01: o on_conflict=telefone depende do index unico CHEIO
+ * uq_call_reminders_telefone (07_call_reminders.sql) — Postgres nao infere
+ * index parcial via PostgREST (42P10). Se mudar a chave aqui, mude la junto.
+ *
+ * WR-04: o upsert tambem REABRE o loop de no-show (terminal=false,
+ * motivo_terminal=null) — um lead fechado como Perdido que re-engaja e marca
+ * nova call volta a ter deteccao de no-show (buscarCallsParaNoShow filtra
+ * terminal=eq.false). Decisao explicita: no_show_tentativas e
+ * ultima_recuperacao_em NAO sao zerados — TETO_NO_SHOWS (no-show.ts) conta o
+ * TOTAL de faltas do lead, entao quem ja queimou a 1a recuperacao vira
+ * Perdido direto na proxima falta (decidirNoShow trata a nova call via
+ * comparacao ultima_recuperacao_em < call_start_at).
  */
-export async function buscarConversasParaFollowUp(): Promise<any[]> {
+export async function upsertLembreteCall(dados: {
+  telefone: string;
+  callStartAt: string;
+  nome?: string;
+  closer?: string;
+  customerId?: string;
+  conversationId?: string;
+}): Promise<{ id: string } | null> {
+  if (!SUPABASE_URL) return null;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_call_reminders?on_conflict=telefone`;
+
+    const body: Record<string, any> = {
+      telefone: dados.telefone,
+      call_start_at: dados.callStartAt,
+      status: 'agendada',
+      d1_sent_at: null,
+      h1_sent_at: null,
+      m5_sent_at: null,
+      // WR-04: reabre o loop de no-show pra nova call (ver doc da funcao —
+      // no_show_tentativas/ultima_recuperacao_em persistem de proposito).
+      terminal: false,
+      motivo_terminal: null,
+      updated_at: new Date().toISOString(),
+    };
+    if (dados.nome) body.nome = dados.nome;
+    if (dados.closer) body.closer = dados.closer;
+    if (dados.customerId) body.customer_id = dados.customerId;
+    if (dados.conversationId) body.conversation_id = dados.conversationId;
+
+    const res = await fetchTimeout(url, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { console.error('[supabase] Erro upsert lembrete call:', await res.text()); return null; }
+    const data = await res.json();
+    return data[0]?.id ? { id: data[0].id as string } : null;
+  } catch (e) { console.error('[supabase] Erro upsert lembrete call:', e); return null; }
+}
+
+/**
+ * Busca lembretes pendentes (status='agendada') — usa o index parcial
+ * idx_call_reminders_pendentes. Ordenado pelo call_start_at mais proximo
+ * primeiro; limit 200 (mitigacao de DoS padrao das varreduras deste modulo,
+ * T-02-04). telefone/nome ja vivem direto na row (nao precisa join).
+ *
+ * CR-06 (defesa em profundidade contra starvation da janela de 200 rows):
+ * alem do filtro por status (que agora TRANSICIONA — ver marcarCallRealizada/
+ * marcarCallTerminal), filtra terminal=eq.false e limita a janela temporal a
+ * call_start_at >= now-49h (cobre o relogio de 48h do no-show com folga; um
+ * toque de lembrete pra call que comecou ha mais de 49h nunca seria devido
+ * de qualquer forma — proximoLembreteDevido retorna null apos o inicio).
+ */
+export async function buscarLembretesPendentes(): Promise<any[]> {
   if (!SUPABASE_URL) return [];
   try {
-    const limite1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?` +
-      `status=eq.em_atendimento` +
-      `&ended_at=is.null` +
-      `&handoff_silencio_em=is.null` +
-      `&last_assistant_message_at=not.is.null` +
-      `&last_assistant_message_at=lt.${limite1h}` +
-      `&select=*,auton_sdr_customers(telefone,nome)` +
+    const corte49h = new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_call_reminders?` +
+      `status=eq.agendada` +
+      `&terminal=eq.false` +
+      `&call_start_at=gte.${corte49h}` +
+      `&select=*` +
+      `&order=call_start_at.asc` +
       `&limit=200`;
     const res = await fetchTimeout(url, { headers: headers() });
     if (!res.ok) {
-      console.error('[supabase] buscarConversasParaFollowUp:', await res.text());
+      console.error('[supabase] buscarLembretesPendentes:', await res.text());
       return [];
     }
-    const data = await res.json() as any[];
-    // Filtro adicional in-memory: Sofia tem que ser a ultima a falar.
-    // Postgrest nao tem comparacao entre 2 colunas via querystring, entao a
-    // checagem fica aqui.
-    return data.filter(c => {
-      if (!c.last_lead_message_at) return true;
-      return new Date(c.last_assistant_message_at).getTime()
-        > new Date(c.last_lead_message_at).getTime();
-    });
+    return (await res.json()) as any[];
   } catch (e) {
-    console.error('[supabase] Erro buscarConversasParaFollowUp:', e);
+    console.error('[supabase] Erro buscarLembretesPendentes:', e);
     return [];
   }
+}
+
+/**
+ * Marca um dos 4 toques como enviado — gate anti-reenvio (idempotencia).
+ * WR-01: checa res.ok e retorna boolean HONESTO — um PATCH perdido (ex:
+ * coluna faltando por migration nao aplicada) era invisivel e o toque seria
+ * reenviado a cada 60s pra sempre. Caller loga/decide com o retorno.
+ */
+export async function marcarLembreteEnviado(
+  id: string,
+  campo: 'confirmacao_sent_at' | 'd1_sent_at' | 'h1_sent_at' | 'm5_sent_at',
+): Promise<boolean> {
+  if (!SUPABASE_URL || !id) return false;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_call_reminders?id=eq.${id}`;
+    const res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({ [campo]: new Date().toISOString(), updated_at: new Date().toISOString() }),
+    });
+    if (!res.ok) {
+      console.error(`[supabase] marcarLembreteEnviado ${id} (${campo}) falhou: ${res.status} ${await res.text()}`);
+      return false;
+    }
+    return true;
+  } catch (e) { console.error('[supabase] Erro marcarLembreteEnviado:', e); return false; }
+}
+
+// ==================== NO-SHOW LOOP (FUN-03/FUN-04) ====================
+// Helpers usados por src/mastra/no-show.ts (loop de recuperacao de no-show).
+// Migration: docs/sql/auton_sdr/08_no_show.sql (estende auton_sdr_call_reminders,
+// criada em 07_call_reminders.sql, plano 02-01).
+
+/**
+ * Busca calls elegiveis pro loop de no-show: status='agendada' (ainda nao
+ * realizada/encerrada) E terminal=false (loop ainda nao encerrou pra essa
+ * row — T-02-09, evita reprocessar linha ja resolvida). Embute
+ * last_lead_message_at da conversa vinculada (se houver — conversation_id e
+ * best-effort, ver schedule-reminder.ts) apenas como FALLBACK: o sinal
+ * primario de leadRespondeuAposCall vem de buscarUltimaMsgLeadDoCustomer
+ * (WR-02 — a conversa congelada na row envelhece). limit 200
+ * (mesma mitigacao de DoS de buscarLembretesPendentes).
+ */
+export async function buscarCallsParaNoShow(): Promise<any[]> {
+  if (!SUPABASE_URL) return [];
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_call_reminders?` +
+      `status=eq.agendada` +
+      `&terminal=eq.false` +
+      `&select=*,auton_sdr_conversations(last_lead_message_at)` +
+      `&order=call_start_at.asc` +
+      `&limit=200`;
+    const res = await fetchTimeout(url, { headers: headers() });
+    if (!res.ok) {
+      console.error('[supabase] buscarCallsParaNoShow:', await res.text());
+      return [];
+    }
+    return (await res.json()) as any[];
+  } catch (e) {
+    console.error('[supabase] Erro buscarCallsParaNoShow:', e);
+    return [];
+  }
+}
+
+/**
+ * Registra que uma recuperacao de no-show foi disparada: grava
+ * no_show_tentativas (valor ja calculado pelo caller), no_show_detectado_em
+ * e ultima_recuperacao_em (relogio do timeout de 48h — decidirNoShow le esta
+ * coluna via ultimaRecuperacaoMs).
+ * WR-01: checa res.ok e retorna boolean HONESTO — um PATCH perdido (ex:
+ * migration 08 nao aplicada → coluna faltando → 400) re-dispararia a
+ * recuperacao inteira a cada tick sem nenhum log.
+ */
+export async function registrarNoShowRecuperacao(
+  id: string,
+  tentativas: number,
+  ultimaRecuperacaoIso: string,
+): Promise<boolean> {
+  if (!SUPABASE_URL || !id) return false;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_call_reminders?id=eq.${id}`;
+    const res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({
+        no_show_tentativas: tentativas,
+        no_show_detectado_em: ultimaRecuperacaoIso,
+        ultima_recuperacao_em: ultimaRecuperacaoIso,
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[supabase] registrarNoShowRecuperacao ${id} falhou: ${res.status} ${await res.text()}`);
+      return false;
+    }
+    return true;
+  } catch (e) { console.error('[supabase] Erro registrarNoShowRecuperacao:', e); return false; }
+}
+
+/**
+ * Encerra o loop de no-show pra uma row: terminal=true + motivo_terminal
+ * ('2º no-show' | '48h sem resposta'). decidirNoShow retorna 'nada' pra
+ * qualquer row terminal=true (T-02-09: sem loop infinito). O card ja foi
+ * movido pra PERDIDO no pipeline GHL (pelo caller, ANTES desta chamada).
+ * CR-06: tambem transiciona status='no_show' — a row sai das varreduras
+ * status=eq.agendada (lembretes E no-show), liberando a janela de 200 rows.
+ * WR-01: checa res.ok e retorna boolean HONESTO — um PATCH perdido re-moveria
+ * o card pra PERDIDO a cada tick sem nenhum log.
+ */
+export async function marcarCallTerminal(id: string, motivo: string): Promise<boolean> {
+  if (!SUPABASE_URL || !id) return false;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_call_reminders?id=eq.${id}`;
+    const res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({
+        status: 'no_show',
+        terminal: true,
+        motivo_terminal: motivo,
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[supabase] marcarCallTerminal ${id} falhou: ${res.status} ${await res.text()}`);
+      return false;
+    }
+    return true;
+  } catch (e) { console.error('[supabase] Erro marcarCallTerminal:', e); return false; }
+}
+
+/**
+ * CR-06: fecha a row como 'realizada' quando o lead RESPONDEU depois do
+ * inicio da call (proxy de comparecimento/engajamento — decidirNoShow ja
+ * retornava 'nada' nesse caso, mas a row ficava zumbi re-escaneada a cada
+ * 60s pra sempre e entupindo a janela de 200 rows das varreduras).
+ * WR-01: checa res.ok e retorna boolean HONESTO.
+ */
+export async function marcarCallRealizada(id: string): Promise<boolean> {
+  if (!SUPABASE_URL || !id) return false;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_call_reminders?id=eq.${id}`;
+    const res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({
+        status: 'realizada',
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[supabase] marcarCallRealizada ${id} falhou: ${res.status} ${await res.text()}`);
+      return false;
+    }
+    return true;
+  } catch (e) { console.error('[supabase] Erro marcarCallRealizada:', e); return false; }
+}
+
+/**
+ * WR-02: ultima mensagem do LEAD entre TODAS as conversas do customer — o
+ * conversation_id congelado na row do lembrete aponta pra conversa da epoca
+ * do agendamento; um lead que respondeu ao toque D-1 dias depois cria uma
+ * conversa NOVA e seria falso-no-show se olhassemos so a conversa antiga.
+ * Retorna o last_lead_message_at mais recente (ISO) ou null.
+ */
+export async function buscarUltimaMsgLeadDoCustomer(customerId: string): Promise<string | null> {
+  if (!SUPABASE_URL || !customerId) return null;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?` +
+      `customer_id=eq.${customerId}` +
+      `&last_lead_message_at=not.is.null` +
+      `&select=last_lead_message_at` +
+      `&order=last_lead_message_at.desc` +
+      `&limit=1`;
+    const res = await fetchTimeout(url, { headers: headers() });
+    if (!res.ok) {
+      console.error(`[supabase] buscarUltimaMsgLeadDoCustomer ${customerId} falhou: ${res.status} ${await res.text()}`);
+      return null;
+    }
+    const data = await res.json() as Array<{ last_lead_message_at: string | null }>;
+    return data[0]?.last_lead_message_at || null;
+  } catch (e) { console.error('[supabase] Erro buscarUltimaMsgLeadDoCustomer:', e); return null; }
+}
+
+// ==================== RESGATES (GRAV-03) ====================
+// Helpers usados por src/mastra/resgates.ts (resgate durável de 48h quando a
+// extracao de sinais, src/mastra/extracao-sinais.ts, detecta um sinal de
+// desistencia sem fechamento). Migration: docs/sql/auton_sdr/09_resgates.sql.
+
+/**
+ * Upsert por telefone (index unico CHEIO uq_resgates_telefone — mesma licao
+ * do CR-01 da 07_call_reminders.sql: o on_conflict do PostgREST so infere
+ * index nao-parcial). Um novo sinal de desistencia pro MESMO lead reabre
+ * status='pendente' e recalcula resgatar_em (relogio de 48h reinicia do
+ * sinal mais recente) — nunca cria 2 resgates pendentes pro mesmo lead
+ * (T-03-09).
+ */
+export async function upsertResgate(dados: {
+  telefone: string;
+  customerId?: string;
+  nome?: string;
+  motivo?: string;
+  resgatarEm: string;
+}): Promise<{ id: string } | null> {
+  if (!SUPABASE_URL) return null;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_resgates?on_conflict=telefone`;
+
+    const body: Record<string, any> = {
+      telefone: dados.telefone,
+      resgatar_em: dados.resgatarEm,
+      status: 'pendente',
+      updated_at: new Date().toISOString(),
+    };
+    if (dados.customerId) body.customer_id = dados.customerId;
+    if (dados.nome) body.nome = dados.nome;
+    if (dados.motivo) body.motivo = dados.motivo;
+
+    const res = await fetchTimeout(url, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { console.error('[supabase] Erro upsert resgate:', await res.text()); return null; }
+    const data = await res.json();
+    return data[0]?.id ? { id: data[0].id as string } : null;
+  } catch (e) { console.error('[supabase] Erro upsert resgate:', e); return null; }
+}
+
+/**
+ * Busca resgates pendentes e DEVIDOS (status='pendente' & resgatar_em<=now)
+ * — usa o index parcial idx_resgates_pendentes. limit 200 (mesma mitigacao
+ * de DoS de buscarLembretesPendentes/buscarCallsParaNoShow, T-03-09).
+ */
+export async function buscarResgatesPendentes(): Promise<any[]> {
+  if (!SUPABASE_URL) return [];
+  try {
+    const agoraIso = new Date().toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_resgates?` +
+      `status=eq.pendente` +
+      `&resgatar_em=lte.${agoraIso}` +
+      `&select=*` +
+      `&order=resgatar_em.asc` +
+      `&limit=200`;
+    const res = await fetchTimeout(url, { headers: headers() });
+    if (!res.ok) {
+      console.error('[supabase] buscarResgatesPendentes:', await res.text());
+      return [];
+    }
+    return (await res.json()) as any[];
+  } catch (e) {
+    console.error('[supabase] Erro buscarResgatesPendentes:', e);
+    return [];
+  }
+}
+
+/**
+ * Marca um resgate como terminal: 'feito' (task pro SDR humano criada com
+ * sucesso) ou 'cancelado' (lead ja GANHO — fechou antes do disparo). WR-01:
+ * checa res.ok e retorna boolean HONESTO — um PATCH perdido re-dispararia o
+ * resgate a cada tick sem nenhum log.
+ */
+export async function marcarResgateFeito(id: string, status: 'feito' | 'cancelado'): Promise<boolean> {
+  if (!SUPABASE_URL || !id) return false;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_resgates?id=eq.${id}`;
+    const res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({ status, updated_at: new Date().toISOString() }),
+    });
+    if (!res.ok) {
+      console.error(`[supabase] marcarResgateFeito ${id} (${status}) falhou: ${res.status} ${await res.text()}`);
+      return false;
+    }
+    return true;
+  } catch (e) { console.error('[supabase] Erro marcarResgateFeito:', e); return false; }
 }
 
 // ==================== MESSAGES ====================
@@ -241,25 +605,11 @@ export async function salvarMensagem(dados: {
 }
 
 // ==================== OBJECOES ====================
-
-export async function registrarObjecao(dados: {
-  conversation_id: string;
-  customer_id: string;
-  telefone: string;
-  categoria: string;
-  texto_original: string;
-  contornada: boolean;
-}): Promise<void> {
-  if (!SUPABASE_URL) return;
-  try {
-    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_objecoes`;
-    await fetchTimeout(url, {
-      method: 'POST',
-      headers: headers(),
-      body: JSON.stringify(dados),
-    });
-  } catch (e) { console.error('[supabase] Erro registrar objecao:', e); }
-}
+// WR-04 (4a rodada): registrarObjecao (writer) foi REMOVIDA — o unico caller
+// era a tool tools/registrar-objecao.ts do Closer, deletada no CLEAN-01.
+// Os helpers de LEITURA (buscarObjecoesRecentes/contarObjecoesPorCategoria)
+// seguem na secao DASHBOARD abaixo enquanto a section de objecoes historicas
+// existir no dashboard.
 
 // ==================== DASHBOARD ====================
 // Helpers usados pelo handler do dashboard (src/mastra/dashboard.ts).
@@ -323,40 +673,11 @@ export async function buscarMensagensDaConversa(conversaId: string): Promise<any
   }
 }
 
-/**
- * Conta conversoes (link_enviado=true) em 4 janelas temporais.
- * Faz 4 HEAD requests em paralelo com Prefer: count=exact pra contar sem trazer dados.
- */
-export async function contarConversoes(): Promise<{ hoje: number; semana: number; mes: number; total: number }> {
-  if (!SUPABASE_URL) return { hoje: 0, semana: 0, mes: 0, total: 0 };
-  const agora = Date.now();
-  const inicioHoje = new Date(agora);
-  inicioHoje.setHours(0, 0, 0, 0);
-  const inicioSemana = new Date(agora - 7 * 24 * 60 * 60 * 1000);
-  const inicioMes = new Date(agora - 30 * 24 * 60 * 60 * 1000);
-
-  async function contar(filtroExtra: string): Promise<number> {
-    try {
-      const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?link_enviado=eq.true${filtroExtra}&select=id`;
-      const res = await fetchTimeout(url, {
-        method: 'HEAD',
-        headers: { ...headers(), 'Prefer': 'count=exact' },
-      });
-      if (!res.ok) return 0;
-      const range = res.headers.get('content-range') || '';
-      const match = range.match(/\/(\d+|\*)$/);
-      return match && match[1] !== '*' ? parseInt(match[1], 10) : 0;
-    } catch { return 0; }
-  }
-
-  const [hoje, semana, mes, total] = await Promise.all([
-    contar(`&link_enviado_em=gte.${inicioHoje.toISOString()}`),
-    contar(`&link_enviado_em=gte.${inicioSemana.toISOString()}`),
-    contar(`&link_enviado_em=gte.${inicioMes.toISOString()}`),
-    contar(''),
-  ]);
-  return { hoje, semana, mes, total };
-}
+// WR-03 (4a rodada): contarConversoes (cards "Links enviados"/"checkouts")
+// foi REMOVIDA — lia link_enviado, coluna sem NENHUM writer desde a delecao
+// da tool enviar-checkout do Closer (CLEAN-01). A metrica de conversao do
+// SDR AUTON e call agendada (auton_sdr_call_reminders) — implementar como
+// metrica propria quando o dashboard for re-desenhado pro SDR.
 
 /**
  * Lista as N objecoes mais recentes (qualquer categoria) com texto + telefone.
@@ -432,6 +753,67 @@ export async function salvarErro(dados: {
 }
 
 /**
+ * Salva 1 metrica de interacao LLM (HARD-08, Fase 5 plano 05-06). Espelha
+ * salvarErro 1:1 (guarda SUPABASE_URL, POST via fetchTimeout+headers(),
+ * try/catch silencioso => void). FAIL-OPEN: a tabela auton_sdr_llm_metrics
+ * (migracao 11) e [BLOCKING]/user_setup — enquanto o banco estiver
+ * read-only/ausente, esta funcao lanca dentro do try e o catch engole a
+ * excecao silenciosamente. Chamada por registrarMetricaLLM
+ * (observabilidade.ts) como o `persist` injetado — o log JSON estruturado
+ * `[metrica-llm]` ja rodou ANTES desta chamada, entao a falha aqui nunca
+ * derruba a observabilidade nem o pipeline (T-05-06-02). NUNCA recebe/loga
+ * texto bruto de mensagem/resposta (LGPD, T-05-06-01).
+ */
+export async function salvarMetricaLLM(dados: {
+  telefone?: string;
+  modelo: string;
+  tipo: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  custoEstimado?: number;
+  latenciaMs?: number;
+  promptVersao?: string;
+  cacheHit?: boolean;
+  conversationId?: string | null;
+  customerId?: string | null;
+  /** WR-05: false quando o modelo/deployment nao tem preco na tabela de custo (custo_estimado=0 e uma INCOGNITA, nao um zero real). */
+  custoConhecido?: boolean;
+  /** WR-05: true quando os tokens sao estimativa (usage ausente na resposta do provider), nao valor exato. */
+  tokensEstimados?: boolean;
+}): Promise<void> {
+  if (!SUPABASE_URL) return;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_llm_metrics`;
+    await fetchTimeout(url, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        telefone: dados.telefone || null,
+        modelo: dados.modelo,
+        tipo: dados.tipo,
+        prompt_tokens: dados.promptTokens ?? null,
+        completion_tokens: dados.completionTokens ?? null,
+        total_tokens: dados.totalTokens ?? null,
+        custo_estimado: dados.custoEstimado ?? null,
+        latencia_ms: dados.latenciaMs ?? null,
+        prompt_versao: dados.promptVersao || null,
+        cache_hit: dados.cacheHit ?? false,
+        conversation_id: dados.conversationId || null,
+        customer_id: dados.customerId || null,
+        // WR-05: sem estas 2 colunas, uma linha de cache HIT (custo 0 real)
+        // e uma de deployment sem preco (custo 0 incognita) eram
+        // indistinguiveis na tabela.
+        custo_conhecido: dados.custoConhecido ?? null,
+        tokens_estimados: dados.tokensEstimados ?? null,
+      }),
+    });
+  } catch (e) {
+    console.error('[supabase] Erro salvarMetricaLLM (silencioso, fail-open):', e);
+  }
+}
+
+/**
  * Lista os N erros mais recentes pra mostrar no dashboard.
  */
 export async function buscarErrosRecentes(limite: number = 30): Promise<any[]> {
@@ -470,32 +852,33 @@ export async function contarErrosPorCodigo(desdeISO?: string): Promise<Record<st
   }
 }
 
-// ==================== DASHBOARD — FUNIL & FOLLOW-UPS ====================
+// ==================== DASHBOARD — FUNIL ====================
 
 /**
- * Funil de vendas — 3 etapas, historico total.
- * Objecoes e Follow-ups sao sections separadas no dashboard, nao etapa do funil.
+ * Funil do dashboard — 2 etapas, historico total.
  *
  * Etapas:
- *   1. total           - todas as conversas iniciadas
- *   2. engajou         - lead respondeu mais que so a primeira msg (last_lead_message_at > started_at)
- *   3. linkEnviado     - Sofia mandou checkout (link_enviado=true)
+ *   1. total   - todas as conversas iniciadas
+ *   2. engajou - lead respondeu mais que so a primeira msg (last_lead_message_at > started_at)
+ *
+ * WR-03 (4a rodada): a etapa "linkEnviado" foi removida — link_enviado nao
+ * tem writer desde a delecao da tool enviar-checkout (CLEAN-01) e congelava
+ * a metrica-titulo do dashboard em valores historicos do Closer. A etapa
+ * final do funil do SDR AUTON e call agendada (auton_sdr_call_reminders).
  */
 export async function contarFunil(): Promise<{
   total: number;
   engajou: number;
-  linkEnviado: number;
 }> {
-  if (!SUPABASE_URL) return { total: 0, engajou: 0, linkEnviado: 0 };
+  if (!SUPABASE_URL) return { total: 0, engajou: 0 };
   try {
-    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?select=id,started_at,last_lead_message_at,link_enviado&limit=10000`;
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?select=id,started_at,last_lead_message_at&limit=10000`;
     const res = await fetchTimeout(url, { headers: headers() });
-    if (!res.ok) return { total: 0, engajou: 0, linkEnviado: 0 };
+    if (!res.ok) return { total: 0, engajou: 0 };
     const conversas = await res.json() as Array<{
       id: string;
       started_at: string | null;
       last_lead_message_at: string | null;
-      link_enviado: boolean | null;
     }>;
 
     const total = conversas.length;
@@ -503,58 +886,19 @@ export async function contarFunil(): Promise<{
       if (!c.last_lead_message_at || !c.started_at) return false;
       return new Date(c.last_lead_message_at).getTime() > new Date(c.started_at).getTime();
     }).length;
-    const linkEnviado = conversas.filter((c) => c.link_enviado === true).length;
-    return { total, engajou, linkEnviado };
+    return { total, engajou };
   } catch (e) {
     console.error('[supabase] contarFunil:', e);
-    return { total: 0, engajou: 0, linkEnviado: 0 };
+    return { total: 0, engajou: 0 };
   }
 }
 
-/**
- * Estatisticas de follow-ups automaticos (1h/3h/5h e handoff 24h por silencio).
- * Section a parte do funil — mede o esforco do scheduler em re-engajar leads
- * que silenciaram apos a Sofia ter falado.
- *
- * Retorna:
- *   - fup1, fup3, fup5: quantas conversas dispararam cada um
- *   - handoff24h: quantas foram pra handoff humano por 24h de silencio
- *   - leadsComFup: total de conversas distintas que receberam pelo menos 1 FUP
- */
-export async function contarFollowUps(): Promise<{
-  fup1: number;
-  fup3: number;
-  fup5: number;
-  handoff24h: number;
-  leadsComFup: number;
-}> {
-  const vazio = { fup1: 0, fup3: 0, fup5: 0, handoff24h: 0, leadsComFup: 0 };
-  if (!SUPABASE_URL) return vazio;
-  try {
-    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_conversations?select=id,fup_1_sent_at,fup_3_sent_at,fup_5_sent_at,handoff_silencio_em&limit=10000`;
-    const res = await fetchTimeout(url, { headers: headers() });
-    if (!res.ok) return vazio;
-    const conversas = await res.json() as Array<{
-      id: string;
-      fup_1_sent_at: string | null;
-      fup_3_sent_at: string | null;
-      fup_5_sent_at: string | null;
-      handoff_silencio_em: string | null;
-    }>;
-    return {
-      fup1:        conversas.filter((c) => Boolean(c.fup_1_sent_at)).length,
-      fup3:        conversas.filter((c) => Boolean(c.fup_3_sent_at)).length,
-      fup5:        conversas.filter((c) => Boolean(c.fup_5_sent_at)).length,
-      handoff24h:  conversas.filter((c) => Boolean(c.handoff_silencio_em)).length,
-      leadsComFup: conversas.filter((c) =>
-        Boolean(c.fup_1_sent_at || c.fup_3_sent_at || c.fup_5_sent_at || c.handoff_silencio_em)
-      ).length,
-    };
-  } catch (e) {
-    console.error('[supabase] contarFollowUps:', e);
-    return vazio;
-  }
-}
+// WR-03 (4a rodada): contarFollowUps (section "Follow-ups automaticos") foi
+// REMOVIDA — as colunas fup_*_sent_at/handoff_silencio_em nao tem mais
+// writer (FUP-Sofia removido no CLEAN-01) enquanto marcarMsgLead ainda as
+// zera, entao a contagem so DECAIA silenciosamente parecendo dado vivo. Os
+// equivalentes do SDR sao os lembretes de call (lembretes.ts) e o loop de
+// no-show/resgates — metricas proprias quando o dashboard for re-desenhado.
 
 // ==================== RESET DE TESTE ====================
 // Helpers usados apenas pelo comando #55555 (resetar conversa pra testar).

@@ -1,10 +1,10 @@
-// Configuracao central — projeto Roberth (agente de WhatsApp vendedor de curso)
+// Configuracao central — SDR AUTON Health
 
 // Evolution API — DEPRECATED. Substituido por GoHighLevel (ver GHL_*).
 // Mantido apenas pra rollback rapido se precisar.
 export const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL || 'http://localhost:8080';
 export const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
-export const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE_NAME || 'roberth';
+export const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE_NAME || 'sdr-auton';
 
 // GoHighLevel (canal WhatsApp via API oficial Meta).
 // PIT (Private Integration Token): Settings -> Integrations -> Private Integrations.
@@ -52,6 +52,10 @@ export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 // https://<AZURE_OPENAI_RESOURCE_NAME>.openai.azure.com.
 export const AZURE_OPENAI_RESOURCE_NAME = process.env.AZURE_OPENAI_RESOURCE_NAME || '';
 export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
+// Sufixo do host do recurso. Recursos "AI Services" unificados tambem resolvem
+// em cognitiveservices.azure.com, mas recursos Azure OpenAI puros (ex.:
+// auton-health) SO resolvem em openai.azure.com — ENOTFOUND no outro dominio.
+export const AZURE_OPENAI_HOST = process.env.AZURE_OPENAI_HOST || 'openai.azure.com';
 // Responses API (/openai/v1/responses) usada pelo @ai-sdk/azure v3 exige
 // 2024-10-01-preview ou mais novo. Versoes mais antigas (ex: 2024-08-01-preview)
 // retornam BadRequest "API version not supported".
@@ -71,27 +75,136 @@ export const AZURE_OPENAI_DEPLOYMENT_EMBEDDING = process.env.AZURE_OPENAI_DEPLOY
 // Mesmo endpoint /audio/transcriptions, deployment diferente.
 export const AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO = process.env.AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO || 'gpt-4o-transcribe-diarize';
 
-// Checkout — 2 URLs Kiwify, uma por produto.
-// Sofia recomenda UM produto via decision tree e a tool enviar-checkout
-// escolhe a URL com base no parametro `produto`.
-//   - CHECKOUT_URL_CAMINHO: Caminho da Rainha (R$ 1.997)
-//   - CHECKOUT_URL_BOLHA:   Bolha RR (R$ 2.997)
-// CHECKOUT_URL_PRINCIPAL e CHECKOUT_URL_ORDERBUMP ficam por compatibilidade
-// como fallback (se as ENVs especificas estiverem vazias, cai pra essas).
-export const CHECKOUT_URL_CAMINHO = process.env.CHECKOUT_URL_CAMINHO || '';
-export const CHECKOUT_URL_BOLHA = process.env.CHECKOUT_URL_BOLHA || '';
-export const CHECKOUT_URL_PRINCIPAL = process.env.CHECKOUT_URL_PRINCIPAL || '';
-export const CHECKOUT_URL_ORDERBUMP = process.env.CHECKOUT_URL_ORDERBUMP || '';
-
 // Identificador da campanha do lancamento — vai como utm_campaign no link
 export const CAMPANHA_NOME = process.env.CAMPANHA_NOME || 'lancamento';
 
-// Kiwify webhooks — 1 token por produto, vem como ?token=xxx na URL.
-// Configurados em Kiwify -> produto -> Settings -> Webhooks. Cada produto
-// tem o seu token pra deixar claro qual webhook bateu mesmo se a URL
-// vazar. Token vazio = webhook do produto correspondente desabilitado.
-export const KIWIFY_TOKEN_CAMINHO = process.env.KIWIFY_TOKEN_CAMINHO || '';
-export const KIWIFY_TOKEN_BOLHA = process.env.KIWIFY_TOKEN_BOLHA || '';
+// Webhook do formulario 14q (SDR AUTON, /api/webhook/formulario) — CR-01.
+// A rota do Kiwify que validava ?token= foi removida do projeto (quick task
+// 260713-t0f); este e o token novo, escrito do zero seguindo o MESMO padrao
+// fail-closed acima: vem como ?token=xxx na URL (ou header x-webhook-token)
+// e precisa ser colado na URL do GHL Workflow (Automation -> Workflow do
+// formulario 14q -> acao de Webhook -> URL). Token vazio = endpoint
+// DESABILITADO (nenhum POST e aceito) — sem isso, qualquer POST anonimo
+// dispararia qualificacao + mutacao de CRM + mensagem proativa da Camila
+// pra um telefone arbitrario (ver 01-REVIEW.md CR-01).
+export const FORMULARIO_WEBHOOK_TOKEN = process.env.FORMULARIO_WEBHOOK_TOKEN || '';
+
+if (!FORMULARIO_WEBHOOK_TOKEN) {
+  console.warn(
+    '[config] FORMULARIO_WEBHOOK_TOKEN vazio: o webhook /api/webhook/formulario esta DESABILITADO ' +
+      '(fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo ' +
+      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como FORMULARIO_WEBHOOK_TOKEN " +
+      "e cole '?token=<esse-segredo>' na URL do GHL Workflow do formulario (stage 'Formulario respondido').",
+  );
+}
+
+// Webhook de gravacao de call/ligacao (Fase 3, GRAV-01/GRAV-04,
+// /api/webhook/gravacao) — MESMO padrao fail-closed de
+// FORMULARIO_WEBHOOK_TOKEN acima: segredo dedicado, vem como ?token=xxx na
+// URL (ou header x-webhook-token) e precisa ser colado no Workflow GHL que
+// dispara ao concluir a gravacao de uma call/ligacao (Automation -> Workflow
+// -> acao Webhook). Token vazio = endpoint DESABILITADO (fail-closed) —
+// qualquer POST e rejeitado com 401 ANTES de qualquer download/transcricao/
+// persistencia (T-03-01).
+export const GRAVACAO_WEBHOOK_TOKEN = process.env.GRAVACAO_WEBHOOK_TOKEN || '';
+
+if (!GRAVACAO_WEBHOOK_TOKEN) {
+  console.warn(
+    '[config] GRAVACAO_WEBHOOK_TOKEN vazio: o webhook /api/webhook/gravacao esta DESABILITADO ' +
+      '(fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo ' +
+      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como GRAVACAO_WEBHOOK_TOKEN " +
+      "e cole '?token=<esse-segredo>' na URL do Workflow GHL que dispara ao concluir a gravacao " +
+      'de uma call/ligacao (Automation -> Workflow -> acao Webhook).',
+  );
+}
+
+// Allowlist de hosts pra baixar recordingUrl (anti-SSRF, T-03-02) — so URLs
+// https com host presente nesta lista (ou na familia de dominios do proprio
+// GHL, ver ehHostDominioGhl em ghl.ts) sao baixadas por baixarGravacaoBase64;
+// qualquer outro host (inclusive IP direto, localhost, hosts internos) e
+// recusado antes do fetch.
+//
+// CR-03: o default e RESTRITO a hosts especificos do GHL/LeadConnector. NAO
+// ha mais wildcard *.amazonaws.com (cobria endpoints de computacao
+// controlaveis por atacante — API Gateway/ELB — que, combinados com o retry
+// Bearer PIT, permitiam exfiltrar o PIT token) nem storage.googleapis.com
+// (host multi-tenant: qualquer bucket GCS de terceiro passava).
+//
+// GRAVACAO_HOSTS_PERMITIDOS (env, lista separada por virgula) e o OVERRIDE
+// EXPLICITO do operador: se a URL real de gravacao vier de um bucket
+// S3/GCS especifico, adicione o HOST EXATO (ex:
+// 'meu-bucket.s3.sa-east-1.amazonaws.com' ou 'storage.googleapis.com') —
+// ciente de que hosts de object storage sao multi-tenant (o allowlist
+// restringe INFRAESTRUTURA, nao PROPRIEDADE do bucket) e de que o retry com
+// Bearer PIT continua bloqueado pra hosts fora do dominio GHL de qualquer
+// forma (ghl.ts, CR-03).
+export const GRAVACAO_HOSTS_PERMITIDOS = (
+  process.env.GRAVACAO_HOSTS_PERMITIDOS ||
+  'services.leadconnectorhq.com,msg.leadconnectorhq.com'
+)
+  .split(',')
+  .map((h) => h.trim().toLowerCase())
+  .filter(Boolean);
+
+// Webhook de MENSAGENS do WhatsApp (/api/webhook/evolution) — CR-02 (4a
+// rodada, 04-REVIEW.md): MESMO padrao fail-closed dos tokens acima. Segredo
+// dedicado, vem como ?token=xxx na URL (ou header x-webhook-token). Token
+// vazio = endpoint DESABILITADO (fail-closed) — qualquer POST e rejeitado
+// com 401 ANTES de qualquer parse/dedup/sessao/buffer.
+//
+// USER SETUP: a URL deste webhook e configurada na ORIGEM das mensagens de
+// WhatsApp. Hoje a origem e o GHL Workflow de mensagens (a rota mantem o
+// path legado /api/webhook/evolution pra nao reconfigurar o Workflow) —
+// edite a acao de Webhook do Workflow e cole '?token=<segredo>' no fim da
+// URL. Se a Evolution API voltar a ser usada como canal (rollback), o mesmo
+// token vai na URL do webhook global configurado na instancia da Evolution.
+export const EVOLUTION_WEBHOOK_TOKEN = process.env.EVOLUTION_WEBHOOK_TOKEN || '';
+
+if (!EVOLUTION_WEBHOOK_TOKEN) {
+  console.warn(
+    '[config] EVOLUTION_WEBHOOK_TOKEN vazio: o webhook /api/webhook/evolution (mensagens WhatsApp) esta ' +
+      'DESABILITADO (fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um ' +
+      "segredo aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como EVOLUTION_WEBHOOK_TOKEN " +
+      "e cole '?token=<esse-segredo>' na URL do webhook de mensagens configurada na origem (GHL Workflow de " +
+      'mensagens; ou na instancia da Evolution API, se ela voltar a ser o canal).',
+  );
+}
+
+// Token admin de /api/desbloquear — CR-03 (4a rodada, 04-REVIEW.md).
+// /api/desbloquear desfaz a pausa DURAVEL de crise (limpa bloqueado_ate E
+// volta a conversa aguardando_humano pra em_atendimento) — um endpoint que
+// desmonta uma escalacao de seguranca (CVV-188) nao pode ser anonimo.
+// MESMO padrao fail-closed: vem como ?token=xxx na URL (ou header
+// x-admin-token). Token vazio = endpoint DESABILITADO (401 pra todo POST).
+export const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || '';
+
+if (!ADMIN_API_TOKEN) {
+  console.warn(
+    '[config] ADMIN_API_TOKEN vazio: o endpoint /api/desbloquear esta DESABILITADO (fail-closed) — ' +
+      'todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo aleatorio ' +
+      "(ex: 'openssl rand -hex 24'), coloque no .env do deploy como ADMIN_API_TOKEN e use " +
+      "'?token=<esse-segredo>' (ou header x-admin-token) ao chamar o endpoint.",
+  );
+}
+
+// Allowlist do comando de reset de teste (#55555) — CR-02 (4a rodada).
+// resetarConversaTeste DESTROI dados do lead (mensagens, conversas, memoria
+// Mastra) e derruba o bloqueio de crise — nao pode ser acionavel por
+// conteudo de mensagem de um numero arbitrario. Lista separada por virgula
+// de telefones de TESTE (somente digitos, ex: '5511999999999'). Vazia =
+// comando DESABILITADO pra todo mundo (fail-closed).
+export const RESET_TELEFONES_PERMITIDOS = (process.env.RESET_TELEFONES_PERMITIDOS || '')
+  .split(',')
+  .map((t) => t.trim().replace(/[^\d]/g, ''))
+  .filter(Boolean);
+
+if (RESET_TELEFONES_PERMITIDOS.length === 0) {
+  console.warn(
+    '[config] RESET_TELEFONES_PERMITIDOS vazio: o comando de reset de teste (#55555) esta DESABILITADO ' +
+      '(fail-closed) para todos os numeros. Configure uma lista separada por virgula com os telefones de ' +
+      'teste autorizados (somente digitos) para reativa-lo.',
+  );
+}
 
 // Telefone 1:1 (E.164, ex: '5511999999999') do responsavel de plantao que
 // recebe o aviso quando a IA escala pra humano (inclusive sofrimento agudo

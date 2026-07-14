@@ -1,48 +1,27 @@
-# docs/ — workspace do PRD dinamico
+# docs/ — workspace do projeto SDR AUTON
 
-Aqui vivem todos os artefatos de planejamento do projeto Roberth. **PRD e incremental:** cada fase produz um documento; quando algo muda numa fase posterior (ex: arquitetura descobriu uma restricao), volta-se a fase anterior e atualiza-se o documento marcando `Status: draft` ate revalidar.
+Este projeto (SDR AUTON Health) reaproveita a infraestrutura Mastra ja em producao do
+ex-bot Closer "Roberth" (agente de WhatsApp vendedor de curso/infoproduto). Os docs de
+PRD/UX/arquitetura/historias/QA daquela era (`00_briefing.md` ate `06_qa-checklist.md`,
+`persona-sofia.md`, `test-cases-sofia.md`, etc.) foram **arquivados** em
+[_arquivo-roberth/](_arquivo-roberth/) — preservados como referencia historica, nao
+refletem o SDR AUTON atual e nao devem ser editados.
 
-## Pipeline (ordem das fases)
+## Docs vivos
 
-```
-00_briefing.md   → analista (entender problema, publico, oferta, lancamento, riscos)
-01_prd.md        → PM (objetivo, persona, funcionalidades, metricas)         ← INCREMENTAL
-02_ux-spec.md    → UX (fluxo conversacional, copy, tom, gatilhos)
-03_arquitetura.md→ arquiteto (codigo, banco, integracoes, env)
-04_po-checklist.md→ PO (cheque consistencia: PRD ↔ UX ↔ arquitetura)
-05_historias.md  → Scrum Master (user stories quebradas para implementar uma a uma)
-06_qa-checklist.md→ criterios de aceite por historia
-```
-
-Os "papeis" (analista, PM, UX, arquiteto, PO, SM) sao **chapeus** — quem assume e o time (Roberth + assistente). Nao sao agentes Mastra. O agente Mastra do projeto e UM SO: o vendedor (`src/mastra/agents/vendedor.ts`).
-
-## Como editar
-
-1. Cada doc tem cabecalho:
-   ```markdown
-   ---
-   status: draft | approved
-   ultima_revisao: YYYY-MM-DD
-   responsavel: <quem revisou>
-   ---
-   ```
-2. Mudou algo? marque `status: draft`, atualize, e quando estiver alinhado volte para `approved`.
-3. Mudancas em `03_arquitetura.md` que impactam funcionalidade **devem** voltar pro `01_prd.md`.
-4. Apos `04_po-checklist.md` validar, gere ou atualize `05_historias.md` em pedacos pequenos (idealmente 1 historia = 1 PR).
-
-## Output esperado
-
-- Briefing curto (1-2 paginas).
-- PRD com persona, escopo, fora-de-escopo, metricas e restricoes.
-- UX-spec com fluxo turn-by-turn e copy real.
-- Arquitetura com arvore de arquivos, schema e contratos.
-- Historias com criterio de aceite — sem essas, nao se programa.
+| Doc | Para que serve |
+|---|---|
+| Este arquivo (`CONTEXT.md`) | Ponto de entrada do workspace de docs. |
+| [sql/auton_sdr/README.md](sql/auton_sdr/README.md) | Schema canonico do banco dedicado do SDR AUTON (tabelas `auton_sdr_*`). |
+| [persona-camila.md](persona-camila.md) | Persona/system prompt (md fonte) da Camila — versao humana, editar aqui primeiro. |
+| [_arquivo-roberth/](_arquivo-roberth/) | Docs historicos do bot Closer original — nao editar. |
 
 ## Ponteiros para o codigo
 
-- **Persona da Sofia (markdown editavel)**: [persona-sofia.md](persona-sofia.md) — versao humana do system prompt. Edite aqui primeiro.
-- **Persona em runtime**: [../src/mastra/agents/vendedor.ts](../src/mastra/agents/vendedor.ts) — string `instructions` do agente. Espelha o `.md` (escapando backticks).
+- **Persona da Camila (markdown editavel)**: [persona-camila.md](persona-camila.md) — versao humana do system prompt.
+- **Persona em runtime**: [../src/mastra/agents/camila.ts](../src/mastra/agents/camila.ts) — string `instructions` do agente. Espelha o `.md` (escapando backticks).
+- **Qualificador (avaliacao BANT via formulario)**: [../src/mastra/agents/qualificador.ts](../src/mastra/agents/qualificador.ts) + [../src/mastra/bant.ts](../src/mastra/bant.ts).
 - **Tools que materializam o fluxo**: [../src/mastra/tools/](../src/mastra/tools/).
-- **Schema das tabelas**: [sql/01_init.sql](sql/01_init.sql).
+- **Schema das tabelas**: [sql/auton_sdr/](sql/auton_sdr/).
 
-> Quando editar a persona: mudar primeiro em `persona-sofia.md`, depois copiar para `vendedor.ts` (cuidando de escapar `\\\`` nos crases dentro da template literal).
+> Quando editar a persona: mudar primeiro em `persona-camila.md`, depois espelhar em `camila.ts` (cuidando de escapar crases dentro da template literal). NAO editar o texto de seguranca da persona v2 (Safety Envelope/Behavioral Gradient/Hallucination Defense) sem revisao — ver `.planning/01-CONTEXT.md`.

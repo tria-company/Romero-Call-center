@@ -8,17 +8,17 @@ const connectionString = process.env.SUPABASE_DB_URL || '';
 // Instancias compartilhadas — reutilizadas pelo Mastra e pela Memory
 // para nao estourar o limite de conexoes do pooler Supabase (15)
 export const pgStore = new PostgresStore({
-  id: 'roberth-storage',
+  id: 'sdr-auton-storage',
   connectionString,
 });
 
 export const pgVector = new PgVector({
-  id: 'roberth-vector',
+  id: 'sdr-auton-vector',
   connectionString,
 });
 
 /**
- * Instancia compartilhada de Memory para o agente vendedor (Roberth).
+ * Instancia compartilhada de Memory para o agente SDR (Camila).
  *
  * Storage: Supabase/PostgreSQL.
  * - Working Memory por resource (telefone) — persiste perfil do lead entre conversas.

@@ -6,14 +6,45 @@ import {
   buscarCustomerPorTelefone,
   upsertCustomer,
   buscarConversaAtiva,
+  buscarConversaPorId,
   obterOuCriarConversaAtiva,
   atualizarConversa,
 } from './supabase';
 import { JANELA_CONVERSA_FLUIDA } from './config';
 
+// WR-06 (4a rodada): merge read-modify-write do metadata da conversa. Os
+// writers deste modulo montavam o JSON de metadata DO ZERO — clobber que
+// apagava chaves gravadas por outros modulos, em especial `bloqueado_ate`
+// (bloqueio.ts — perna DURAVEL do cold-cache de estaBloqueado, ou seja, a
+// persistencia da pausa de crise) e `agendamento_owner` num race. Mesmo
+// padrao de bloquearNumero (que ja fazia merge, corretamente): le o valor
+// persistido e faz spread antes de sobrescrever chaves especificas.
+// Best-effort: se a leitura falhar, devolve {} (o PATCH segue com as chaves
+// proprias — comportamento identico ao anterior, nunca pior).
+async function metadataAtualDaConversa(conversaId: string): Promise<Record<string, any>> {
+  try {
+    const conversa = await buscarConversaPorId(conversaId);
+    return (conversa && typeof conversa.metadata === 'object' && conversa.metadata) || {};
+  } catch {
+    return {};
+  }
+}
+
+// WR-06: chaves proprias da sessao pro metadata — SO inclui valores
+// definidos/nao-vazios, pra um campo ausente na sessao em memoria (ex:
+// cache reconstruido parcial) nao apagar o valor ja persistido no merge.
+function metadataDaSessao(sessao: Sessao): Record<string, any> {
+  const proprio: Record<string, any> = {};
+  if (sessao.interesse) proprio.interesse = sessao.interesse;
+  if (sessao.email) proprio.email = sessao.email;
+  if (sessao.ghlContactId) proprio.ghl_contact_id = sessao.ghlContactId;
+  if (sessao.agendamentoOwner) proprio.agendamento_owner = sessao.agendamentoOwner;
+  return proprio;
+}
+
 export interface Sessao {
   telefone: string;
-  agenteAtual: string;        // 'vendedor' | 'humano'
+  agenteAtual: string;        // 'qualificador' | 'camila' | 'humano'
   nome: string;
   email: string;
   interesse: string;          // curso/oferta que o lead demonstrou interesse
@@ -32,8 +63,9 @@ export interface Sessao {
 const cache = new Map<string, Sessao>();
 
 // Busca sessao: primeiro cache, depois Supabase. Se houver conversa ativa < 24h,
-// reconstroi a sessao no cache. Diferente do projeto antigo (que voltava pra triagem
-// apos 2h), aqui o agente unico — vendedor — sempre retoma direto.
+// reconstroi a sessao no cache. O SDR AUTON tem 3 estados logicos —
+// qualificador (batch)/camila (SPIN)/humano (pausa) — sempre retoma direto
+// no estado em que a conversa parou.
 export async function getSessao(telefone: string): Promise<Sessao | undefined> {
   if (cache.has(telefone)) {
     return cache.get(telefone);
@@ -45,7 +77,7 @@ export async function getSessao(telefone: string): Promise<Sessao | undefined> {
   const conversa = await buscarConversaAtiva(customer.id);
   if (!conversa) return undefined;
 
-  const agenteConversa = enumParaAgente(conversa.agente_atual || 'vendedor');
+  const agenteConversa = enumParaAgente(conversa.agente_atual || 'humano');
   const ultimaMensagem = new Date(conversa.data_ultima_mensagem).getTime();
   const tempoInativo = Date.now() - ultimaMensagem;
   const conversaFluida = tempoInativo < JANELA_CONVERSA_FLUIDA;
@@ -84,7 +116,7 @@ export async function criarSessao(telefone: string, dados: Partial<Sessao>): Pro
     if (id) customerId = id;
   }
 
-  const agenteAtual = dados.agenteAtual || 'vendedor';
+  const agenteAtual = dados.agenteAtual || 'humano';
 
   let conversaId = '';
   if (customerId) {
@@ -114,12 +146,15 @@ export async function criarSessao(telefone: string, dados: Partial<Sessao>): Pro
   // reinicio. Tambem corrige agente_atual quando a conversa foi REUSADA
   // (obterOuCriarConversaAtiva so grava o agente na criacao de uma conversa
   // nova; se ja existia uma ativa com outro agente, este PATCH sincroniza).
-  if (conversaId && (dados.ghlContactId || agenteAtual !== 'vendedor')) {
+  // WR-06: merge com o metadata persistido — uma conversa REUSADA (race)
+  // pode ja ter interesse/agendamento_owner/bloqueado_ate gravados.
+  if (conversaId && (dados.ghlContactId || agenteAtual !== 'humano')) {
     const patch: Record<string, any> = {};
     if (dados.ghlContactId) {
-      patch.metadata = JSON.stringify({ ghl_contact_id: dados.ghlContactId });
+      const atual = await metadataAtualDaConversa(conversaId);
+      patch.metadata = JSON.stringify({ ...atual, ghl_contact_id: dados.ghlContactId });
     }
-    if (agenteAtual !== 'vendedor') {
+    if (agenteAtual !== 'humano') {
       patch.agente_atual = agenteParaEnum(agenteAtual);
     }
     await atualizarConversa(conversaId, patch);
@@ -174,13 +209,11 @@ export async function atualizarSessao(telefone: string, dados: Partial<Sessao>):
   }
 
   if (sessao.conversaId) {
+    // WR-06: merge — preserva bloqueado_ate (pausa de crise) e qualquer
+    // outra chave gravada por outros modulos.
+    const atual = await metadataAtualDaConversa(sessao.conversaId);
     await atualizarConversa(sessao.conversaId, {
-      metadata: JSON.stringify({
-        interesse: sessao.interesse,
-        email: sessao.email,
-        ghl_contact_id: sessao.ghlContactId,
-        agendamento_owner: sessao.agendamentoOwner,
-      }),
+      metadata: JSON.stringify({ ...atual, ...metadataDaSessao(sessao) }),
     });
   }
 
@@ -204,13 +237,11 @@ export async function marcarAgendamentoOwner(telefone: string, quem: 'ia' | 'hum
   cache.set(telefone, sessao);
 
   if (sessao.conversaId) {
+    // WR-06: merge — preserva bloqueado_ate (pausa de crise) e qualquer
+    // outra chave gravada por outros modulos.
+    const atual = await metadataAtualDaConversa(sessao.conversaId);
     await atualizarConversa(sessao.conversaId, {
-      metadata: JSON.stringify({
-        interesse: sessao.interesse,
-        email: sessao.email,
-        ghl_contact_id: sessao.ghlContactId,
-        agendamento_owner: quem,
-      }),
+      metadata: JSON.stringify({ ...atual, ...metadataDaSessao(sessao), agendamento_owner: quem }),
     });
   }
 
@@ -230,12 +261,12 @@ export async function encerrarSessao(telefone: string): Promise<void> {
 }
 
 // Mapa do ID logico do agente -> chave registrada no Mastra
-// Projeto Roberth tinha 1 agente: vendedor. SDR AUTON adiciona
-// 'qualificador' (processa o form 14q em modo batch — 01-04) e 'camila'
-// (conduz o SPIN, saida JSON estrito — 01-05). 'humano' nao e um agente
+// SDR AUTON tem 2 agentes Mastra: 'qualificador' (processa o form 14q em
+// modo batch — 01-04) e 'camila' (conduz o SPIN, saida JSON estrito —
+// 01-05). O antigo agente vendedor/Sofia (Closer) foi removido (CLEAN-01)
+// — nao existe mais chave logica 'vendedor'. 'humano' nao e um agente
 // Mastra, e tratado no index.ts como pausa da IA.
 export const AGENTES_MAP: Record<string, string> = {
-  vendedor: 'vendedorAgent',
   qualificador: 'qualificadorAgent',
   camila: 'camilaAgent',
   humano: 'humano',
@@ -243,12 +274,13 @@ export const AGENTES_MAP: Record<string, string> = {
 
 export function agenteParaEnum(agente: string): string {
   const mapa: Record<string, string> = {
-    vendedor: 'vendedor',
     qualificador: 'qualificador',
     camila: 'camila',
     humano: 'atendimento_humano',
   };
-  return mapa[agente] || 'vendedor';
+  // Fail-safe: qualquer agente logico desconhecido (nunca mais 'vendedor',
+  // que foi removido — CLEAN-01) grava o valor de enum de pausa segura.
+  return mapa[agente] || 'atendimento_humano';
 }
 
 // Inverso de agenteParaEnum — reconstroi o agente logico a partir do valor
@@ -256,12 +288,15 @@ export function agenteParaEnum(agente: string): string {
 // sem isso, 'atendimento_humano' nunca voltava como 'humano' apos restart
 // (getSessao lia o valor cru do enum), quebrando a pausa da IA em leads
 // escalados por sofrimento agudo.
+// CLEAN-01: o enum Postgres ainda pode ter linhas legadas com o valor
+// 'vendedor' (gravadas antes desta limpeza) — mapeia pra 'humano' (retomada
+// segura), nunca pro agente Sofia/Closer removido.
 export function enumParaAgente(enumValor: string): string {
   const mapa: Record<string, string> = {
-    vendedor: 'vendedor',
+    vendedor: 'humano',
     qualificador: 'qualificador',
     camila: 'camila',
     atendimento_humano: 'humano',
   };
-  return mapa[enumValor] || 'vendedor';
+  return mapa[enumValor] || 'humano';
 }

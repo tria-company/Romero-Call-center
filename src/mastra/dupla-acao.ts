@@ -2,10 +2,10 @@
 //
 // Quando o Qualificador move o lead pra QUALIFICADO, index.ts (webhook do
 // formulario, /api/webhook/formulario) chama dispararDuplaAcao(...) — as
-// duas acoes disparam em SEQUENCIA, mas AMBAS acontecem (nao e "ou": uma
-// falhar nao cancela a outra, o objetivo e nunca deixar o SDR humano sem
-// sinal so porque a IA teve um erro de rede/LLM, nem deixar de abrir com o
-// lead so porque a task falhou):
+// duas acoes disparam em SEQUENCIA (B primeiro, depois A — WR-03), mas
+// AMBAS acontecem (nao e "ou": uma falhar nao cancela a outra, o objetivo e
+// nunca deixar o SDR humano sem sinal so porque a IA teve um erro de
+// rede/LLM, nem deixar de abrir com o lead so porque a task falhou):
 //   (A) troca o agente da sessao pra 'camila' e dispara a ABERTURA PROATIVA
 //       (a Camila fala primeiro, sem esperar o lead escrever) usando a
 //       ancora de abordagem que o Qualificador ja gravou no GHL
@@ -21,7 +21,7 @@
 // tentativa real de agendamento pela IA. O owner (quem ganhou a corrida)
 // fica gravado na sessao via `marcarAgendamentoOwner` (sessao.ts).
 
-import { trocarAgente } from './sessao';
+import { trocarAgente, getSessao } from './sessao';
 import { camilaAgent } from './agents/camila';
 import { createTask, prioridadePorBant } from './tools/create-task';
 import { readLeadFicha } from './tools/read-lead-ficha';
@@ -40,7 +40,13 @@ import type { ScoreBant } from './bant';
 // quando a chamada de fato acontece em runtime (o bundler da mastra/esbuild
 // resolve o ciclo normalmente, mesmo padrao ja usado por outros modulos
 // deste projeto que se importam de volta de index.ts indiretamente).
-import { despacharSaidaCamila } from './index';
+// WR-03 (3a rodada): comTimeout/comRetry/TIMEOUT_AGENTE/MAX_TENTATIVAS sao
+// os MESMOS helpers usados pelos demais agent.generate do projeto — a
+// abertura proativa da Camila era o unico generate sem timeout/retry, e um
+// hang no Azure travava a acao (A) indefinidamente. Import circular seguro
+// pelo mesmo motivo acima (function declarations/consts acessados so em
+// call-time, nunca no top-level deste modulo).
+import { despacharSaidaCamila, comTimeout, comRetry, TIMEOUT_AGENTE, MAX_TENTATIVAS } from './index';
 
 export interface DispararDuplaAcaoArgs {
   telefone: string;
@@ -59,24 +65,30 @@ export interface DispararDuplaAcaoResultado {
 /**
  * QUAL-04. Dispara as 2 acoes do lead recem-QUALIFICADO: abertura proativa
  * da Camila (A) + task priorizada pro SDR humano (B). Executa em sequencia
- * (A depois B) mas cada uma tem seu proprio try/catch — uma falhar nao
- * impede a outra de rodar.
+ * (B depois A — WR-03: a task nunca espera o LLM) e cada uma tem seu
+ * proprio try/catch — uma falhar nao impede a outra de rodar.
  */
 export async function dispararDuplaAcao(args: DispararDuplaAcaoArgs): Promise<DispararDuplaAcaoResultado> {
   const { telefone, contactId, nome, bant, ancora } = args;
+
+  // WR-03 (3a rodada): a task pro SDR humano (B) roda PRIMEIRO — ela nao
+  // depende da abertura da Camila e e a perna que o cabecalho deste modulo
+  // promete nunca perder. Antes, (A) rodava primeiro e uma chamada de LLM
+  // pendurada (hang nao e throw — o try/catch nao pega) deixava (B) sem
+  // rodar indefinidamente. Alem da reordenacao, o generate de (A) agora tem
+  // comTimeout/comRetry (defesa dupla).
+  let taskOk = false;
+  try {
+    taskOk = await dispararTaskPriorizada({ telefone, bant });
+  } catch (e) {
+    console.error(`[dupla-acao] falha ao criar task priorizada para ${telefone}:`, e);
+  }
 
   let aberturaOk = false;
   try {
     aberturaOk = await dispararAberturaProativaCamila({ telefone, contactId, nome, ancora });
   } catch (e) {
     console.error(`[dupla-acao] falha na abertura proativa da Camila para ${telefone}:`, e);
-  }
-
-  let taskOk = false;
-  try {
-    taskOk = await dispararTaskPriorizada({ telefone, bant });
-  } catch (e) {
-    console.error(`[dupla-acao] falha ao criar task priorizada para ${telefone}:`, e);
   }
 
   console.log(`[dupla-acao] ${telefone} -> abertura=${aberturaOk ? 'ok' : 'falhou'} task=${taskOk ? 'ok' : 'falhou'}`);
@@ -92,6 +104,19 @@ async function dispararAberturaProativaCamila(args: {
   ancora: string;
 }): Promise<boolean> {
   const { telefone, contactId, nome, ancora } = args;
+
+  // CR-03 (defesa em profundidade): rele a sessao antes de trocar o agente.
+  // Se entre o momento em que o Qualificador marcou QUALIFICADO e este ponto
+  // o lead foi escalado pra 'humano' (sofrimento agudo/CVV 188, handoff
+  // manual), a abertura proativa da Camila e RECUSADA — nao desfaz a pausa
+  // de crise por cima. O handler do webhook (index.ts, CR-03) ja suprime o
+  // pipeline nesse caso antes de chegar aqui; esta checagem cobre a janela
+  // de corrida entre a leitura de la e a execucao deste modulo.
+  const sessaoAtual = await getSessao(telefone);
+  if (sessaoAtual?.agenteAtual === 'humano') {
+    console.log(`[dupla-acao] ${telefone} em atendimento humano — abertura proativa da Camila RECUSADA`);
+    return false;
+  }
 
   // Troca o agente da sessao ANTES de gerar a abertura — se a Camila
   // eventualmente for interrompida (erro de rede no meio do generate), o
@@ -140,11 +165,23 @@ async function dispararAberturaProativaCamila(args: {
   );
   const seedPrompt = seedPromptPartes.join('\n');
 
-  const resposta = await camilaAgent.generate(seedPrompt, {
-    memory: { thread: telefone, resource: telefone },
-    threadId: telefone,
-    resourceId: telefone,
-  } as any);
+  // WR-03: mesmo envelope de resiliencia dos demais generates do projeto
+  // (index.ts processarMensagem/pipeline do Qualificador) — sem isso, um
+  // hang no Azure segurava a abertura (e, antes da reordenacao acima, a
+  // task do SDR humano) indefinidamente.
+  const resposta = await comRetry(
+    () => comTimeout(
+      camilaAgent.generate(seedPrompt, {
+        memory: { thread: telefone, resource: telefone },
+        threadId: telefone,
+        resourceId: telefone,
+      } as any),
+      TIMEOUT_AGENTE,
+      'camila-abertura',
+    ),
+    MAX_TENTATIVAS,
+    'camila-abertura',
+  );
 
   // Reusa o dispatcher da 01-05: parseia o JSON, executa tools_a_executar[]
   // e envia mensagens[] respeitando delay_ms[]. JSON invalido -> silencio
@@ -163,7 +200,7 @@ async function dispararTaskPriorizada(args: { telefone: string; bant: ScoreBant 
     'Lead qualificado pelo Qualificador (Filtro 2, BANT >= 5).',
     `BANT: budget=${bant.budget} authority=${bant.authority} need=${bant.need} timing=${bant.timing} total=${bant.total}`,
     `Prioridade: ${prioridade}.`,
-    'A Camila ja iniciou a abertura proativa no WhatsApp em paralelo — acompanhar o card caso ela precise escalar pra humano.',
+    'A Camila vai disparar a abertura proativa no WhatsApp na sequencia — acompanhar o card caso ela precise escalar pra humano.',
   ].join('\n');
 
   const resultado = (await createTask.execute!({ telefone, titulo, corpo, bantTotal: bant.total } as any, {} as any)) as {

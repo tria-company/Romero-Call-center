@@ -62,7 +62,10 @@ export const updateContactField = createTool({
         console.error(`[update-contact-field] PUT /contacts/${contactId} falhou (${res.status}):`, erroBody);
         return { sucesso: false, motivo: `GHL respondeu ${res.status}` };
       }
-      console.log(`[update-contact-field] ${telefone} (${contactId}) <- ${chave}=${valor}`);
+      // LGPD (WR-01): NUNCA logar o valor completo — campos como
+      // objecao_ativa/resumo_ultima_ligacao carregam excertos (quase)
+      // literais de transcricao de call. So chave + tamanho vao pro log.
+      console.log(`[update-contact-field] ${telefone} (${contactId}) <- ${chave} (${valor.length} chars)`);
       return { sucesso: true };
     } catch (e) {
       console.error('[update-contact-field] erro:', e);

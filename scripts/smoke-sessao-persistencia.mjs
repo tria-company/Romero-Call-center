@@ -1,9 +1,12 @@
-// Smoke de CAM-02/Gap 3 (CR-01, plano 01-09): prova o roundtrip de
-// agenteParaEnum/enumParaAgente pros 4 estados logicos do agente
-// ('vendedor'/'qualificador'/'camila'/'humano') — a persistencia real do
-// agente_atual no Supabase depende desse par de funcoes serem inversas uma
-// da outra (fecha a assimetria do 'humano' e o fallback silencioso de
-// 'camila'/'qualificador' pra 'vendedor').
+// Smoke de CAM-02/Gap 3 (CR-01, plano 01-09) — atualizado no plano 04-01
+// (CLEAN-01, remocao do agente vendedor/Sofia): prova o roundtrip de
+// agenteParaEnum/enumParaAgente pros 3 estados logicos vivos do SDR
+// ('qualificador'/'camila'/'humano') — a persistencia real do agente_atual
+// no Supabase depende desse par de funcoes serem inversas uma da outra
+// (fecha a assimetria do 'humano' e o fallback silencioso de
+// 'camila'/'qualificador' pra pausa segura). Tambem prova que o valor
+// LEGADO 'vendedor' (linhas gravadas antes da limpeza, agente removido)
+// retoma como 'humano' — nunca resolve pro agente Closer inexistente.
 //
 // Por que nao importar sessao.ts direto: ele importa './supabase' e
 // './config' extensionless — o loader nativo de TS do Node
@@ -63,14 +66,20 @@ function checar(descricao, condicao) {
   if (!condicao) falhas.push(descricao);
 }
 
-// ---- Roundtrip dos 4 estados logicos ----
+// ---- Agente logico 'vendedor' (Closer) foi REMOVIDO (CLEAN-01) ----
+// agenteParaEnum('vendedor') nao mapeia mais pro proprio enum 'vendedor':
+// 'vendedor' nao existe na tabela de agentes logicos vivos, entao cai no
+// fallback fail-safe — o valor de enum de pausa segura.
 checar(
-  "vendedor: agenteParaEnum('vendedor') === 'vendedor'",
-  agenteParaEnum('vendedor') === 'vendedor',
+  "vendedor (removido): agenteParaEnum('vendedor') === 'atendimento_humano' (fallback fail-safe, agente logico nao existe mais)",
+  agenteParaEnum('vendedor') === 'atendimento_humano',
 );
+// Linha LEGADA no Postgres (agente_atual='vendedor', gravada antes da
+// limpeza): enumParaAgente precisa retomar como pausa segura ('humano'),
+// nunca resolver pro agente Closer/Sofia removido.
 checar(
-  "vendedor: enumParaAgente('vendedor') === 'vendedor'",
-  enumParaAgente('vendedor') === 'vendedor',
+  "vendedor (legado no enum): enumParaAgente('vendedor') === 'humano' (retomada segura de linha legada)",
+  enumParaAgente('vendedor') === 'humano',
 );
 
 checar(
@@ -101,12 +110,48 @@ checar(
   enumParaAgente('atendimento_humano') === 'humano',
 );
 
-// ---- Composicao: enumParaAgente(agenteParaEnum(x)) === x para os 4 estados ----
-for (const x of ['vendedor', 'qualificador', 'camila', 'humano']) {
+// ---- Composicao: enumParaAgente(agenteParaEnum(x)) === x para os 3 estados
+// logicos VIVOS do SDR ('vendedor' foi removido — CLEAN-01 — e nao compoe
+// mais, ja coberto separadamente acima como fallback fail-safe/legado) ----
+for (const x of ['qualificador', 'camila', 'humano']) {
   checar(
     `composicao: enumParaAgente(agenteParaEnum('${x}')) === '${x}'`,
     enumParaAgente(agenteParaEnum(x)) === x,
   );
+}
+
+// ---- WR-06 (4a rodada, 04-REVIEW.md): writers de metadata fazem MERGE ----
+// Os 3 writers de metadata da conversa (criarSessao/atualizarSessao/
+// marcarAgendamentoOwner) precisam ler o metadata persistido
+// (metadataAtualDaConversa -> buscarConversaPorId) e fazer spread ANTES de
+// sobrescrever chaves proprias — clobber apagava `bloqueado_ate` (a perna
+// duravel da pausa de crise de bloqueio.ts) e `agendamento_owner`.
+// Source-read: asserts estruturais sobre sessao.ts.
+checar(
+  "WR-06: sessao.ts importa buscarConversaPorId de './supabase' (leitura pro merge)",
+  /import\s*\{[\s\S]*?buscarConversaPorId[\s\S]*?\}\s*from\s*['"]\.\/supabase['"]/.test(src),
+);
+checar(
+  'WR-06: helper metadataAtualDaConversa existe (read-modify-write)',
+  /async function metadataAtualDaConversa\(/.test(src),
+);
+
+// Cada writer precisa (a) chamar metadataAtualDaConversa e (b) fazer spread
+// do valor lido no JSON.stringify do metadata.
+for (const nomeFn of ['criarSessao', 'atualizarSessao', 'marcarAgendamentoOwner']) {
+  const matchFn = src.match(new RegExp(`export async function ${nomeFn}\\([\\s\\S]*?\\n\\}`));
+  checar(`WR-06: funcao ${nomeFn} encontrada em sessao.ts`, !!matchFn);
+  if (matchFn) {
+    const corpo = matchFn[0];
+    checar(
+      `WR-06: ${nomeFn} le o metadata persistido (metadataAtualDaConversa) antes de gravar`,
+      corpo.includes('metadataAtualDaConversa('),
+    );
+    checar(
+      `WR-06: ${nomeFn} faz spread do metadata lido (JSON.stringify({ ...atual, ... }))`,
+      /JSON\.stringify\(\{\s*\.\.\.atual/.test(corpo),
+    );
+  }
 }
 
 if (falhas.length > 0) {

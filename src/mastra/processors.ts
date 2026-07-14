@@ -1,44 +1,41 @@
-import { PromptInjectionDetector, PIIDetector, SystemPromptScrubber } from '@mastra/core/processors';
+import { PIIDetector } from '@mastra/core/processors';
 import { azure } from './azure-client';
 import { AZURE_OPENAI_DEPLOYMENT_GPT41_MINI } from './config';
 
-// Modelo leve compartilhado pelos 3 processors (instancia unica via factory).
-// azure.chat() usa Chat Completions API (compat com api-version 2024-12-01-preview).
-// Default azure() usa Responses API que exige 2025-03-01-preview+.
+// Modelo leve compartilhado pelos processors restantes (instancia unica via
+// factory). azure.chat() usa Chat Completions API (compat com api-version
+// 2024-12-01-preview). Default azure() usa Responses API que exige
+// 2025-03-01-preview+.
 const modeloLeve = azure.chat(AZURE_OPENAI_DEPLOYMENT_GPT41_MINI);
 
 // --- Input Processors ---
 
 /**
- * Detecta tentativas de prompt injection, jailbreak e manipulacao.
+ * ⚰️ APOSENTADO (Fase 5, plano 05-01, HARD-01): o detector de prompt
+ * injection LLM-based do Mastra (`@mastra/core/processors`, classe
+ * "Prompt" + "InjectionDetector" — grafado assim de proposito neste
+ * comentario pra nao deixar o simbolo antigo "vivo" em busca textual) que
+ * vivia aqui foi DESATIVADO desde o vendedor.ts (Teste 4 / 868jjn1f4) — o
+ * prompt interno que o Mastra manda ao gpt-4.1-mini pra classificar
+ * jailbreak ERA bloqueado pelo proprio content filter do Azure
+ * (responsibleAIPolicyViolation, jailbreak.detected=true), gerando 400 em
+ * TODA chamada + 30-60s de latencia de retry antes do agent.generate real
+ * comecar. Nunca esteve ligado em nenhum inputProcessors de agent (so
+ * exportado, sem uso downstream) — aposenta-lo aqui NAO muda runtime dos
+ * agents (camila.ts:inputProcessors=[piiDetector],
+ * qualificador.ts:inputProcessors=[piiDetector]).
  *
- * ⚠️ DESATIVADO em vendedor.ts (Teste 4 / 868jjn1f4) — o prompt interno que
- * o Mastra envia ao gpt-4.1-mini pra classificar jailbreak ESTA sendo
- * bloqueado pelo proprio content filter do Azure (responsibleAIPolicyViolation
- * com jailbreak.detected=true e jailbreak.filtered=true), retornando erro
- * 400 em TODA chamada. Cada falha + retry interno do pRetry do Mastra
- * adiciona 30-60s de latencia antes do agent.generate real comecar,
- * causando os timeouts e loops do Teste 4.
+ * O proprio comentario original recomendava: "refatorar pra
+ * implementacao keyword/regex-based local sem LLM call" — e exatamente
+ * isso que guardrails/injecao.ts (`detectarInjecao`/`normalizarEntrada`)
+ * entrega: deteccao 100% DETERMINISTICA local (regex/keyword multilingue
+ * PT+EN, normalizacao anti-bypass de zero-width/unicode), SEM chamar
+ * LLM/Azure — elimina o 400/latencia na raiz. Ligado no caminho da Camila
+ * em index.ts (processarMensagem, ANTES do agent.generate).
  *
- * Pra reativar: trocar o modelo pra nao-Azure (OpenAI direto, Anthropic),
- * ou refatorar pra implementacao keyword/regex-based local sem LLM call.
- *
- * Por enquanto, o agent.instructions cobre jailbreak via:
- *   - Boundary 6 (nunca aceite override "ignore as instrucoes...")
- *   - Example 8 (resposta padrao a tentativa de jailbreak)
- *
- * Strategy: rewrite — neutraliza o ataque mas preserva a intencao legitima.
+ * Re-export fino abaixo pra quem procurar o simbolo antigo aqui.
  */
-export const promptInjectionDetector = new PromptInjectionDetector({
-  model: modeloLeve,
-  threshold: 0.7,
-  strategy: 'rewrite',
-  detectionTypes: [
-    'jailbreak',
-    'instruction-override',
-    'system-manipulation',
-  ],
-});
+export { detectarInjecao } from './guardrails/injecao';
 
 /**
  * Detecta dados pessoais sensiveis (CPF, cartao, email, telefone).
@@ -62,12 +59,22 @@ export const piiDetector = new PIIDetector({
 // --- Output Processors ---
 
 /**
- * Impede que o agente vaze o system prompt na resposta.
- * Strategy: rewrite — reescreve a mensagem suprimindo trechos internos.
- * Mais limpo visualmente que 'redact' (que deixava "[informacao interna]"
- * no meio da frase, parecendo bug pro lead).
+ * ⚰️ APOSENTADO (Fase 5, plano 05-05, HARD-02): o scrubber de saida
+ * LLM-based do Mastra (`@mastra/core/processors`, classe "System" + "Prompt"
+ * + "Scrubber" — grafado assim de proposito neste comentario pra nao deixar
+ * o simbolo antigo "vivo" em busca textual) que vivia aqui foi DESATIVADO.
+ * Nunca esteve ligado em nenhum outputProcessors de agent (camila.ts:478
+ * ja era outputProcessors:[] desde antes deste plano) — aposenta-lo aqui NAO
+ * muda runtime. Mesma familia de problema do promptInjectionDetector
+ * aposentado no 05-01 (ver acima): o modelo leve usado por este processor
+ * (modeloLeve, gpt-4.1-mini) tambem esta sujeito ao content filter do Azure
+ * bloquear o proprio prompt interno de rewrite, gerando 400 +
+ * latencia de retry.
+ *
+ * O scrub de PII/anti-vazamento na saida agora e 100% DETERMINISTICO e
+ * LOCAL: guardrails/saida.ts (`scrubPII` + `checarFatosAutorizados`),
+ * ligado no dispatcher (index.ts:despacharSaidaCamila) ANTES de cada
+ * enviarMensagem — sem chamar LLM/Azure. Re-export fino abaixo pra quem
+ * procurar um scrub de saida aqui.
  */
-export const systemPromptScrubber = new SystemPromptScrubber({
-  model: modeloLeve,
-  strategy: 'rewrite',
-});
+export { scrubPII } from './guardrails/saida';

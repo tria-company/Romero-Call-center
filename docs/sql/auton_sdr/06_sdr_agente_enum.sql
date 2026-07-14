@@ -18,7 +18,7 @@
 -- valor 'qualificador'/'camila' so persiste de fato apos o enum aceitar.
 --
 -- IMPORTANTE — banco: aplicar no Supabase DEDICADO do SDR AUTON (env
--- `SUPABASE_DB_URL`), separado do banco em producao do Projeto Roberth.
+-- `SUPABASE_DB_URL`), separado do banco em producao do ex-bot Closer "Roberth".
 -- Decisao do usuario, 2026-07-13 (ver .planning/STATE.md e MEMORY.md,
 -- nota "Banco dedicado do SDR").
 --

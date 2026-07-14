@@ -75,18 +75,30 @@ function paraBooleanoSimNao(valor: unknown): boolean {
 // paraNumero: converte string do form (com simbolos/moeda) em numero,
 // tratando separador de milhar/decimal no formato pt-BR. Regra
 // deterministica (CR-03 do 01-REVIEW.md):
-// 1) remove tudo que nao for digito, ponto ou virgula;
-// 2) SE houver virgula, ela e o separador decimal -> remove TODOS os pontos
-//    (milhar) e troca a virgula por ponto (ex: '1.500,00' -> '1500.00');
+// 1) EXTRAI o primeiro token numerico da string (ver REGEX_PRIMEIRO_NUMERO
+//    abaixo) — NAO sanitiza a string inteira com um replace global, que
+//    colava os digitos de numeros distintos em respostas de faixa (WR-02 do
+//    01-REVIEW.md, 2a rodada: 'replace(/[^\d.,]/g,'')' transformava '300 a
+//    500' em '300500' e 'entre 1.000 e 2.000' em '1.0002.000');
+// 2) SE o token contem virgula, ela e o separador decimal -> remove TODOS os
+//    pontos (milhar) e troca a virgula por ponto (ex: '1.500,00' -> '1500.00');
 // 3) SENAO, SE o ponto esta no padrao de milhar pt-BR (grupos de 3 digitos
 //    apos o ponto, ex: '1.500' ou '12.345.678'), remove todos os pontos
 //    (ex: '1.500' -> '1500');
 // 4) senao, mantem o ponto como decimal (ex: '2.5' -> 2.5, '400' -> 400).
+//
+// Regra de faixa (WR-02): para respostas com multiplos numeros ('300 a 500',
+// 'entre 1.000 e 2.000'), o regex de extracao casa o PRIMEIRO token numerico
+// da string — e o piso conservador da faixa, usado como ticket pro scoring
+// (300 e 1000 respectivamente). Nao concatena os demais numeros da faixa.
 const REGEX_PONTO_MILHAR = /^\d{1,3}(\.\d{3})+$/;
+const REGEX_PRIMEIRO_NUMERO = /\d{1,3}(\.\d{3})+(,\d+)?|\d+(?:[.,]\d+)?/;
 
 function paraNumero(valor: unknown): number {
   if (valor === undefined || valor === null) return 0;
-  let texto = paraTexto(valor).replace(/[^\d.,]/g, '');
+  const match = paraTexto(valor).match(REGEX_PRIMEIRO_NUMERO);
+  if (!match) return 0;
+  let texto = match[0];
   if (texto.includes(',')) {
     texto = texto.replace(/\./g, '').replace(',', '.');
   } else if (REGEX_PONTO_MILHAR.test(texto)) {

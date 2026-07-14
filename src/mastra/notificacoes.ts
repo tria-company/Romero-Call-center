@@ -30,6 +30,21 @@ setInterval(() => {
  * Verifica se ja notificamos esse contato pelo mesmo motivo na ultima 1h.
  * Se sim, retorna true (e nao deve renotificar). Se nao, registra e
  * retorna false (caller pode prosseguir).
+ *
+ * Equivale a `consultarNotificacao` seguido de `registrarNotificacao` quando
+ * o resultado da consulta for false — ou seja, e um consultar+registrar
+ * ATOMICO (registra ANTES de qualquer tentativa do caller). Por isso so deve
+ * ser usado quando a acao apos a consulta e best-effort e nao precisa de
+ * retry honesto (index.ts: audio_falhou/erro_agente/camila_json_invalido/
+ * qualificador_falhou; handoff-humano.ts) — nesses casos, "consumir" a
+ * janela mesmo se o aviso falhar e aceitavel (anti-spam vence).
+ *
+ * Quem tem uma tentativa que PODE FALHAR apos a consulta usa o split abaixo
+ * (`consultarNotificacao` + `registrarNotificacao` APOS sucesso real):
+ * escalate-to-human.ts (task/move/grupo) e tools/create-task.ts (POST na
+ * GHL pode falhar por PIT token ausente, contactId nao resolvido ou erro de
+ * rede — CR-01 da 3a rodada: registrar antes fazia o retry devolver
+ * {sucesso:true} fake sem criar task nenhuma).
  */
 export function jaNotificouRecentemente(telefone: string, motivo: string): boolean {
   const key = `${telefone}:${motivo}`;
@@ -39,6 +54,28 @@ export function jaNotificouRecentemente(telefone: string, motivo: string): boole
   }
   cacheNotificacoes.set(key, Date.now());
   return false;
+}
+
+/**
+ * Consulta READ-ONLY da janela de idempotencia: retorna true se a chave
+ * `telefone:chave` foi registrada ha menos que JANELA_IDEMPOTENCIA_MS.
+ * NUNCA grava no cacheNotificacoes — chamar 2x seguidas sem
+ * `registrarNotificacao` no meio retorna o mesmo resultado nas duas vezes.
+ */
+export function consultarNotificacao(telefone: string, chave: string): boolean {
+  const key = `${telefone}:${chave}`;
+  const ts = cacheNotificacoes.get(key);
+  return !!ts && Date.now() - ts < JANELA_IDEMPOTENCIA_MS;
+}
+
+/**
+ * Registra a chave `telefone:chave` no cacheNotificacoes com o timestamp
+ * atual, marcando a janela de idempotencia. Usar SOMENTE apos confirmar
+ * sucesso real da acao que a chave representa (ver escalate-to-human.ts).
+ */
+export function registrarNotificacao(telefone: string, chave: string): void {
+  const key = `${telefone}:${chave}`;
+  cacheNotificacoes.set(key, Date.now());
 }
 
 /**

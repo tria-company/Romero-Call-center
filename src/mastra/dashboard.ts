@@ -10,14 +10,18 @@
 // HTML: server-rendered com Tailwind via CDN. Sem JS pesado, sem build step.
 // Auto-refresh do dashboard via fetch + DOM swap (sem reload — sem flash).
 
+// WR-03 (4a rodada): dashboard neutralizado pro SDR AUTON Health — as
+// metricas do Closer removido (cards de links/checkout enviados, etapa
+// final do funil de envio de link, section de follow-ups automaticos da
+// Sofia) foram REMOVIDAS junto com o branding do produto anterior. As
+// metricas equivalentes do SDR (calls agendadas, no-show/resgates) entram
+// como sections proprias quando o dashboard for re-desenhado.
 import { DASHBOARD_USER, DASHBOARD_PASS } from './config';
 import {
   buscarConversasAtivas,
   buscarConversaPorId,
   buscarMensagensDaConversa,
-  contarConversoes,
   contarFunil,
-  contarFollowUps,
   buscarObjecoesRecentes,
   contarObjecoesPorCategoria,
   buscarErrosRecentes,
@@ -46,7 +50,7 @@ function verificarAuth(authHeader: string | undefined): boolean {
 
 function respond401(c: any) {
   return c.text('Acesso negado.', 401, {
-    'WWW-Authenticate': 'Basic realm="Roberth Dashboard"',
+    'WWW-Authenticate': 'Basic realm="SDR AUTON Dashboard"',
     'Content-Type': 'text/plain; charset=utf-8',
   });
 }
@@ -121,23 +125,13 @@ function iniciaisDe(nome: string | undefined | null): string {
   return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
 }
 
-// Mapa de tool_name pra label visual no viewer (usado em badge pill)
-function badgeTool(toolName: string | null, toolInput: any): { icone: string; label: string } | null {
+// Mapa de tool_name pra label visual no viewer (usado em badge pill).
+// CLEAN-01: os branches das tools do Closer (enviar-checkout,
+// salvar-dados-sessao, handoff-humano, notificar-time, registrar-objecao)
+// foram removidos — registros historicos com esses tool_name caem no badge
+// neutro default abaixo.
+function badgeTool(toolName: string | null, _toolInput: any): { icone: string; label: string } | null {
   if (!toolName) return null;
-  if (toolName === 'enviar-checkout') return { icone: '🔗', label: 'link enviado' };
-  if (toolName === 'salvar-dados-sessao') return { icone: '👤', label: 'dados salvos' };
-  if (toolName === 'handoff-humano') {
-    const motivo = toolInput?.motivo || '?';
-    return { icone: '🚨', label: `handoff (${motivo})` };
-  }
-  if (toolName === 'notificar-time') {
-    const motivo = toolInput?.motivo || '?';
-    return { icone: '📨', label: `notificou (${motivo})` };
-  }
-  if (toolName === 'registrar-objecao') {
-    const cat = toolInput?.categoria || '?';
-    return { icone: '🎯', label: `objeção (${cat})` };
-  }
   if (toolName.startsWith('follow-up-')) {
     return { icone: '🔄', label: toolName };
   }
@@ -175,7 +169,7 @@ const HEAD_COMUM = `
     /* Bolhas WhatsApp */
     .bubble { max-width: 80%; padding: 10px 14px; border-radius: 16px; line-height: 1.4; word-wrap: break-word; box-shadow: 0 1px 2px rgba(0,0,0,0.15); }
     .b-lead { background: #1e293b; color: #f1f5f9; align-self: flex-start; border-bottom-left-radius: 4px; }
-    .b-sofia { background: #064e3b; color: #ecfdf5; align-self: flex-end; border-bottom-right-radius: 4px; }
+    .b-bot { background: #064e3b; color: #ecfdf5; align-self: flex-end; border-bottom-right-radius: 4px; }
     .b-sys { background: #1e1b4b; color: #c7d2fe; align-self: center; max-width: 92%; font-size: 13px; border-radius: 10px; }
     .meta { font-size: 11px; opacity: 0.65; margin-top: 4px; }
     /* Animações sutis */
@@ -246,43 +240,21 @@ const ICON = {
 
 function gerarHTMLDashboard(dados: {
   conversasAtivas: any[];
-  conversoes: { hoje: number; semana: number; mes: number; total: number };
-  funil: { total: number; engajou: number; linkEnviado: number };
-  followUps: { fup1: number; fup3: number; fup5: number; handoff24h: number; leadsComFup: number };
+  funil: { total: number; engajou: number };
   objecoesRecentes: any[];
   objecoesPorCategoria: Record<string, number>;
   errosRecentes: any[];
   errosPorCodigo: Record<string, number>;
 }): string {
-  const { conversasAtivas, conversoes, funil, followUps, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
+  const { conversasAtivas, funil, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo } = dados;
   const agora = new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
-  // ----- Cards de conversoes -----
-  const conversoesItems = [
-    { label: 'Hoje', n: conversoes.hoje, gradient: 'from-emerald-500 to-emerald-700' },
-    { label: 'Semana', n: conversoes.semana, gradient: 'from-emerald-600 to-teal-700' },
-    { label: 'Mês', n: conversoes.mes, gradient: 'from-teal-600 to-cyan-700' },
-    { label: 'Total', n: conversoes.total, gradient: 'from-cyan-600 to-blue-700' },
-  ];
-  const cardsConversoes = conversoesItems.map((item) => `
-    <div class="relative overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-br ${item.gradient} p-3 sm:p-5 shadow-lg ring-1 ring-white/10">
-      <div class="flex items-center justify-between text-white/80 text-[10px] sm:text-xs uppercase tracking-wider font-medium">
-        <span>${item.label}</span>
-        <span class="opacity-50">${ICON.bolt}</span>
-      </div>
-      <div class="text-2xl sm:text-4xl font-bold text-white mt-1 sm:mt-2">${item.n}</div>
-      <div class="text-[10px] sm:text-xs text-white/60 mt-0.5 sm:mt-1">checkouts</div>
-    </div>
-  `).join('');
-
-  // ----- Funil de vendas (3 etapas, simples) -----
+  // ----- Funil (2 etapas — WR-03: etapa "Link enviado" do Closer removida) -----
   const totalTopo = funil.total || 1; // evita divisao por zero
   const etapas = [
     { label: 'Conversas',    icon: '💬', n: funil.total,       cor: 'from-emerald-500 to-emerald-600' },
     { label: 'Engajou',      icon: '👋', n: funil.engajou,     cor: 'from-emerald-600 to-teal-600' },
-    { label: 'Link enviado', icon: '🔗', n: funil.linkEnviado, cor: 'from-cyan-600 to-blue-600' },
   ];
-  const conversaoTotal = funil.total > 0 ? Math.round((funil.linkEnviado / funil.total) * 100) : 0;
 
   const linhasFunil = etapas.map((et, i) => {
     const pct = funil.total > 0 ? (et.n / totalTopo) * 100 : 0;
@@ -312,24 +284,6 @@ function gerarHTMLDashboard(dados: {
     `;
   }).join('');
 
-  // ----- Follow-ups automaticos (cards separados do funil) -----
-  const fupItems = [
-    { label: '⏰ Leads c/ FUP',  n: followUps.leadsComFup, gradient: 'from-amber-500 to-amber-700',  hint: '1+ follow-up disparado' },
-    { label: 'FUP 1h',           n: followUps.fup1,        gradient: 'from-amber-600 to-orange-600', hint: 'silencio de 1h' },
-    { label: 'FUP 3h',           n: followUps.fup3,        gradient: 'from-orange-600 to-orange-700', hint: 'silencio de 3h' },
-    { label: 'FUP 5h',           n: followUps.fup5,        gradient: 'from-orange-700 to-rose-700',  hint: 'silencio de 5h' },
-    { label: 'Handoff 24h',      n: followUps.handoff24h,  gradient: 'from-rose-700 to-rose-900',    hint: 'silencio de 24h' },
-  ];
-  const cardsFup = fupItems.map((item) => `
-    <div class="relative overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-br ${item.gradient} p-3 sm:p-5 shadow-lg ring-1 ring-white/10">
-      <div class="flex items-center justify-between text-white/80 text-[10px] sm:text-xs uppercase tracking-wider font-medium">
-        <span class="truncate">${item.label}</span>
-      </div>
-      <div class="text-2xl sm:text-4xl font-bold text-white mt-1 sm:mt-2">${item.n}</div>
-      <div class="text-[10px] sm:text-xs text-white/60 mt-0.5 sm:mt-1">${item.hint}</div>
-    </div>
-  `).join('');
-
   // ----- Tabela de conversas ativas -----
   const linhasConversas = conversasAtivas.length === 0
     ? `<tr><td colspan="6" class="text-center text-slate-400 py-10">Nenhuma conversa ativa.</td></tr>`
@@ -339,7 +293,7 @@ function gerarHTMLDashboard(dados: {
         const tel = customer.telefone || '—';
         const status = c.status;
         const ultimaLead = formatarTempoRelativo(c.last_lead_message_at);
-        const ultimaSofia = formatarTempoRelativo(c.last_assistant_message_at);
+        const ultimaBot = formatarTempoRelativo(c.last_assistant_message_at);
         const inativ = formatarTempoRelativo(c.data_ultima_mensagem);
         return `
           <tr class="group hover:bg-slate-700/30 transition cursor-pointer">
@@ -357,7 +311,7 @@ function gerarHTMLDashboard(dados: {
               </span>
             </td>
             <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Lead falou">${ultimaLead}</td>
-            <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Bot falou">${ultimaSofia}</td>
+            <td class="px-3 sm:px-4 py-3 text-sm text-slate-300" data-label="Bot falou">${ultimaBot}</td>
             <td class="px-3 sm:px-4 py-3 text-sm text-slate-400" data-label="Inatividade">${inativ}</td>
           </tr>
         `;
@@ -467,17 +421,17 @@ function gerarHTMLDashboard(dados: {
 
   return `<!doctype html>
 <html lang="pt-BR">
-${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title></head>`)}
+${HEAD_COMUM.replace('</head>', `<title>Dashboard — SDR AUTON Health</title></head>`)}
 <body class="min-h-screen bg-slate-900 text-slate-100" style="background-image: radial-gradient(circle at 0% 0%, rgba(16,185,129,0.08) 0%, transparent 50%), radial-gradient(circle at 100% 0%, rgba(59,130,246,0.05) 0%, transparent 50%);">
   <div id="dash-root" class="max-w-7xl mx-auto px-3 sm:px-6 py-3 sm:py-6">
     <!-- Header sticky -->
     <header class="sticky top-0 z-10 -mx-3 sm:-mx-6 px-3 sm:px-6 py-3 sm:py-4 mb-5 sm:mb-6 glass border-b border-slate-700/50">
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
-          <div class="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-lg sm:text-xl shrink-0">👑</div>
+          <div class="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-lg sm:text-xl shrink-0">💬</div>
           <div class="min-w-0">
-            <h1 class="text-base sm:text-xl font-bold tracking-tight truncate">Rei Delas</h1>
-            <p class="text-[11px] sm:text-xs text-slate-400 truncate">Dashboard · MCR</p>
+            <h1 class="text-base sm:text-xl font-bold tracking-tight truncate">SDR AUTON Health</h1>
+            <p class="text-[11px] sm:text-xs text-slate-400 truncate">Dashboard</p>
           </div>
         </div>
         <div class="flex items-center gap-1.5 text-[11px] sm:text-xs text-slate-400 mono shrink-0">
@@ -487,40 +441,17 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title></head>`)
       </div>
     </header>
 
-    <!-- Links enviados (Sofia mandou checkout) -->
-    <section class="mb-6 sm:mb-8">
-      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
-        ${ICON.bolt} Links enviados <span class="text-slate-500 normal-case font-normal text-xs">(Sofia mandou checkout)</span>
-      </h2>
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
-        ${cardsConversoes}
-      </div>
-    </section>
-
-    <!-- Funil de vendas -->
+    <!-- Funil -->
     <section class="mb-6 sm:mb-8">
       <h2 class="flex items-center justify-between gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
         <span class="flex items-center gap-2">
-          📊 Funil de vendas <span class="text-slate-500 normal-case font-normal text-xs">(historico total)</span>
-        </span>
-        <span class="text-xs normal-case font-normal text-slate-400 mono">
-          Conversao total: <span class="${conversaoTotal >= 10 ? 'text-emerald-300' : conversaoTotal >= 3 ? 'text-amber-300' : 'text-slate-300'} font-semibold">${conversaoTotal}%</span>
+          📊 Funil <span class="text-slate-500 normal-case font-normal text-xs">(historico total)</span>
         </span>
       </h2>
       <div class="rounded-xl sm:rounded-2xl bg-slate-800/40 ring-1 ring-slate-700/50 p-3 sm:p-5">
         <div class="space-y-1.5 sm:space-y-2">
           ${linhasFunil}
         </div>
-      </div>
-    </section>
-
-    <!-- Follow-ups automaticos (sistema cuida do silencio) -->
-    <section class="mb-6 sm:mb-8">
-      <h2 class="flex items-center gap-2 text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
-        ⏰ Follow-ups automaticos <span class="text-slate-500 normal-case font-normal text-xs">(scheduler cutucando leads silenciados)</span>
-      </h2>
-      <div class="grid grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-3">
-        ${cardsFup}
       </div>
     </section>
 
@@ -601,7 +532,7 @@ ${HEAD_COMUM.replace('</head>', `<title>Dashboard — Rei Delas</title></head>`)
     </section>
 
     <footer class="text-center text-[11px] sm:text-xs text-slate-500 mt-8 sm:mt-12 pb-4 sm:pb-6">
-      Auto-refresh 30s · Rei Delas · ${agora}
+      Auto-refresh 30s · SDR AUTON Health · ${agora}
     </footer>
   </div>
   <script>
@@ -648,11 +579,11 @@ function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
   const telefone = customer.telefone || '—';
   const status = conversa.status;
   const inicio = formatarDataHora(conversa.started_at);
-  const linkEnv = conversa.link_enviado
-    ? `${ICON.check} ${formatarDataHora(conversa.link_enviado_em)}`
-    : '—';
+  // WR-03: o campo de link/checkout enviado (coluna morta do Closer) saiu
+  // do header do viewer — no lugar, o agente atual da conversa (dado vivo).
+  const agenteAtual = conversa.agente_atual || '—';
 
-  // Itera mensagens em ordem cronologica e calcula tempo de resposta da Sofia.
+  // Itera mensagens em ordem cronologica e calcula tempo de resposta do bot.
   let ultimaUserTs: number | null = null;
   const bolhas = mensagens.map((m) => {
     const ts = new Date(m.created_at).getTime();
@@ -686,7 +617,7 @@ function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
       }
       return `
         <div class="flex flex-col mb-3 items-end">
-          <div class="bubble b-sofia">
+          <div class="bubble b-bot">
             <div>${conteudo}</div>
             ${toolBadge}
             <div class="meta text-emerald-200/70 text-right flex items-center justify-end gap-2 mt-1">
@@ -711,7 +642,7 @@ function gerarHTMLConversa(conversa: any, mensagens: any[]): string {
 
   return `<!doctype html>
 <html lang="pt-BR">
-${HEAD_COMUM.replace('</head>', `<title>${escapeHtml(nome)} — Rei Delas</title></head>`)}
+${HEAD_COMUM.replace('</head>', `<title>${escapeHtml(nome)} — SDR AUTON Health</title></head>`)}
 <body class="min-h-screen bg-slate-900 text-slate-100" style="background-image: radial-gradient(circle at 50% 0%, rgba(16,185,129,0.08) 0%, transparent 50%);">
   <div class="max-w-3xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
     <!-- Top bar com voltar -->
@@ -743,8 +674,8 @@ ${HEAD_COMUM.replace('</head>', `<title>${escapeHtml(nome)} — Rei Delas</title
           <div class="text-slate-300 mt-0.5">${inicio}</div>
         </div>
         <div>
-          <div class="text-slate-500 uppercase tracking-wider">Link de checkout</div>
-          <div class="text-slate-300 mt-0.5 flex items-center gap-1 ${conversa.link_enviado ? 'text-emerald-300' : ''}">${linkEnv}</div>
+          <div class="text-slate-500 uppercase tracking-wider">Agente atual</div>
+          <div class="text-slate-300 mt-0.5 flex items-center gap-1 mono">${escapeHtml(agenteAtual)}</div>
         </div>
       </div>
     </header>
@@ -774,11 +705,9 @@ export async function handlerDashboard(c: any) {
   if (!verificarAuth(auth)) return respond401(c);
 
   try {
-    const [conversasAtivas, conversoes, funil, followUps, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
+    const [conversasAtivas, funil, objecoesRecentes, objecoesPorCategoria, errosRecentes, errosPorCodigo] = await Promise.all([
       buscarConversasAtivas(50),
-      contarConversoes(),
       contarFunil(),
-      contarFollowUps(),
       buscarObjecoesRecentes(30),
       contarObjecoesPorCategoria(),
       buscarErrosRecentes(30),
@@ -786,9 +715,7 @@ export async function handlerDashboard(c: any) {
     ]);
     const html = gerarHTMLDashboard({
       conversasAtivas,
-      conversoes,
       funil,
-      followUps,
       objecoesRecentes,
       objecoesPorCategoria,
       errosRecentes,

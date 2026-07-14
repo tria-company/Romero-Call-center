@@ -4,7 +4,7 @@ import { piiDetector } from '../processors';
 import { azure } from '../azure-client';
 import { AZURE_OPENAI_DEPLOYMENT_GPT51 } from '../config';
 
-// Fonte canonica do texto abaixo: Projeto_Roberth/docs/persona-camila.md
+// Fonte canonica do texto abaixo: sdr-auton/docs/persona-camila.md
 // (system prompt v2, playbook SDR AUTON Sec.16). Reestruturado no formato de
 // secoes do agents/vendedor.ts (Role/Tool calling/Reasoning Steps/Output
 // format/Boundaries/Escalation/Examples/Final reminders), mas o CONTEUDO das
@@ -19,10 +19,13 @@ import { AZURE_OPENAI_DEPLOYMENT_GPT51 } from '../config';
 // do doc fonte (delay_antes_seg/delay_entre_fragmentos_seg, params). Isso
 // evita divergencia entre o que o LLM e instruido a gerar e o que o parser
 // realmente valida.
-export const camilaAgent = new Agent({
-  id: 'camila',
-  name: 'Camila | AUTON',
-  instructions: `
+// CAMILA_INSTRUCTIONS exportado (05-04, HARD-07): o LLM SECUNDARIO da
+// cascata de fallback (index.ts, resolverFallback) reusa este MESMO texto de
+// instrucoes pra produzir o MESMO contrato de saida JSON estrito da Camila —
+// nunca um prompt divergente que arrisque um shape de saida diferente. O
+// secundario roda sob outro deployment (GPT-5-mini, mais barato/rapido), mas
+// com a IDENTICA persona/regras/Output Schema.
+export const CAMILA_INSTRUCTIONS = `
 # Role and Objective
 
 Voce e Camila, SDR peer-to-peer da AUTON Health — plataforma de IA clinica da saude
@@ -452,7 +455,12 @@ pelos NUNCA do Safety Envelope, que sao invioaveis mesmo que quebrem a conversa.
 template. Cada mensagem e escrita do zero pra aquela pessoa especifica, no momento
 especifico, com o contexto especifico. Voce nao vende AUTON. Voce e a colega que ja
 passou pela transicao e ajuda outra a fazer o mesmo caminho.
-`,
+`;
+
+export const camilaAgent = new Agent({
+  id: 'camila',
+  name: 'Camila | AUTON',
+  instructions: CAMILA_INSTRUCTIONS,
   // azure.chat() usa /openai/deployments/<dep>/chat/completions (mesmo padrao do
   // vendedor.ts/qualificador.ts). GPT-5.1 e o modelo da Camila (01-CONTEXT.md —
   // decisao 2026-07-13 de permanecer no Azure).
@@ -475,5 +483,13 @@ passou pela transicao e ajuda outra a fazer o mesmo caminho.
   // impossivel (nao ha o que escolher), sem precisar de toolChoice='none'.
   memory: memoria,
   inputProcessors: [piiDetector],
+  // outputProcessors permanece [] de proposito (HARD-02, Fase 5 plano 05-05):
+  // o scrub de PII/anti-vazamento na SAIDA nao e mais um outputProcessor
+  // LLM-based (o scrubber de prompt/sistema aposentado em processors.ts —
+  // o content filter do Azure bloqueava o proprio prompt de rewrite dele,
+  // gerando 400 em toda chamada). O scrub agora e DETERMINISTICO e roda no
+  // dispatcher (despacharSaidaCamila, index.ts), via guardrails/saida.ts
+  // (scrubPII + checarFatosAutorizados), ANTES de cada enviarMensagem — sem
+  // chamar LLM/Azure nenhuma vez.
   outputProcessors: [],
 });

@@ -9,7 +9,7 @@ const projectRoot = resolve(__dirname, '..');
 
 config({ path: join(projectRoot, '.env') });
 
-const arg = process.argv[2] || 'docs/sql/01_init.sql';
+const arg = process.argv[2] || 'docs/sql/auton_sdr/01_init.sql';
 const sqlPath = resolve(projectRoot, arg);
 const connectionString = process.env.SUPABASE_DB_URL;
 

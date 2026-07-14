@@ -16,6 +16,7 @@ import { buscarContactIdPorTelefone } from '../ghl';
 import { movePipelineStage } from './move-pipeline-stage';
 import { getSessao, marcarAgendamentoOwner } from '../sessao';
 import { podeAgendar } from '../dupla-acao';
+import { scheduleReminder } from './schedule-reminder';
 
 const GHL_BASE_URL = 'https://services.leadconnectorhq.com';
 
@@ -384,6 +385,22 @@ export const createCalendarEvent = createTool({
       )) as { sucesso: boolean; motivo?: string };
       if (!moveResultado?.sucesso) {
         console.error(`[create-calendar-event] call criada mas move-pipeline-stage falhou para ${telefone}: ${moveResultado?.motivo}`);
+      }
+
+      // TOOL-08/FUN-02 (toque 1/4): persiste o lembrete + confirmacao
+      // imediata. Try/catch proprio e ISOLADO — uma falha aqui NAO pode
+      // derrubar o agendamento ja concluido (a call ja foi criada e o card
+      // ja moveu; lembrete e um plus, nao um pre-requisito do agendamento).
+      try {
+        const resultadoLembrete = await scheduleReminder.execute!(
+          { telefone, callStartTime: startTime, closer: escolha.closer } as any,
+          {} as any,
+        );
+        if (!(resultadoLembrete as any)?.sucesso) {
+          console.error(`[create-calendar-event] call criada mas schedule-reminder falhou para ${telefone}: ${(resultadoLembrete as any)?.motivo}`);
+        }
+      } catch (e) {
+        console.error(`[create-calendar-event] call criada mas schedule-reminder lancou excecao para ${telefone}:`, e);
       }
 
       console.log(`[create-calendar-event] ${telefone} (${contactId}) -> call criada com ${escolha.closer} (${escolha.closerId}) em ${startTime}`);

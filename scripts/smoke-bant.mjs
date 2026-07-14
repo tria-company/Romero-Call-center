@@ -6,6 +6,12 @@
 // (create-task.ts/update-contact-field.ts importam ghl.ts, que tem imports
 // extensionless incompativel com o loader nativo; bant.ts/formulario.ts nao
 // importam nada alem um do outro).
+//
+// Gap closure 01-13 (2a rodada de regressao, WR-01/WR-02 do 01-REVIEW.md):
+// cobre tambem plurais/flexoes do lexico proibido ('curas', 'milagres',
+// 'hacks', 'mindsets' — o word-boundary do CR-04 passou a casar so a forma
+// exata singular) e respostas de faixa no ticket ('300 a 500', 'entre 1.000
+// e 2.000' — paraNumero colava os digitos de numeros distintos).
 
 import { parseFormulario } from '../src/mastra/formulario.ts';
 import { filtro1Descarte, scoreBant, decidirRoteamento } from '../src/mastra/bant.ts';
@@ -167,6 +173,117 @@ function payloadBase(overrides = {}) {
   const resultado = filtro1Descarte(form);
   checar("lexico 'cura' isolada: descarta=true", resultado.descarta === true);
   checar("lexico 'cura' isolada: motivo=Léxico incompatível", resultado.motivo === 'Léxico incompatível');
+}
+
+// ---- Caso 10: WR-01 — plural 'curas milagrosas' volta a descartar ----
+{
+  const form = parseFormulario(payloadBase({
+    q07_ticket_medio: '900',
+    q14_maior_dificuldade: 'prometo curas milagrosas',
+  }));
+  const resultado = filtro1Descarte(form);
+  checar("WR-01 plural 'curas milagrosas': descarta=true", resultado.descarta === true);
+  checar("WR-01 plural 'curas milagrosas': motivo=Léxico incompatível", resultado.motivo === 'Léxico incompatível');
+}
+
+// ---- Caso 11: WR-01 — plural 'milagres' volta a descartar ----
+{
+  const form = parseFormulario(payloadBase({
+    q07_ticket_medio: '900',
+    q14_maior_dificuldade: 'faço milagres todo dia',
+  }));
+  const resultado = filtro1Descarte(form);
+  checar("WR-01 plural 'milagres': descarta=true", resultado.descarta === true);
+  checar("WR-01 plural 'milagres': motivo=Léxico incompatível", resultado.motivo === 'Léxico incompatível');
+}
+
+// ---- Caso 12: WR-01 — plural 'hacks'/'mindset' volta a descartar ----
+{
+  const form = parseFormulario(payloadBase({
+    q07_ticket_medio: '900',
+    q14_maior_dificuldade: 'uso hacks de mindset',
+  }));
+  const resultado = filtro1Descarte(form);
+  checar("WR-01 plural 'hacks de mindset': descarta=true", resultado.descarta === true);
+  checar("WR-01 plural 'hacks de mindset': motivo=Léxico incompatível", resultado.motivo === 'Léxico incompatível');
+}
+
+// ---- Caso 13: guarda de regressao — 'estou procurando' continua NAO descartando ----
+{
+  const form = parseFormulario(payloadBase({
+    q07_ticket_medio: '900',
+    q14_maior_dificuldade: 'estou procurando uma forma de aplicar o metodo',
+  }));
+  const resultado = filtro1Descarte(form);
+  checar("guarda substring legitima 'estou procurando': descarta=false", resultado.descarta === false);
+}
+
+// ---- Caso 14: guarda de regressao — 'busca e procura' continua NAO descartando ----
+{
+  const form = parseFormulario(payloadBase({
+    q07_ticket_medio: '900',
+    q14_maior_dificuldade: 'em busca e procura de resultado',
+  }));
+  const resultado = filtro1Descarte(form);
+  checar("guarda substring legitima 'busca e procura': descarta=false", resultado.descarta === false);
+}
+
+// ---- Caso 15: WR-02 — faixa '350 a 500' usa o piso (350), sem corromper o roteamento ----
+{
+  // O piso da faixa fica acima da fronteira de descarte (>300), provando
+  // sem ambiguidade que o roteamento nao descarta por 'Ticket insuficiente'
+  // quando o piso real da faixa e suficiente (guarda contra o bug antigo de
+  // concatenacao, que geraria '350500' — bem acima do piso real).
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: '350 a 500' }));
+  checar(`WR-02 faixa '350 a 500': form.ticket=350 (obtido ${form.ticket})`, form.ticket === 350);
+  const roteamento = decidirRoteamento(form);
+  checar(
+    "WR-02 faixa '350 a 500': roteamento nao e PERDIDO por 'Ticket insuficiente' via faixa concatenada",
+    !(roteamento.stage === 'PERDIDO' && roteamento.motivo === 'Ticket insuficiente'),
+  );
+}
+
+// ---- Caso 16: WR-02 — faixa '300 a 500' extrai o piso exato 300 (nao corrompido pra '300500') ----
+{
+  // O piso e exatamente 300, que bate na fronteira legitima do Filtro 1
+  // (ticket<=300 descarta — regra pre-existente, fora do escopo do
+  // WR-02/IN-01). O que este caso prova e que o VALOR nao e corrompido pela
+  // concatenacao do bug antigo — se fosse '300500', o Filtro 1 NAO
+  // descartaria (300500>300), mascarando um ticket real insuficiente.
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: '300 a 500' }));
+  checar(`WR-02 faixa '300 a 500': form.ticket=300 (obtido ${form.ticket})`, form.ticket === 300);
+}
+
+// ---- Caso 17: WR-02 — faixa 'entre 1.000 e 2.000' usa o piso pt-BR de milhar (1000) ----
+{
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: 'entre 1.000 e 2.000' }));
+  checar(`WR-02 faixa 'entre 1.000 e 2.000': form.ticket=1000 (obtido ${form.ticket})`, form.ticket === 1000);
+  const bant = scoreBant(form);
+  checar(`WR-02 faixa 'entre 1.000 e 2.000': budget=3 (obtido ${bant.budget})`, bant.budget === 3);
+}
+
+// ---- Caso 18: guarda de regressao — ticket pt-BR 'R$ 1.500' preservado apos o fix de faixa ----
+{
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: 'R$ 1.500' }));
+  checar(`guarda ticket 'R$ 1.500': form.ticket=1500 (obtido ${form.ticket})`, form.ticket === 1500);
+}
+
+// ---- Caso 19: guarda de regressao — ticket pt-BR com centavos '1.500,00' preservado ----
+{
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: '1.500,00' }));
+  checar(`guarda ticket '1.500,00': form.ticket=1500 (obtido ${form.ticket})`, form.ticket === 1500);
+}
+
+// ---- Caso 20: guarda de regressao — decimal simples '2.5' preservado ----
+{
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: '2.5' }));
+  checar(`guarda ticket '2.5': form.ticket=2.5 (obtido ${form.ticket})`, form.ticket === 2.5);
+}
+
+// ---- Caso 21: guarda de regressao — inteiro simples '400' preservado ----
+{
+  const form = parseFormulario(payloadBase({ q07_ticket_medio: '400' }));
+  checar(`guarda ticket '400': form.ticket=400 (obtido ${form.ticket})`, form.ticket === 400);
 }
 
 if (falhas.length > 0) {

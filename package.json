@@ -1,7 +1,7 @@
 {
-  "name": "projeto-roberth",
+  "name": "sdr-auton",
   "version": "0.1.0",
-  "description": "Agente WhatsApp vendedor de curso/infoproduto (Mastra + Evolution + Supabase).",
+  "description": "SDR AUTON Health — agente de WhatsApp que qualifica alunos USI e agenda calls comerciais (Mastra + GHL + Supabase).",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
