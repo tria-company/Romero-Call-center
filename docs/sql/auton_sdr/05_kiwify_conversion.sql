@@ -1,36 +1,24 @@
--- SDR AUTON Health — Migration 05: confirmação de pagamento via webhook Kiwify (banco dedicado)
--- Data: 2026-05-09
+-- SDR AUTON Health — Migration 05: NO-OP (Kiwify removido do stack)
+-- Data original: 2026-05-09 | Neutralizada: 2026-07-13
 --
--- Aplicar no Supabase DEDICADO do SDR AUTON (env `SUPABASE_DB_URL`):
---   node scripts/apply-migration.mjs docs/sql/auton_sdr/05_kiwify_conversion.sql
+-- Decisao do usuario (2026-07-13, quick task 260713-t0f): o SDR AUTON Health
+-- NAO usa Kiwify. O webhook de confirmacao de pagamento Kiwify e legado do
+-- funil do curso do "Projeto Roberth" (bot Closer) — o SDR AUTON e um SDR
+-- (qualifica + agenda call com um closer humano, nao fecha venda dentro do
+-- proprio fluxo), entao nao existe "pagamento aprovado pelo Kiwify" no dominio
+-- dele. O codigo (src/mastra/supabase.ts, index.ts, dashboard.ts, follow-up.ts)
+-- foi limpo de toda referencia a pagamento_confirmado/kiwify_order_id/valor_pago
+-- na mesma quick task.
 --
--- Adiciona colunas em auton_sdr_conversations pra rastrear quando o pagamento
--- foi efetivamente aprovado pelo Kiwify (separado de "link_enviado" pelo agente).
+-- Este arquivo original adicionava as colunas pagamento_confirmado,
+-- pagamento_confirmado_em, kiwify_order_id, valor_pago em
+-- auton_sdr_conversations + indices — tudo removido daqui.
 --
--- Comportamento esperado:
---   - Webhook Kiwify aprovado -> confirmarPagamento() em supabase.ts:
---     * Busca customer pelo telefone. Se nao existe, IGNORA (criterio:
---       so contamos como conversao quando o agente atendeu antes).
---     * Marca conversa: pagamento_confirmado=true, valor_pago, kiwify_order_id,
---       status='encerrada', ended_at=NOW().
---   - Scheduler de FUP filtra pagamento_confirmado=false -> nao spamma quem ja comprou.
---   - Dashboard tem section nova somando rows com pagamento_confirmado=true.
+-- Por que este arquivo continua existindo como NO-OP (em vez de ser deletado):
+-- o runbook de deploy roda as migrations em ordem numerica
+-- (`node scripts/apply-migration.mjs docs/sql/auton_sdr/0N_*.sql`, 01 -> 06).
+-- Remover o arquivo 05 quebraria essa numeracao espelhada e o runbook do
+-- usuario. Este NO-OP preserva o passo 05 na sequencia sem executar nenhum
+-- DDL — zero ALTER/CREATE.
 
-ALTER TABLE auton_sdr_conversations
-  ADD COLUMN IF NOT EXISTS pagamento_confirmado     boolean NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS pagamento_confirmado_em  timestamptz,
-  ADD COLUMN IF NOT EXISTS kiwify_order_id          text,
-  ADD COLUMN IF NOT EXISTS valor_pago               numeric(10,2);
-
--- Idempotencia: cada order_id do Kiwify so conta uma vez.
--- Webhook de retry do Kiwify (mesmo order_id) bate na unique violation
--- e o codigo trata respondendo 200 OK pra parar de retentar.
-CREATE UNIQUE INDEX IF NOT EXISTS uk_auton_sdr_conv_kiwify_order
-  ON auton_sdr_conversations (kiwify_order_id)
-  WHERE kiwify_order_id IS NOT NULL;
-
--- Index parcial pra dashboard contar rapido por janela temporal
--- (hoje / semana / mes / total).
-CREATE INDEX IF NOT EXISTS idx_auton_sdr_conv_pagamento_confirmado_em
-  ON auton_sdr_conversations (pagamento_confirmado_em DESC)
-  WHERE pagamento_confirmado = true;
+SELECT 1;
