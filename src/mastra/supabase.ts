@@ -1100,3 +1100,71 @@ export async function limparBufferAntigo(): Promise<void> {
     await fetchTimeout(url, { method: 'DELETE', headers: headers() });
   } catch (e) { console.error('[supabase] limparBufferAntigo:', e); }
 }
+
+// ==================== FORMULARIO — GATE DE FOLLOW-UP ====================
+// A tabela de respostas do formulario (public.usi_pesquisa_respostas) vive no
+// Supabase do dashboard/forms, que PODE ser um projeto diferente do
+// SUPABASE_URL principal deste servico. Por isso ha vars dedicadas
+// FORMS_SUPABASE_URL / FORMS_SUPABASE_KEY, com FALLBACK para as principais
+// (SUPABASE_URL / SERVICE_ROLE / ANON) quando nao setadas — ou seja, se a
+// tabela estiver no MESMO projeto, nao precisa configurar nada novo.
+const FORMS_SUPABASE_URL = process.env.FORMS_SUPABASE_URL || SUPABASE_URL;
+const FORMS_SUPABASE_KEY =
+  process.env.FORMS_SUPABASE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  '';
+
+function formsHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'apikey': FORMS_SUPABASE_KEY,
+    'Authorization': `Bearer ${FORMS_SUPABASE_KEY}`,
+  };
+}
+
+export interface StatusFormulario {
+  encontrado: boolean;
+  status: string | null;
+  respondido: boolean;
+  iniciado: boolean;
+}
+
+/**
+ * Consulta o status do formulario 14q de um contato pelo ghl_contact_id na
+ * tabela usi_pesquisa_respostas (Supabase do forms). Usado pelo gate de
+ * follow-up (/api/fup/pode-enviar): o Workflow [04] do GHL so envia o
+ * lembrete/convite se `respondido` for false.
+ *
+ * respondido = status === 'respondido' OU respondido_at != null
+ * iniciado   = status === 'iniciado'   OU iniciado_at   != null
+ *
+ * FAIL-SAFE: em erro/sem URL/sem contato, retorna respondido=false. A regra
+ * de negocio (deliberada) e NAO barrar o follow-up por falha de infra —
+ * preferimos um lembrete a mais a silenciar todo o funil por um erro pontual.
+ * O lado ruim (reenvio) e mitigado pela idempotencia/cadencia do proprio
+ * Workflow; o lado bom (nunca abandonar o lead) e o core value do SDR.
+ */
+export async function statusFormularioPorContato(ghlContactId: string): Promise<StatusFormulario> {
+  const vazio: StatusFormulario = { encontrado: false, status: null, respondido: false, iniciado: false };
+  if (!FORMS_SUPABASE_URL || !ghlContactId) return vazio;
+  try {
+    const url = `${FORMS_SUPABASE_URL}/rest/v1/usi_pesquisa_respostas` +
+      `?ghl_contact_id=eq.${encodeURIComponent(ghlContactId)}` +
+      `&select=status,respondido_at,iniciado_at&limit=1`;
+    const res = await fetchTimeout(url, { headers: formsHeaders() });
+    if (!res.ok) {
+      console.error('[supabase] statusFormularioPorContato HTTP', res.status);
+      return vazio;
+    }
+    const rows = await res.json() as Array<{ status: string | null; respondido_at: string | null; iniciado_at: string | null }>;
+    const row = rows[0];
+    if (!row) return vazio;
+    const respondido = row.status === 'respondido' || row.respondido_at != null;
+    const iniciado = row.status === 'iniciado' || row.iniciado_at != null;
+    return { encontrado: true, status: row.status ?? null, respondido, iniciado };
+  } catch (e) {
+    console.error('[supabase] statusFormularioPorContato:', e);
+    return vazio;
+  }
+}

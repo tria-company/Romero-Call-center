@@ -123,7 +123,7 @@ import { getSessao, criarSessao, trocarAgente, AGENTES_MAP, type Sessao } from '
 import { memoria } from './memoria';
 
 // Supabase (persistencia)
-import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro, tentarRegistrarWebhook, buscarConversaAguardandoHumano, salvarMetricaLLM, buscarMensagensDaConversa } from './supabase';
+import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro, tentarRegistrarWebhook, buscarConversaAguardandoHumano, salvarMetricaLLM, buscarMensagensDaConversa, statusFormularioPorContato } from './supabase';
 
 // Buffer de mensagens (debounce 10s, com persistencia)
 import { adicionarAoBuffer } from './buffer';
@@ -145,6 +145,8 @@ import { enviarAvisoAoSuporte, jaNotificouRecentemente } from './notificacoes';
 
 // CR-01: token fail-closed do webhook do formulario 14q
 import { FORMULARIO_WEBHOOK_TOKEN } from './config';
+// Gate de follow-up: token fail-closed de /api/fup/pode-enviar
+import { FUP_GATE_TOKEN } from './config';
 import { GHL_STAGES } from './config';
 
 // T-03-01: token fail-closed do webhook de gravacao de call/ligacao (Fase 3)
@@ -1102,6 +1104,46 @@ export const mastra = new Mastra({
             return c.json({ status: 'desbloqueado', telefone });
           } catch (erro) {
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
+          }
+        },
+      },
+      // Gate de follow-up do formulario. O Workflow [04] do GHL (FUP do
+      // formulario) chama este endpoint ANTES de enviar o lembrete/convite
+      // (acao Webhook) e usa a resposta {enviar} numa condicao If/Else — so
+      // envia se enviar=true. Evita reenviar template pra quem JA respondeu
+      // (o bug que gerou 178/321 duplicados: o Workflow reenviava por
+      // tempo/mudanca de estagio sem checar se o lead ja tinha respondido).
+      // Consulta usi_pesquisa_respostas por ghl_contact_id (statusFormulario
+      // PorContato). Protegido por FUP_GATE_TOKEN (fail-closed: token vazio
+      // => 401 em tudo). FAIL-SAFE do dado: se a consulta falhar/nao achar,
+      // respondido=false => enviar=true (preferimos um lembrete a mais a
+      // travar todo o follow-up por falha de infra).
+      {
+        path: '/api/fup/pode-enviar',
+        method: 'GET',
+        handler: async (c) => {
+          try {
+            const token = c.req.query('token') || c.req.header('x-webhook-token') || '';
+            if (!FUP_GATE_TOKEN || token !== FUP_GATE_TOKEN) {
+              console.warn(`[fup-gate] token invalido ou ausente (recebido: "${token.slice(0, 4)}...")`);
+              return c.json({ status: 'unauthorized' }, 401);
+            }
+            const contactId = c.req.query('contactId') || c.req.query('contact_id') || '';
+            if (!contactId) {
+              return c.json({ erro: 'contactId obrigatorio' }, 400);
+            }
+            const st = await statusFormularioPorContato(contactId);
+            return c.json({
+              enviar: !st.respondido,
+              respondido: st.respondido,
+              iniciado: st.iniciado,
+              status: st.status,
+            });
+          } catch (erro) {
+            // Fail-safe: em erro inesperado libera o envio (enviar=true) —
+            // nao travar todo o follow-up por uma excecao pontual.
+            console.error('[fup-gate] erro:', erro);
+            return c.json({ enviar: true, respondido: false, iniciado: false, status: null, erro: String(erro) });
           }
         },
       },

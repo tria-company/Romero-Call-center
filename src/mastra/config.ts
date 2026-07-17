@@ -102,6 +102,23 @@ if (!FORMULARIO_WEBHOOK_TOKEN) {
   );
 }
 
+// Gate de follow-up do formulario (/api/fup/pode-enviar) — MESMO padrao
+// fail-closed dos webhooks. O Workflow [04] do GHL (FUP do formulario) chama
+// este endpoint ANTES de enviar o lembrete/convite e so envia se a resposta
+// vier {enviar:true} (ver rota em index.ts + statusFormularioPorContato em
+// supabase.ts). Segredo dedicado via ?token=xxx na URL (ou header
+// x-webhook-token). Token vazio = endpoint DESABILITADO (401 em toda chamada).
+export const FUP_GATE_TOKEN = process.env.FUP_GATE_TOKEN || '';
+
+if (!FUP_GATE_TOKEN) {
+  console.warn(
+    '[config] FUP_GATE_TOKEN vazio: o endpoint /api/fup/pode-enviar esta DESABILITADO ' +
+      '(fail-closed) — toda chamada sera rejeitada com 401 ate o token ser configurado. Gere um segredo ' +
+      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como FUP_GATE_TOKEN " +
+      "e cole '?token=<esse-segredo>' na URL do Webhook do Workflow [04] do GHL (FUP do formulario).",
+  );
+}
+
 // Webhook de gravacao de call/ligacao (Fase 3, GRAV-01/GRAV-04,
 // /api/webhook/gravacao) — MESMO padrao fail-closed de
 // FORMULARIO_WEBHOOK_TOKEN acima: segredo dedicado, vem como ?token=xxx na
