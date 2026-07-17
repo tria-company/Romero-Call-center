@@ -36,6 +36,7 @@ export const GHL_STAGES = {
   FORMULARIO_RESPONDIDO: 'ed7196f7-f8c8-4d08-8a84-f91586131392',
   QUALIFICADO: 'bc8127ed-0d30-479a-8f36-7377c614f4a9',
   CALL_AGENDADA: '998395cb-f190-4991-8892-e24b45cb26cb',
+  CALL_REALIZADA: '39afb559-afb7-421f-b716-da5c940e6714',
   RETORNAR_CONTATO: 'c251790d-ff29-47c2-994f-304bb52ddc67',
   NO_SHOW: '5b84348b-2e28-4b40-b11c-cc3bc10f08a4',
   NEGOCIACAO: 'ad667da8-0e38-47d3-a865-f5d5725b4776',
@@ -43,6 +44,25 @@ export const GHL_STAGES = {
   PERDIDO: '86a27fe8-c759-4bda-a418-072a64275627',
 } as const;
 export type GhlStage = keyof typeof GHL_STAGES;
+
+// Campo personalizado da OPORTUNIDADE (não do contato) que marca se a ligação
+// da Wavoip foi atendida — "Sim"/"Não" (dataType TEXT). id/key descobertos via
+// GET /locations/{id}/customFields?model=opportunity. Usado pelo webhook Wavoip
+// (/api/webhook/wavoip) via atualizarOportunidadeCall (ghl.ts).
+export const GHL_OPP_ATENDEU_FIELD_ID = process.env.GHL_OPP_ATENDEU_FIELD_ID || 'L1X1q7tb4WqdE024cF6z';
+export const GHL_OPP_ATENDEU_FIELD_KEY = process.env.GHL_OPP_ATENDEU_FIELD_KEY || 'opportunity.atendeu';
+
+// Guard anti-regressão do webhook Wavoip: NÃO rebaixa o card p/ CALL REALIZADA
+// se ele já está nesta ou numa stage à frente (CALL REALIZADA já registrada,
+// no-show, negociação, ganho, perdido). Só move p/ frente a partir de stages
+// anteriores (lead novo ... call agendada). Ver atualizarOportunidadeCall.
+export const GHL_STAGES_NAO_REBAIXAR_CALL = [
+  GHL_STAGES.CALL_REALIZADA,
+  GHL_STAGES.NO_SHOW,
+  GHL_STAGES.NEGOCIACAO,
+  GHL_STAGES.GANHO,
+  GHL_STAGES.PERDIDO,
+] as const;
 
 // OpenAI direto (deprecated — usar Azure abaixo). Mantido para rollback.
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -139,6 +159,23 @@ if (!GRAVACAO_WEBHOOK_TOKEN) {
   );
 }
 
+// Webhook da WAVOIP (rastreador de ligacao -> /api/webhook/wavoip) — MESMO
+// padrao fail-closed dos demais. Segredo dedicado, vem como ?token=xxx na URL
+// (ou header x-webhook-token) e e colado no app Wavoip em
+// Integrations > Webhook. Token vazio = endpoint DESABILITADO (fail-closed):
+// todo POST e rejeitado com 401 ANTES de qualquer efeito (move de card,
+// download/transcricao/nota).
+export const WAVOIP_WEBHOOK_TOKEN = process.env.WAVOIP_WEBHOOK_TOKEN || '';
+
+if (!WAVOIP_WEBHOOK_TOKEN) {
+  console.warn(
+    '[config] WAVOIP_WEBHOOK_TOKEN vazio: o webhook /api/webhook/wavoip esta DESABILITADO ' +
+      '(fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo ' +
+      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como WAVOIP_WEBHOOK_TOKEN " +
+      "e cole '?token=<esse-segredo>' na URL configurada no app Wavoip (Integrations > Webhook).",
+  );
+}
+
 // Allowlist de hosts pra baixar recordingUrl (anti-SSRF, T-03-02) — so URLs
 // https com host presente nesta lista (ou na familia de dominios do proprio
 // GHL, ver ehHostDominioGhl em ghl.ts) sao baixadas por baixarGravacaoBase64;
@@ -159,6 +196,11 @@ if (!GRAVACAO_WEBHOOK_TOKEN) {
 // restringe INFRAESTRUTURA, nao PROPRIEDADE do bucket) e de que o retry com
 // Bearer PIT continua bloqueado pra hosts fora do dominio GHL de qualquer
 // forma (ghl.ts, CR-03).
+//
+// WAVOIP: a gravacao da call vem de um host de storage da Wavoip (record_url do
+// evento RECORD). Descubra o host EXATO da primeira record_url real e adicione
+// em GRAVACAO_HOSTS_PERMITIDOS no .env — sem isso, baixarGravacaoBase64 recusa o
+// download (fail-closed) e a transcricao da call Wavoip nao acontece.
 export const GRAVACAO_HOSTS_PERMITIDOS = (
   process.env.GRAVACAO_HOSTS_PERMITIDOS ||
   'services.leadconnectorhq.com,msg.leadconnectorhq.com'

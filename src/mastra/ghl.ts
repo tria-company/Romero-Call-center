@@ -17,7 +17,13 @@
 import {
   GHL_PIT_TOKEN,
   GHL_API_VERSION,
+  GHL_API_VERSION_V2,
   GHL_DEFAULT_TYPE,
+  GHL_PIPELINE_ID,
+  GHL_STAGES,
+  GHL_STAGES_NAO_REBAIXAR_CALL,
+  GHL_OPP_ATENDEU_FIELD_ID,
+  GHL_OPP_ATENDEU_FIELD_KEY,
   AZURE_OPENAI_RESOURCE_NAME,
   AZURE_OPENAI_API_KEY,
   AZURE_OPENAI_API_VERSION,
@@ -499,6 +505,138 @@ export async function persistirTranscricaoContato(
     return true;
   } catch (e) {
     console.error(`[gravacao] erro ao persistir ${chave} para ${telefone}:`, e);
+    return false;
+  }
+}
+
+// =================== WAVOIP — oportunidade + nota (rastreador de ligacao) ===================
+
+// Resolve a opportunity ATIVA do contato no pipeline COMERCIAL USI (mesma logica
+// da tool move-pipeline-stage). Retorna id + stage atual pra decidir o guard.
+async function buscarOpportunityCall(contactId: string): Promise<{ id: string; pipelineStageId: string } | null> {
+  const url = `${GHL_BASE_URL}/opportunities/search?contact_id=${encodeURIComponent(contactId)}&pipeline_id=${encodeURIComponent(GHL_PIPELINE_ID)}`;
+  const res = await fetchTimeout(url, {
+    headers: {
+      'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+      'Version': GHL_API_VERSION_V2,
+      'Accept': 'application/json',
+    },
+  });
+  if (!res.ok) {
+    console.error(`[wavoip] GET /opportunities/search falhou (${res.status})`);
+    return null;
+  }
+  const data = await res.json();
+  const opp = data?.opportunities?.[0];
+  if (!opp?.id) return null;
+  return { id: opp.id, pipelineStageId: opp.pipelineStageId };
+}
+
+/**
+ * Preenche, na oportunidade COMERCIAL USI do lead, o resultado de uma ligacao
+ * Wavoip: campo custom `atendeu` = "Sim"/"Não" e — se atendida — move o card
+ * pra CALL REALIZADA (num unico PUT). Guard anti-regressao: NAO move se o card
+ * ja esta em CALL REALIZADA/NO-SHOW/NEGOCIACAO/GANHO/PERDIDO (so atualiza o
+ * campo). Retorna boolean honesto (res.ok).
+ */
+export async function atualizarOportunidadeCall(telefone: string, atendeu: boolean): Promise<boolean> {
+  if (!GHL_PIT_TOKEN) {
+    console.error('[wavoip] GHL_PIT_TOKEN nao configurado — update de oportunidade abortado');
+    return false;
+  }
+
+  const contactId = await buscarContactIdPorTelefone(telefone);
+  if (!contactId) {
+    console.error(`[wavoip] nao foi possivel resolver contactId para ${telefone}`);
+    return false;
+  }
+
+  const opportunity = await buscarOpportunityCall(contactId);
+  if (!opportunity) {
+    console.error(`[wavoip] nenhuma opportunity para contato ${contactId} no pipeline COMERCIAL USI`);
+    return false;
+  }
+
+  const body: Record<string, unknown> = {
+    customFields: [
+      { id: GHL_OPP_ATENDEU_FIELD_ID, key: GHL_OPP_ATENDEU_FIELD_KEY, field_value: atendeu ? 'Sim' : 'Não' },
+    ],
+  };
+
+  // Move p/ CALL REALIZADA so quando atendida E o guard anti-regressao permite.
+  const jaEmStageAvancada = (GHL_STAGES_NAO_REBAIXAR_CALL as readonly string[]).includes(opportunity.pipelineStageId);
+  const vaiMover = atendeu && !jaEmStageAvancada;
+  if (vaiMover) {
+    body.pipelineId = GHL_PIPELINE_ID;
+    body.pipelineStageId = GHL_STAGES.CALL_REALIZADA;
+  }
+
+  try {
+    const res = await fetchTimeout(`${GHL_BASE_URL}/opportunities/${opportunity.id}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION_V2,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      console.error(`[wavoip] PUT /opportunities/${opportunity.id} falhou (${res.status}) ao gravar atendeu/stage`);
+      return false;
+    }
+    console.log(`[wavoip] ${telefone} (${contactId}) <- atendeu=${atendeu ? 'Sim' : 'Não'}${vaiMover ? ' + stage CALL REALIZADA' : ''}`);
+    return true;
+  } catch (e) {
+    console.error(`[wavoip] erro ao atualizar oportunidade de ${telefone}:`, e);
+    return false;
+  }
+}
+
+// Limite conservador da nota (aparece como "Observacoes" no card). Notas do GHL
+// aceitam texto longo; truncamos por seguranca de payload/UI.
+const LIMITE_NOTA_OBSERVACAO_CHARS = 20000;
+
+/**
+ * Registra a transcricao (JA ANONIMIZADA pelo caller — LGPD) como NOTA no
+ * contato (`POST /contacts/{id}/notes`) — e o que aparece como "Observacoes" no
+ * card da oportunidade (o GHL nao tem notas de oportunidade via API). NUNCA loga
+ * o conteudo da nota (so o tamanho). Retorna boolean honesto (res.ok).
+ */
+export async function registrarNotaObservacao(telefone: string, texto: string): Promise<boolean> {
+  if (!GHL_PIT_TOKEN) {
+    console.error('[wavoip] GHL_PIT_TOKEN nao configurado — nota abortada');
+    return false;
+  }
+
+  const contactId = await buscarContactIdPorTelefone(telefone);
+  if (!contactId) {
+    console.error(`[wavoip] nao foi possivel resolver contactId para ${telefone} — nota abortada`);
+    return false;
+  }
+
+  const corpo = texto.length > LIMITE_NOTA_OBSERVACAO_CHARS ? texto.slice(0, LIMITE_NOTA_OBSERVACAO_CHARS) : texto;
+
+  try {
+    const res = await fetchTimeout(`${GHL_BASE_URL}/contacts/${contactId}/notes`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ body: corpo }),
+    });
+    if (!res.ok) {
+      console.error(`[wavoip] POST /contacts/${contactId}/notes falhou (${res.status})`);
+      return false;
+    }
+    console.log(`[wavoip] ${telefone} (${contactId}) <- nota observacao (${corpo.length} chars anonimizados)`);
+    return true;
+  } catch (e) {
+    console.error(`[wavoip] erro ao registrar nota para ${telefone}:`, e);
     return false;
   }
 }

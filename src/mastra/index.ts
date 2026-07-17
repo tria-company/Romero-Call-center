@@ -57,6 +57,8 @@ import {
   buscarUltimaMensagem,
   baixarGravacaoBase64,
   persistirTranscricaoContato,
+  atualizarOportunidadeCall,
+  registrarNotaObservacao,
 } from './ghl';
 import type { GhlWebhookPayload, TipoGravacao } from './ghl';
 import { contatoTemTag } from './ghl';
@@ -123,7 +125,7 @@ import { getSessao, criarSessao, trocarAgente, AGENTES_MAP, type Sessao } from '
 import { memoria } from './memoria';
 
 // Supabase (persistencia)
-import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro, tentarRegistrarWebhook, buscarConversaAguardandoHumano, salvarMetricaLLM, buscarMensagensDaConversa, statusFormularioPorContato } from './supabase';
+import { salvarMensagem, buscarCustomerPorTelefone, marcarMsgLead, marcarMsgSofia, salvarErro, tentarRegistrarWebhook, buscarConversaAguardandoHumano, salvarMetricaLLM, buscarMensagensDaConversa, statusFormularioPorContato, salvarWavoipCall, buscarTelefonePorWavoipCall } from './supabase';
 
 // Buffer de mensagens (debounce 10s, com persistencia)
 import { adicionarAoBuffer } from './buffer';
@@ -148,6 +150,8 @@ import { FORMULARIO_WEBHOOK_TOKEN } from './config';
 // Gate de follow-up: token fail-closed de /api/fup/pode-enviar
 import { FUP_GATE_TOKEN } from './config';
 import { GHL_STAGES } from './config';
+// Webhook Wavoip (rastreador de ligacao): token fail-closed de /api/webhook/wavoip
+import { WAVOIP_WEBHOOK_TOKEN } from './config';
 
 // T-03-01: token fail-closed do webhook de gravacao de call/ligacao (Fase 3)
 import { GRAVACAO_WEBHOOK_TOKEN } from './config';
@@ -1567,6 +1571,144 @@ export const mastra = new Mastra({
             return c.json({ status: 'ok', tipo, redacoes: anonimizacao.redacoes });
           } catch (erro) {
             console.error('[gravacao] Erro no webhook:', erro);
+            return c.json({ status: 'erro', mensagem: String(erro) }, 500);
+          }
+        },
+      },
+      {
+        // Webhook da WAVOIP (rastreador de ligacao). Configurado no app Wavoip
+        // em Integrations > Webhook. Dois eventos relevantes:
+        //   CALL   -> preenche o campo `atendeu` (Sim/Nao) na oportunidade e,
+        //             se atendida, move o card pra CALL REALIZADA (guard
+        //             anti-regressao). telefone = receiver (OUTCOMING = SDR
+        //             liga pro lead). Guarda whatsapp_call_id -> telefone pra
+        //             o RECORD correlacionar depois.
+        //   RECORD -> pega record_url, resolve o telefone pelo whatsapp_call_id
+        //             e REUSA a cadeia de gravacao (download anti-SSRF ->
+        //             transcreve -> anonimiza LGPD -> nota "Observacoes" no
+        //             contato + campo transcricao_ligacao_sdr + extracao de
+        //             sinais BANT).
+        path: '/api/webhook/wavoip',
+        method: 'POST',
+        handler: async (c) => {
+          try {
+            // Auth fail-closed ANTES de qualquer parse/efeito (mesmo padrao dos
+            // outros 3 webhooks). Token vazio desabilita o endpoint.
+            const token = c.req.query('token') || c.req.header('x-webhook-token') || '';
+            if (!WAVOIP_WEBHOOK_TOKEN || token !== WAVOIP_WEBHOOK_TOKEN) {
+              console.warn(`[wavoip] token invalido ou ausente (recebido: "${token.slice(0, 4)}...")`);
+              return c.json({ status: 'unauthorized' }, 401);
+            }
+
+            const payload = await c.req.json() as Record<string, any>;
+            const evento = String(payload.type || '').toUpperCase();
+            const whatsappCallId = String(payload.whatsapp_call_id || payload.whatsappCallId || '');
+
+            // ---------------- Evento CALL: atendeu + stage ----------------
+            if (evento === 'CALL') {
+              const status = String(payload.status || '').toUpperCase();
+              // So agimos em status TERMINAL — ignora ring/calling/active intermediarios.
+              const TERMINAIS = ['ENDED', 'REJECTED', 'FAILED', 'NOT_ANSWERED', 'CANCELLED', 'ACCEPTED_ELSEWHERE', 'REJECTED_ELSEWHERE'];
+              if (!TERMINAIS.includes(status)) {
+                return c.json({ status: 'ignorado', motivo: `status nao-terminal: ${status}` });
+              }
+
+              const direction = String(payload.direction || '').toUpperCase();
+              const telefoneRaw = direction === 'INCOMING'
+                ? String(payload.caller || '')
+                : String(payload.receiver || payload.caller || '');
+              const telefone = telefoneRaw.replace(/[^\d]/g, '');
+              if (!telefone) {
+                console.warn(`[wavoip] CALL sem telefone extraivel (direction=${direction})`);
+                return c.json({ status: 'payload invalido' }, 400);
+              }
+
+              // Guarda a correlacao pro RECORD (mesmo antes do dedup — barato e idempotente).
+              if (whatsappCallId) await salvarWavoipCall(whatsappCallId, telefone);
+
+              // Dedup permanente por call id: o estado terminal e one-shot; retry
+              // do webhook nao deve re-mover o card. Fail-open (herda tentarRegistrarWebhook).
+              const hashCall = whatsappCallId
+                ? createHash('sha1').update(`wavoip-call|${whatsappCallId}`).digest('hex')
+                : createHash('sha1').update(`wavoip-call|${telefone}|${Math.floor(Date.now() / 60_000)}`).digest('hex');
+              const ehNova = await tentarRegistrarWebhook(hashCall);
+              if (!ehNova) {
+                return c.json({ status: 'duplicado' });
+              }
+
+              const duration = Number(payload.duration) || 0;
+              const atendeu = ['ACTIVE', 'ENDED', 'ACCEPTED_ELSEWHERE'].includes(status) && duration > 0;
+
+              const ok = await atualizarOportunidadeCall(telefone, atendeu);
+              if (!ok) {
+                return c.json({ status: 'update falhou' }, 502);
+              }
+              return c.json({ status: 'ok', atendeu });
+            }
+
+            // ---------------- Evento RECORD: transcricao ----------------
+            if (evento === 'RECORD') {
+              const recordStatus = String(payload.record_status || '').toUpperCase();
+              const recordUrl = String(payload.record_url || payload.recordUrl || '');
+              if (recordStatus !== 'READY' || !recordUrl) {
+                return c.json({ status: 'ignorado', motivo: `record_status=${recordStatus}` });
+              }
+              if (!whatsappCallId) {
+                return c.json({ status: 'payload invalido' }, 400);
+              }
+
+              const telefone = await buscarTelefonePorWavoipCall(whatsappCallId);
+              if (!telefone) {
+                // Correlacao ainda nao registrada (evento CALL nao chegou). Nao ha
+                // como saber o contato — 200 pra nao entrar em loop de retry.
+                console.warn(`[wavoip] RECORD sem correlacao (whatsapp_call_id=${whatsappCallId}) — transcricao ignorada`);
+                return c.json({ status: 'sem correlacao' });
+              }
+
+              // Dedup permanente por record da call.
+              const hashRecord = createHash('sha1').update(`wavoip-record|${whatsappCallId}`).digest('hex');
+              const ehNovo = await tentarRegistrarWebhook(hashRecord);
+              if (!ehNovo) {
+                return c.json({ status: 'duplicado' });
+              }
+
+              // Reuso da cadeia de gravacao. 502 em falha transitoria (retry).
+              const audioBase64 = await baixarGravacaoBase64(recordUrl);
+              if (!audioBase64) {
+                console.warn(`[wavoip] download da record_url falhou para ${telefone}`);
+                return c.json({ status: 'download falhou' }, 502);
+              }
+              const transcricaoBruta = await transcreverAudio(audioBase64);
+              if (!transcricaoBruta) {
+                console.warn(`[wavoip] transcricao falhou para ${telefone}`);
+                return c.json({ status: 'transcricao falhou' }, 502);
+              }
+              const anonimizacao = anonimizarTranscricao(transcricaoBruta);
+              // Gate LGPD fail-closed: sem ok:true, nada persiste nem loga o bruto.
+              if (!anonimizacao.ok) {
+                console.warn('[wavoip] anonimizacao falhou — transcricao descartada (fail-closed)');
+                return c.json({ status: 'anonimizacao falhou' });
+              }
+
+              // Nota "Observacoes" (pedido do usuario) + campo da ficha da Camila.
+              const notaOk = await registrarNotaObservacao(telefone, anonimizacao.textoAnon);
+              const campoOk = await persistirTranscricaoContato(telefone, 'sdr_ligacao', anonimizacao.textoAnon);
+              if (!notaOk && !campoOk) {
+                return c.json({ status: 'persistencia falhou' }, 502);
+              }
+
+              // Extracao dos 6 sinais BANT — fire-and-forget (fora do caminho critico).
+              extrairSinaisDaTranscricao(mastra, telefone, 'sdr_ligacao', anonimizacao.textoAnon).catch((e) =>
+                console.error(`[wavoip] extrairSinaisDaTranscricao falhou para ${telefone}:`, e),
+              );
+
+              return c.json({ status: 'ok', nota: notaOk, campo: campoOk, redacoes: anonimizacao.redacoes });
+            }
+
+            // DEVICE e outros eventos: nao aplicaveis ao rastreador.
+            return c.json({ status: 'ignorado', evento });
+          } catch (erro) {
+            console.error('[wavoip] Erro no webhook:', erro);
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
           }
         },

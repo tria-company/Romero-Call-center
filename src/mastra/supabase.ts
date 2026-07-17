@@ -999,6 +999,54 @@ export async function limparWebhookDedupAntigos(): Promise<void> {
   } catch (e) { console.error('[supabase] limparWebhookDedupAntigos:', e); }
 }
 
+// ==================== CORRELACAO CALL<->RECORD DA WAVOIP ====================
+// O evento RECORD do webhook Wavoip NAO traz telefone — so whatsapp_call_id. O
+// evento CALL (que traz caller/receiver) chega antes/junto. Guardamos aqui o
+// par whatsapp_call_id -> telefone (duravel, sobrevive restart do PM2) pra que o
+// handler do RECORD resolva o contato e persista a transcricao no lead certo.
+
+/**
+ * Registra/atualiza a correlacao whatsapp_call_id -> telefone (upsert por
+ * whatsapp_call_id). Idempotente. NUNCA lanca — falha de Supabase so loga.
+ */
+export async function salvarWavoipCall(whatsappCallId: string, telefone: string): Promise<void> {
+  if (!SUPABASE_URL || !whatsappCallId || !telefone) return;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_wavoip_calls?on_conflict=whatsapp_call_id`;
+    const res = await fetchTimeout(url, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ whatsapp_call_id: whatsappCallId, telefone }),
+    });
+    if (!res.ok) {
+      console.error('[supabase] salvarWavoipCall falhou:', await res.text());
+    }
+  } catch (e) {
+    console.error('[supabase] salvarWavoipCall erro:', e);
+  }
+}
+
+/**
+ * Resolve o telefone (apenas digitos) de uma call Wavoip pelo whatsapp_call_id.
+ * Retorna null se ainda nao houver correlacao (evento CALL nao chegou/perdido).
+ */
+export async function buscarTelefonePorWavoipCall(whatsappCallId: string): Promise<string | null> {
+  if (!SUPABASE_URL || !whatsappCallId) return null;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/auton_sdr_wavoip_calls?whatsapp_call_id=eq.${encodeURIComponent(whatsappCallId)}&select=telefone&limit=1`;
+    const res = await fetchTimeout(url, { headers: headers() });
+    if (!res.ok) {
+      console.error('[supabase] buscarTelefonePorWavoipCall falhou:', await res.text());
+      return null;
+    }
+    const data = await res.json();
+    return Array.isArray(data) && data[0]?.telefone ? String(data[0].telefone) : null;
+  } catch (e) {
+    console.error('[supabase] buscarTelefonePorWavoipCall erro:', e);
+    return null;
+  }
+}
+
 // ==================== BUFFER PERSISTENTE (Fix #2 do review de prod) ====================
 // Buffer em memoria perde mensagens em restart do container. Aqui persistimos
 // cada mensagem antes do debounce — worker recovery (em follow-up.ts) re-processa
