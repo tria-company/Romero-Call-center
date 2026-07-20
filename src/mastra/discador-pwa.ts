@@ -20,7 +20,7 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-export const DISCADOR_SW_JS = `const CACHE='discador-v2';
+export const DISCADOR_SW_JS = `const CACHE='discador-v3';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -222,7 +222,7 @@ export const DISCADOR_APP_JS = `(function(){
     if(wavoip){return Promise.resolve(wavoip);}
     return api('/api/discador/config').then(function(res){return res.json();}).then(function(cfg){
       wavoipToken=cfg.wavoipToken;if(!wavoipToken){throw new Error('sem token wavoip');}
-      return import('https://esm.sh/wavoip-api@3.1.24');
+      return import('https://esm.sh/@wavoip/wavoip-api@2.6.3');
     }).then(function(mod){
       var W=mod.Wavoip||(mod.default&&mod.default.Wavoip)||mod.default||mod;
       wavoip=new W({tokens:[wavoipToken]});return wavoip;
@@ -237,17 +237,19 @@ export const DISCADOR_APP_JS = `(function(){
     }).catch(function(e){setCallStatus('Falha: '+((e&&e.message)?e.message:'erro'));});
   }
   function on(call,ev,fn){try{if(call&&call.on){call.on(ev,fn);}}catch(e){}}
+  function mapStatus(s){var m={CALLING:'Chamando...',RINGING:'Tocando...',ACTIVE:'Em ligação',ACCEPT:'Em ligação',ENDED:'Encerrada',NOT_ANSWERED:'Não atendida',UNANSWERED:'Não atendida',REJECTED:'Recusada'};return m[String(s).toUpperCase()]||String(s||'');}
   function wireCallEvents(call){
+    // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
+    on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
     on(call,'peerAccept',function(){setCallStatus('Em ligação');startTimer();});
-    on(call,'accept',function(){setCallStatus('Em ligação');startTimer();});
-    on(call,'reject',function(){setCallStatus('Recusada');endCallUI();});
-    on(call,'terminate',function(){setCallStatus('Encerrada');endCallUI();});
-    on(call,'end',function(){setCallStatus('Encerrada');endCallUI();});
-    on(call,'hangup',function(){setCallStatus('Encerrada');endCallUI();});
+    on(call,'peerReject',function(){setCallStatus('Recusada');endCallUI();});
+    on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
+    on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
+    on(call,'connectivityIssue',function(){setCallStatus('Problema de conexão');});
   }
   function hangup(){
     var c=currentCall;
-    if(c){['hangup','endCall','end','close','terminate','reject'].forEach(function(m){try{if(typeof c[m]==='function'){c[m]();}}catch(e){}});}
+    if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
     setCallStatus('Encerrada');endCallUI();
   }
   function openCall(lead,status){$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
