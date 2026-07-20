@@ -1614,7 +1614,7 @@ export const mastra = new Mastra({
             // payload, pra validar o contrato real da Wavoip vs a doc. Pula
             // DEVICE (heartbeat frequente — floodaria o log). Nao loga telefone.
             if (evento !== 'DEVICE') {
-              console.log(`[wavoip] evento type=${evento} action=${payload.action || ''} status=${payload.status || ''} dir=${payload.direction || ''} dur=${payload.duration ?? ''} record_status=${payload.record_status || ''} keys=[${Object.keys(payload).join(',')}]`);
+              console.log(`[wavoip] evento type=${evento} action=${payload.action || ''} status=${payload.status || ''} reason=${payload.reason || ''} dir=${payload.direction || ''} dur=${payload.duration ?? ''} record_status=${payload.record_status || ''} keys=[${Object.keys(payload).join(',')}]`);
             }
 
             // ---------------- Evento CALL: atendeu + stage ----------------

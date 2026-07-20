@@ -20,7 +20,7 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-export const DISCADOR_SW_JS = `const CACHE='discador-v3';
+export const DISCADOR_SW_JS = `const CACHE='discador-v4';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -151,7 +151,7 @@ export const DISCADOR_HTML = `<!doctype html>
 
 export const DISCADOR_APP_JS = `(function(){
   var tokenKey='discador_token';
-  var wavoip=null, currentCall=null, wavoipToken=null;
+  var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
   var page={q:'',startAfter:null,startAfterId:null,done:false,loading:false};
   var timerInt=null, timerStart=0;
   function $(id){return document.getElementById(id);}
@@ -229,12 +229,30 @@ export const DISCADOR_APP_JS = `(function(){
     });
   }
   function iniciarLigacao(lead){
-    openCall(lead,'Conectando...');
-    garantirWavoip().then(function(w){return w.startCall({to:lead.telefone});}).then(function(r){
-      var call=(r&&r.call)?r.call:r;currentCall=call;
-      if(r&&r.err){setCallStatus('Erro ao iniciar');return;}
-      setCallStatus('Chamando...');wireCallEvents(call);
-    }).catch(function(e){setCallStatus('Falha: '+((e&&e.message)?e.message:'erro'));});
+    openCall(lead,'Pedindo microfone...');
+    // iOS: o prompt de microfone SO aparece se getUserMedia rodar DENTRO do
+    // gesto do toque, antes de qualquer await. Pedimos aqui pra conceder a
+    // permissao; o SDK depois adquire o proprio stream (sem novo prompt).
+    var mic;
+    try { mic = navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { mic = Promise.reject(e); }
+    mic.then(function(stream){
+      try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
+      setCallStatus('Conectando...');
+      return garantirWavoip();
+    }).then(function(w){
+      return w.startCall({ to: lead.telefone });
+    }).then(function(r){
+      if(r && r.err){ setCallStatus('Erro: '+((r.err&&r.err.message)?r.err.message:'falha ao iniciar')); endCallUI(); return; }
+      currentCall=(r&&r.call)?r.call:r;
+      if(wantHangup){ hangup(); return; }
+      setCallStatus('Chamando...');
+      wireCallEvents(currentCall);
+    }).catch(function(e){
+      var neg=(e&&(e.name==='NotAllowedError'||e.name==='SecurityError'));
+      setCallStatus(neg?'Permita o microfone pra ligar':('Falha: '+((e&&e.message)?e.message:'erro')));
+      endCallUI();
+    });
   }
   function on(call,ev,fn){try{if(call&&call.on){call.on(ev,fn);}}catch(e){}}
   function mapStatus(s){var m={CALLING:'Chamando...',RINGING:'Tocando...',ACTIVE:'Em ligação',ACCEPT:'Em ligação',ENDED:'Encerrada',NOT_ANSWERED:'Não atendida',UNANSWERED:'Não atendida',REJECTED:'Recusada'};return m[String(s).toUpperCase()]||String(s||'');}
@@ -248,11 +266,12 @@ export const DISCADOR_APP_JS = `(function(){
     on(call,'connectivityIssue',function(){setCallStatus('Problema de conexão');});
   }
   function hangup(){
+    wantHangup=true; // se pressionado antes do startCall resolver, encerra ao resolver
     var c=currentCall;
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
     setCallStatus('Encerrada');endCallUI();
   }
-  function openCall(lead,status){$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
+  function openCall(lead,status){wantHangup=false;$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
   function endCallUI(){if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;setTimeout(function(){$('call-overlay').style.display='none';},1400);}
