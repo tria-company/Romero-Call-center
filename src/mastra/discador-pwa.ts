@@ -20,7 +20,7 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-export const DISCADOR_SW_JS = `const CACHE='discador-v1';
+export const DISCADOR_SW_JS = `const CACHE='discador-v2';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -62,6 +62,19 @@ export const DISCADOR_HTML = `<!doctype html>
   .muted{color:var(--mut);text-align:center;padding:14px;font-size:14px}
   .loadmore{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:4px}
   .ghost{background:none;border:0;color:var(--mut);padding:8px}
+  .card{cursor:pointer}
+  .card .info{pointer-events:none}
+  /* detail sheet */
+  #detail-overlay{position:fixed;inset:0;background:rgba(3,7,15,.6);display:none;align-items:flex-end;z-index:15}
+  #detail-overlay .sheet{background:var(--card);width:100%;max-width:640px;margin:0 auto;border-radius:20px 20px 0 0;max-height:88dvh;overflow-y:auto;padding:16px 18px calc(24px + env(safe-area-inset-bottom))}
+  .sheet-head{display:flex;align-items:flex-start;gap:10px;position:sticky;top:0;background:var(--card);padding:4px 0 10px;border-bottom:1px solid var(--line);margin-bottom:8px}
+  .d-nome{font-size:20px;font-weight:700;text-transform:capitalize}
+  .d-tel{color:var(--mut);margin-top:2px}
+  .d-resumo{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--teal2);border-radius:10px;padding:10px 12px;margin:2px 0 10px;font-size:14px;line-height:1.45;white-space:pre-wrap}
+  .d-form .frow{padding:9px 0;border-bottom:1px solid var(--line)}
+  .d-form .flabel{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px}
+  .d-form .fval{font-size:15px;margin-top:2px}
+  .call-lg{margin-top:16px;padding:16px;font-size:17px}
   /* login */
   #login-view{flex:1;display:flex;flex-direction:column;justify-content:center;padding:28px;gap:14px;max-width:420px;margin:0 auto;width:100%}
   #login-view .logo{width:64px;height:64px;margin:0 auto 6px;border-radius:18px;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:30px}
@@ -109,6 +122,21 @@ export const DISCADOR_HTML = `<!doctype html>
     </main>
   </div>
 
+  <div id="detail-overlay">
+    <div class="sheet">
+      <div class="sheet-head">
+        <div style="flex:1;min-width:0">
+          <div id="d-nome" class="d-nome"></div>
+          <div id="d-tel" class="d-tel"></div>
+        </div>
+        <button id="detail-close" class="ghost">Fechar</button>
+      </div>
+      <div id="d-resumo" class="d-resumo"></div>
+      <div id="d-form" class="d-form"></div>
+      <button id="detail-call" class="primary call-lg">\u{1F4DE} Ligar</button>
+    </div>
+  </div>
+
   <div id="call-overlay">
     <div id="call-nome"></div>
     <div id="call-tel"></div>
@@ -142,6 +170,24 @@ export const DISCADOR_APP_JS = `(function(){
     .catch(function(){$('login-err').textContent='Erro ao entrar.';});
   }
   function startList(){show('list');resetList();}
+  function openDetail(lead){
+    $('d-nome').textContent=lead.nome||lead.telefone;
+    $('d-tel').textContent=lead.telefone;
+    var res=$('d-resumo');
+    if(lead.resumo){res.textContent=lead.resumo;res.style.display='block';}else{res.style.display='none';}
+    var form=$('d-form');form.innerHTML='';
+    var campos=lead.formulario||[];
+    campos.forEach(function(f){
+      var row=document.createElement('div');row.className='frow';
+      var la=document.createElement('div');la.className='flabel';la.textContent=f.label;
+      var va=document.createElement('div');va.className='fval';va.textContent=f.valor;
+      row.appendChild(la);row.appendChild(va);form.appendChild(row);
+    });
+    if(!campos.length&&!lead.resumo){form.innerHTML='<div class="muted">Sem respostas de formulário nesta oportunidade.</div>';}
+    $('detail-call').onclick=function(){closeDetail();iniciarLigacao(lead);};
+    $('detail-overlay').style.display='flex';
+  }
+  function closeDetail(){$('detail-overlay').style.display='none';}
   function resetList(){page={q:$('search').value.trim(),startAfter:null,startAfterId:null,done:false,loading:false};$('leads').innerHTML='';loadMore();}
   function loadMore(){
     if(page.loading||page.done){return;}page.loading=true;$('load-status').textContent='Carregando...';
@@ -166,7 +212,8 @@ export const DISCADOR_APP_JS = `(function(){
       var tel=document.createElement('div');tel.className='tel';tel.textContent=l.telefone;
       info.appendChild(nome);info.appendChild(tel);
       var btn=document.createElement('button');btn.className='call-btn';btn.textContent='Ligar';
-      btn.onclick=function(){iniciarLigacao(l);};
+      btn.onclick=function(ev){ev.stopPropagation();iniciarLigacao(l);};
+      card.onclick=function(){openDetail(l);};
       card.appendChild(info);card.appendChild(btn);frag.appendChild(card);
     });
     $('leads').appendChild(frag);
@@ -215,6 +262,8 @@ export const DISCADOR_APP_JS = `(function(){
     var st=null;$('search').addEventListener('input',function(){if(st){clearTimeout(st);}st=setTimeout(resetList,400);});
     $('loadmore-btn').onclick=loadMore;
     $('hangup-btn').onclick=hangup;
+    $('detail-close').onclick=closeDetail;
+    $('detail-overlay').addEventListener('click',function(e){if(e.target===$('detail-overlay')){closeDetail();}});
     if(getToken()){startList();}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/discador/sw.js').catch(function(){});}
   });

@@ -644,9 +644,42 @@ export async function registrarNotaObservacao(telefone: string, texto: string): 
 
 // =================== DISCADOR — leads qualificados (PWA) ===================
 
+export interface CampoFormulario {
+  label: string;
+  valor: string;
+}
 export interface LeadQualificado {
   nome: string;
   telefone: string; // E.164 (ex: +5599991442003)
+  resumo?: string; // analise_do_formulario (resumo BANT/analise)
+  formulario?: CampoFormulario[]; // respostas do form 14q, rotuladas
+}
+
+// Custom fields da OPORTUNIDADE que sao respostas do formulario 14q (id -> label
+// legivel, na ordem de exibicao). Ids descobertos via GET
+// /locations/{id}/customFields?model=opportunity. analise_do_formulario vira `resumo`.
+const FORM_OPP_CAMPOS: Array<{ id: string; label: string }> = [
+  { id: 'sQpp8xAdqGSLFtpZFgmX', label: 'Formação' },
+  { id: 'CP5ksZXpxAswBdKEPJh7', label: 'Tempo de atuação' },
+  { id: 'k3JIXEgFRy9q47IMVqy9', label: 'Área de foco' },
+  { id: 'y2Krtc9tlzX5WhxZEyfZ', label: 'Quer aprofundar' },
+  { id: 'llGGClaLAciLvZiPmZOi', label: 'Modelo de atendimento' },
+  { id: 'rz3upRa2AQN5xzB8XPC3', label: 'Canal' },
+  { id: 'm5kfKFuhzNyXWJglF0d3', label: 'Pacientes/semana' },
+  { id: 'fVbRBbPSqfbGy4OUPbx6', label: 'Ticket médio' },
+  { id: 'SNnlPovD4gem8uGFb5k2', label: 'Tamanho da clínica' },
+  { id: 'TvzqREEZ3kX73SHE0sKE', label: 'Já aplica ADS' },
+  { id: 'W4Ckck9WfaODSMmVtSh7', label: 'Módulo com resultado' },
+  { id: 'ny4kuIdXh9eI7D8hVs2c', label: 'Maior dificuldade' },
+  { id: 'mzz23c8yYzYRHWXd6FTG', label: 'Mudaria no curso' },
+  { id: 'Q43qdXelZhY0t43wNDmo', label: 'Já indicou' },
+  { id: 'ItxxS6cCOkSu9l8xprui', label: 'Congresso SP' },
+];
+const RESUMO_OPP_CAMPO = '9vTUlbYPfOmOU3MNnrqm'; // analise_do_formulario
+
+function valorCampoOpp(cf: any): string {
+  const v = cf?.fieldValueString ?? cf?.fieldValue ?? cf?.value ?? '';
+  return typeof v === 'string' ? v : String(v ?? '');
 }
 
 /**
@@ -685,9 +718,18 @@ export async function buscarQualificados(
     const leads: LeadQualificado[] = (data?.opportunities || [])
       .map((o: any) => {
         const c = o.contact || o.relations?.[0] || {};
+        const porId = new Map<string, string>();
+        for (const cf of (Array.isArray(o.customFields) ? o.customFields : [])) {
+          if (cf?.id) porId.set(cf.id, valorCampoOpp(cf));
+        }
+        const formulario: CampoFormulario[] = FORM_OPP_CAMPOS
+          .map((f) => ({ label: f.label, valor: (porId.get(f.id) || '').trim() }))
+          .filter((x) => x.valor);
         return {
           nome: String(c.name || c.contactName || c.fullName || o.name || '').trim(),
           telefone: String(c.phone || '').trim(),
+          resumo: (porId.get(RESUMO_OPP_CAMPO) || '').trim() || undefined,
+          formulario: formulario.length ? formulario : undefined,
         };
       })
       .filter((l: LeadQualificado) => l.telefone);
