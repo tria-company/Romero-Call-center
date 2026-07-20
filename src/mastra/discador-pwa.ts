@@ -20,7 +20,7 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-export const DISCADOR_SW_JS = `const CACHE='discador-v4';
+export const DISCADOR_SW_JS = `const CACHE='discador-v5';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -89,7 +89,9 @@ export const DISCADOR_HTML = `<!doctype html>
   #call-tel{color:var(--mut)}
   #call-status{margin-top:18px;font-size:15px;color:var(--teal2);letter-spacing:.5px}
   #call-timer{font-size:34px;font-variant-numeric:tabular-nums;margin-top:4px}
-  #hangup-btn{margin-top:36px;width:72px;height:72px;border-radius:50%;background:var(--red);color:#fff;border:0;font-size:30px}
+  #vv-btn{margin-top:28px;padding:12px 24px;border-radius:24px;border:1px solid var(--line);background:var(--card2);color:var(--txt);font-size:15px}
+  #vv-btn.on{background:var(--teal);color:#fff;border-color:var(--teal)}
+  #hangup-btn{margin-top:20px;width:72px;height:72px;border-radius:50%;background:var(--red);color:#fff;border:0;font-size:30px}
   #hangup-btn::before{content:'\\1F4DE'}
 </style>
 </head>
@@ -142,6 +144,7 @@ export const DISCADOR_HTML = `<!doctype html>
     <div id="call-tel"></div>
     <div id="call-status"></div>
     <div id="call-timer"></div>
+    <button id="vv-btn" class="vv">\u{1F509} Viva-voz</button>
     <button id="hangup-btn" aria-label="Desligar"></button>
   </div>
 </div>
@@ -154,6 +157,24 @@ export const DISCADOR_APP_JS = `(function(){
   var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
   var page={q:'',startAfter:null,startAfterId:null,done:false,loading:false};
   var timerInt=null, timerStart=0;
+  var vvOn=false, vvCtx=null, vvSrc=null;
+  function setVivaVoz(on){
+    vvOn=on; var b=$('vv-btn'); if(b){b.classList.toggle('on',on);}
+    try{
+      if(on){
+        if(!vvCtx){vvCtx=new (window.AudioContext||window.webkitAudioContext)();}
+        if(vvCtx.state==='suspended'){vvCtx.resume();}
+        if(!vvSrc){
+          // buffer silencioso em loop: mantem uma sessao de audio de MIDIA ativa,
+          // o que no iOS tende a rotear a saida pro alto-falante (best-effort).
+          var buf=vvCtx.createBuffer(1,vvCtx.sampleRate,vvCtx.sampleRate);
+          vvSrc=vvCtx.createBufferSource();vvSrc.buffer=buf;vvSrc.loop=true;
+          vvSrc.connect(vvCtx.destination);vvSrc.start();
+        }
+      } else if(vvCtx){ try{vvCtx.suspend();}catch(e){} }
+    }catch(e){}
+  }
+  function toggleVivaVoz(){ setVivaVoz(!vvOn); }
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
   function setToken(t){if(t){localStorage.setItem(tokenKey,t);}else{localStorage.removeItem(tokenKey);}}
@@ -259,7 +280,7 @@ export const DISCADOR_APP_JS = `(function(){
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(){setCallStatus('Em ligação');startTimer();});
+    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}setCallStatus('Em ligação');startTimer();});
     on(call,'peerReject',function(){setCallStatus('Recusada');endCallUI();});
     on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
     on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
@@ -283,6 +304,7 @@ export const DISCADOR_APP_JS = `(function(){
     var st=null;$('search').addEventListener('input',function(){if(st){clearTimeout(st);}st=setTimeout(resetList,400);});
     $('loadmore-btn').onclick=loadMore;
     $('hangup-btn').onclick=hangup;
+    $('vv-btn').onclick=toggleVivaVoz;
     $('detail-close').onclick=closeDetail;
     $('detail-overlay').addEventListener('click',function(e){if(e.target===$('detail-overlay')){closeDetail();}});
     if(getToken()){startList();}else{show('login');}

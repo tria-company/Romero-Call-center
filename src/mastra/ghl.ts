@@ -515,7 +515,7 @@ export async function persistirTranscricaoContato(
 // Resolve a opportunity ATIVA do contato no pipeline COMERCIAL USI (mesma logica
 // da tool move-pipeline-stage). Retorna id + stage atual pra decidir o guard.
 async function buscarOpportunityCall(contactId: string): Promise<{ id: string; pipelineStageId: string } | null> {
-  const url = `${GHL_BASE_URL}/opportunities/search?contact_id=${encodeURIComponent(contactId)}&pipeline_id=${encodeURIComponent(GHL_PIPELINE_ID)}`;
+  const url = `${GHL_BASE_URL}/opportunities/search?location_id=${encodeURIComponent(GHL_LOCATION_ID)}&contact_id=${encodeURIComponent(contactId)}&pipeline_id=${encodeURIComponent(GHL_PIPELINE_ID)}`;
   const res = await fetchTimeout(url, {
     headers: {
       'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
@@ -828,26 +828,36 @@ export async function buscarContactIdPorTelefone(telefone: string): Promise<stri
     // ignore — segue pra fallback
   }
 
-  // 2. Fallback API: lookup por telefone E.164
+  // 2. Fallback API: busca por telefone via POST /contacts/search. O endpoint
+  // /contacts/lookup NAO existe nesta API (retorna 400 "Contact with id lookup
+  // not found") — por isso so o cache de sessao acima resolvia (leads de
+  // WhatsApp). Um lead SEM sessao (ex: chamado pelo discador PWA) precisa desta
+  // busca por telefone pra o webhook Wavoip achar o contato/oportunidade.
   if (!GHL_PIT_TOKEN) return null;
   try {
     const phoneE164 = telefone.startsWith('+') ? telefone : `+${telefone}`;
-    const url = `${GHL_BASE_URL}/contacts/lookup?phoneNumber=${encodeURIComponent(phoneE164)}`;
-    const res = await fetchTimeout(url, {
+    const res = await fetchTimeout(`${GHL_BASE_URL}/contacts/search`, {
+      method: 'POST',
       headers: {
         'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
-        'Version': GHL_API_VERSION,
+        'Version': GHL_API_VERSION_V2,
+        'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
+      body: JSON.stringify({
+        locationId: GHL_LOCATION_ID,
+        pageLimit: 1,
+        filters: [{ field: 'phone', operator: 'eq', value: phoneE164 }],
+      }),
     });
     if (!res.ok) {
-      console.warn(`[ghl] lookup contactId falhou (${res.status}):`, await res.text());
+      console.warn(`[ghl] busca contactId por telefone falhou (${res.status})`);
       return null;
     }
     const data = await res.json();
-    return data?.contacts?.[0]?.id || data?.contact?.id || null;
+    return data?.contacts?.[0]?.id || null;
   } catch (e) {
-    console.error('[ghl] erro no lookup contactId:', e);
+    console.error('[ghl] erro na busca de contactId por telefone:', e);
     return null;
   }
 }
