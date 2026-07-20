@@ -152,6 +152,11 @@ import { FUP_GATE_TOKEN } from './config';
 import { GHL_STAGES } from './config';
 // Webhook Wavoip (rastreador de ligacao): token fail-closed de /api/webhook/wavoip
 import { WAVOIP_WEBHOOK_TOKEN } from './config';
+// PWA Discador de qualificados (lista GHL + ligar via Wavoip no navegador)
+import { WAVOIP_DEVICE_TOKEN } from './config';
+import { verificarCredenciais, emitirToken, verificarToken, tokenDoHeader } from './discador-auth';
+import { buscarQualificados } from './ghl';
+import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISCADOR_ICON_SVG } from './discador-pwa';
 
 // T-03-01: token fail-closed do webhook de gravacao de call/ligacao (Fase 3)
 import { GRAVACAO_WEBHOOK_TOKEN } from './config';
@@ -1604,6 +1609,14 @@ export const mastra = new Mastra({
             const evento = String(payload.type || '').toUpperCase();
             const whatsappCallId = String(payload.whatsapp_call_id || payload.whatsappCallId || '');
 
+            // DIAGNOSTICO temporario: loga o SHAPE de cada evento CALL/RECORD
+            // (type/action/status/direction/duration/record_status) + chaves do
+            // payload, pra validar o contrato real da Wavoip vs a doc. Pula
+            // DEVICE (heartbeat frequente — floodaria o log). Nao loga telefone.
+            if (evento !== 'DEVICE') {
+              console.log(`[wavoip] evento type=${evento} action=${payload.action || ''} status=${payload.status || ''} dir=${payload.direction || ''} dur=${payload.duration ?? ''} record_status=${payload.record_status || ''} keys=[${Object.keys(payload).join(',')}]`);
+            }
+
             // ---------------- Evento CALL: atendeu + stage ----------------
             if (evento === 'CALL') {
               const status = String(payload.status || '').toUpperCase();
@@ -1648,8 +1661,18 @@ export const mastra = new Mastra({
 
             // ---------------- Evento RECORD: transcricao ----------------
             if (evento === 'RECORD') {
-              const recordStatus = String(payload.record_status || '').toUpperCase();
+              // NB: o evento RECORD real da Wavoip carrega o status no campo
+              // `status` (=RECORDING/READY), NAO em `record_status` (que a doc
+              // dizia e que so aparece no evento CALL). Le os dois por seguranca.
+              const recordStatus = String(payload.record_status || payload.status || '').toUpperCase();
               const recordUrl = String(payload.record_url || payload.recordUrl || '');
+              // DIAGNOSTICO: loga o HOST da record_url (nao a URL inteira) pra o
+              // operador adicionar em GRAVACAO_HOSTS_PERMITIDOS (anti-SSRF).
+              if (recordUrl) {
+                try {
+                  console.log(`[wavoip] RECORD host=${new URL(recordUrl).host} status=${recordStatus} call=${whatsappCallId}`);
+                } catch { /* url invalida — ignora */ }
+              }
               if (recordStatus !== 'READY' || !recordUrl) {
                 return c.json({ status: 'ignorado', motivo: `record_status=${recordStatus}` });
               }
@@ -1711,6 +1734,73 @@ export const mastra = new Mastra({
             console.error('[wavoip] Erro no webhook:', erro);
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
           }
+        },
+      },
+      // ============ PWA DISCADOR (estatico + API) ============
+      {
+        path: '/discador',
+        method: 'GET',
+        handler: (c) => new Response(DISCADOR_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }),
+      },
+      {
+        path: '/discador/app.js',
+        method: 'GET',
+        handler: (c) => new Response(DISCADOR_APP_JS, { headers: { 'Content-Type': 'text/javascript; charset=utf-8' } }),
+      },
+      {
+        path: '/discador/manifest.webmanifest',
+        method: 'GET',
+        handler: (c) => new Response(DISCADOR_MANIFEST, { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8' } }),
+      },
+      {
+        path: '/discador/sw.js',
+        method: 'GET',
+        handler: (c) => new Response(DISCADOR_SW_JS, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Service-Worker-Allowed': '/discador' } }),
+      },
+      {
+        path: '/discador/icon.svg',
+        method: 'GET',
+        handler: (c) => new Response(DISCADOR_ICON_SVG, { headers: { 'Content-Type': 'image/svg+xml; charset=utf-8' } }),
+      },
+      {
+        path: '/api/discador/login',
+        method: 'POST',
+        handler: async (c) => {
+          try {
+            const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+            const usuario = String(body.usuario || '');
+            const senha = String(body.senha || '');
+            if (!verificarCredenciais(usuario, senha)) {
+              return c.json({ status: 'invalido' }, 401);
+            }
+            return c.json({ token: emitirToken(usuario) });
+          } catch (e) {
+            console.error('[discador] erro login:', e);
+            return c.json({ status: 'erro' }, 500);
+          }
+        },
+      },
+      {
+        path: '/api/discador/qualificados',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const q = c.req.query('q') || undefined;
+          const startAfter = c.req.query('startAfter') || undefined;
+          const startAfterId = c.req.query('startAfterId') || undefined;
+          const limit = Number(c.req.query('limit')) || 30;
+          const r = await buscarQualificados({ q, limit, startAfter, startAfterId });
+          return c.json(r);
+        },
+      },
+      {
+        path: '/api/discador/config',
+        method: 'GET',
+        handler: (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          return c.json({ wavoipToken: WAVOIP_DEVICE_TOKEN });
         },
       },
       {

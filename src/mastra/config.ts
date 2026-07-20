@@ -176,6 +176,12 @@ if (!WAVOIP_WEBHOOK_TOKEN) {
   );
 }
 
+// Device token da Wavoip pro SDK do NAVEGADOR (PWA discador). E exposto
+// client-side por design (o SDK `new Wavoip({tokens:[...]})` precisa dele pra
+// abrir a call via WebRTC). Default = mesmo valor do webhook token: no painel
+// Wavoip o "Token" do device serve tanto pra configurar o webhook quanto pro SDK.
+export const WAVOIP_DEVICE_TOKEN = process.env.WAVOIP_DEVICE_TOKEN || WAVOIP_WEBHOOK_TOKEN || '';
+
 // Allowlist de hosts pra baixar recordingUrl (anti-SSRF, T-03-02) — so URLs
 // https com host presente nesta lista (ou na familia de dominios do proprio
 // GHL, ver ehHostDominioGhl em ghl.ts) sao baixadas por baixarGravacaoBase64;
@@ -203,7 +209,9 @@ if (!WAVOIP_WEBHOOK_TOKEN) {
 // download (fail-closed) e a transcricao da call Wavoip nao acontece.
 export const GRAVACAO_HOSTS_PERMITIDOS = (
   process.env.GRAVACAO_HOSTS_PERMITIDOS ||
-  'services.leadconnectorhq.com,msg.leadconnectorhq.com'
+  // storage.wavoip.com = host das gravacoes da Wavoip (record_url do evento
+  // RECORD), confirmado ao vivo no 1o teste real de call via discador Wavoip.
+  'services.leadconnectorhq.com,msg.leadconnectorhq.com,storage.wavoip.com'
 )
   .split(',')
   .map((h) => h.trim().toLowerCase())

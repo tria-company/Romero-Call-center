@@ -20,6 +20,7 @@ import {
   GHL_API_VERSION_V2,
   GHL_DEFAULT_TYPE,
   GHL_PIPELINE_ID,
+  GHL_LOCATION_ID,
   GHL_STAGES,
   GHL_STAGES_NAO_REBAIXAR_CALL,
   GHL_OPP_ATENDEU_FIELD_ID,
@@ -638,6 +639,67 @@ export async function registrarNotaObservacao(telefone: string, texto: string): 
   } catch (e) {
     console.error(`[wavoip] erro ao registrar nota para ${telefone}:`, e);
     return false;
+  }
+}
+
+// =================== DISCADOR — leads qualificados (PWA) ===================
+
+export interface LeadQualificado {
+  nome: string;
+  telefone: string; // E.164 (ex: +5599991442003)
+}
+
+/**
+ * Busca leads no stage QUALIFICADO do COMERCIAL USI (nome + telefone E.164) pro
+ * PWA discador. Suporta busca por nome (q) e paginacao (startAfter/startAfterId
+ * do GHL). So retorna leads COM telefone.
+ */
+export async function buscarQualificados(
+  opts: { q?: string; limit?: number; startAfter?: string; startAfterId?: string } = {},
+): Promise<{ leads: LeadQualificado[]; startAfter?: string; startAfterId?: string; total?: number }> {
+  if (!GHL_PIT_TOKEN) return { leads: [] };
+  const limit = Math.min(Math.max(opts.limit || 30, 1), 100);
+  const params = new URLSearchParams({
+    location_id: GHL_LOCATION_ID,
+    pipeline_id: GHL_PIPELINE_ID,
+    pipeline_stage_id: GHL_STAGES.QUALIFICADO,
+    status: 'open',
+    limit: String(limit),
+  });
+  if (opts.q) params.set('q', opts.q);
+  if (opts.startAfter) params.set('startAfter', opts.startAfter);
+  if (opts.startAfterId) params.set('startAfterId', opts.startAfterId);
+  try {
+    const res = await fetchTimeout(`${GHL_BASE_URL}/opportunities/search?${params.toString()}`, {
+      headers: {
+        'Authorization': `Bearer ${GHL_PIT_TOKEN}`,
+        'Version': GHL_API_VERSION_V2,
+        'Accept': 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.error(`[discador] GET /opportunities/search falhou (${res.status})`);
+      return { leads: [] };
+    }
+    const data = await res.json();
+    const leads: LeadQualificado[] = (data?.opportunities || [])
+      .map((o: any) => {
+        const c = o.contact || o.relations?.[0] || {};
+        return {
+          nome: String(c.name || c.contactName || c.fullName || o.name || '').trim(),
+          telefone: String(c.phone || '').trim(),
+        };
+      })
+      .filter((l: LeadQualificado) => l.telefone);
+    return {
+      leads,
+      startAfter: data?.meta?.startAfter != null ? String(data.meta.startAfter) : undefined,
+      startAfterId: data?.meta?.startAfterId,
+      total: data?.meta?.total,
+    };
+  } catch (e) {
+    console.error('[discador] erro buscarQualificados:', e);
+    return { leads: [] };
   }
 }
 
