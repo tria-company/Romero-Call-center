@@ -20,7 +20,7 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-export const DISCADOR_SW_JS = `const CACHE='discador-v5';
+export const DISCADOR_SW_JS = `const CACHE='discador-v6';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -44,7 +44,7 @@ export const DISCADOR_HTML = `<!doctype html>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--txt)}
   .wrap{max-width:640px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column}
-  header{position:sticky;top:0;background:rgba(11,18,32,.92);backdrop-filter:blur(8px);padding:14px 16px calc(10px + env(safe-area-inset-top)) 16px;border-bottom:1px solid var(--line);z-index:5}
+  header{position:sticky;top:0;background:rgba(11,18,32,.92);backdrop-filter:blur(8px);padding:calc(14px + env(safe-area-inset-top)) 16px 10px 16px;border-bottom:1px solid var(--line);z-index:5}
   header .row{display:flex;align-items:center;gap:10px}
   header h1{font-size:18px;margin:0;flex:1;font-weight:700}
   .pill{font-size:12px;color:var(--mut)}
@@ -56,7 +56,8 @@ export const DISCADOR_HTML = `<!doctype html>
   .card .info{flex:1;min-width:0}
   .card .nome{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize}
   .card .tel{color:var(--mut);font-size:14px;margin-top:2px}
-  .call-btn{background:var(--teal);color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:700;display:flex;align-items:center;gap:6px}
+  .card .avatar{width:46px;height:46px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--teal2);flex:0 0 auto;text-transform:uppercase;font-size:16px}
+  .call-btn{background:var(--teal);color:#fff;border:0;border-radius:50%;width:46px;height:46px;padding:0;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:20px;flex:0 0 auto}
   .call-btn:active{background:var(--teal2)}
   .call-btn::before{content:'\\1F4DE'}
   .muted{color:var(--mut);text-align:center;padding:14px;font-size:14px}
@@ -83,16 +84,20 @@ export const DISCADOR_HTML = `<!doctype html>
   .field{padding:14px 16px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--txt);width:100%}
   .primary{background:var(--teal);color:#fff;border:0;border-radius:12px;padding:14px;font-weight:700;width:100%}
   .err{color:#fca5a5;text-align:center;font-size:14px;min-height:18px}
-  /* call overlay */
-  #call-overlay{position:fixed;inset:0;background:rgba(5,10,20,.96);display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;z-index:20;padding:24px}
-  #call-nome{font-size:24px;font-weight:700;text-transform:capitalize;text-align:center}
-  #call-tel{color:var(--mut)}
-  #call-status{margin-top:18px;font-size:15px;color:var(--teal2);letter-spacing:.5px}
-  #call-timer{font-size:34px;font-variant-numeric:tabular-nums;margin-top:4px}
-  #vv-btn{margin-top:28px;padding:12px 24px;border-radius:24px;border:1px solid var(--line);background:var(--card2);color:var(--txt);font-size:15px}
-  #vv-btn.on{background:var(--teal);color:#fff;border-color:var(--teal)}
-  #hangup-btn{margin-top:20px;width:72px;height:72px;border-radius:50%;background:var(--red);color:#fff;border:0;font-size:30px}
-  #hangup-btn::before{content:'\\1F4DE'}
+  /* call overlay — estilo WhatsApp: avatar no meio, controles ancorados embaixo */
+  #call-overlay{position:fixed;inset:0;background:linear-gradient(180deg,#102437,#0b1220);display:none;flex-direction:column;align-items:center;justify-content:space-between;z-index:20;padding:calc(52px + env(safe-area-inset-top)) 24px calc(40px + env(safe-area-inset-bottom))}
+  .call-top{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+  #call-avatar{width:120px;height:120px;border-radius:50%;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:46px;font-weight:700;color:#fff;margin-bottom:20px;box-shadow:0 10px 34px rgba(0,0,0,.4);text-transform:uppercase}
+  #call-nome{font-size:26px;font-weight:700;text-transform:capitalize}
+  #call-tel{color:var(--mut);margin-top:2px}
+  #call-status{margin-top:16px;font-size:15px;color:var(--teal2);letter-spacing:.5px}
+  #call-timer{font-size:20px;font-variant-numeric:tabular-nums;margin-top:4px;color:var(--mut)}
+  .call-controls{display:flex;align-items:center;justify-content:center;gap:48px}
+  .ctrl{display:flex;flex-direction:column;align-items:center;gap:8px;background:none;border:0;color:var(--mut);font-size:13px;font-weight:600}
+  .ctrl .ic{width:66px;height:66px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s}
+  #vv-btn.on{color:#fff}
+  #vv-btn.on .ic{background:#fff;color:#0b1220;border-color:#fff}
+  .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg)}
 </style>
 </head>
 <body>
@@ -140,12 +145,17 @@ export const DISCADOR_HTML = `<!doctype html>
   </div>
 
   <div id="call-overlay">
-    <div id="call-nome"></div>
-    <div id="call-tel"></div>
-    <div id="call-status"></div>
-    <div id="call-timer"></div>
-    <button id="vv-btn" class="vv">\u{1F509} Viva-voz</button>
-    <button id="hangup-btn" aria-label="Desligar"></button>
+    <div class="call-top">
+      <div id="call-avatar"></div>
+      <div id="call-nome"></div>
+      <div id="call-tel"></div>
+      <div id="call-status"></div>
+      <div id="call-timer"></div>
+    </div>
+    <div class="call-controls">
+      <button id="vv-btn" class="ctrl" aria-label="Viva-voz"><span class="ic">\u{1F509}</span><span>Viva-voz</span></button>
+      <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">\u{1F4DE}</span></button>
+    </div>
   </div>
 </div>
 <script src="/discador/app.js"></script>
@@ -158,6 +168,27 @@ export const DISCADOR_APP_JS = `(function(){
   var page={q:'',startAfter:null,startAfterId:null,done:false,loading:false};
   var timerInt=null, timerStart=0;
   var vvOn=false, vvCtx=null, vvSrc=null;
+  function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
+  // Roteia o audio remoto da chamada pro alto-falante. setSinkId funciona em
+  // Chrome desktop/Android (escolhe o device de saida); iOS Safari NAO suporta
+  // (fica no fallback de AudioContext abaixo). Os elementos <audio> sao criados
+  // pelo SDK do Wavoip ao conectar — pegamos todos e forcamos volume/saida.
+  function routeToSpeaker(on){
+    var els;try{els=document.querySelectorAll('audio,video');}catch(e){return;}
+    for(var i=0;i<els.length;i++){(function(a){
+      try{a.muted=false;if(a.volume!=null){a.volume=1;}}catch(e){}
+      if(typeof a.setSinkId!=='function'){return;}
+      if(on){
+        navigator.mediaDevices.enumerateDevices().then(function(ds){
+          var outs=ds.filter(function(d){return d.kind==='audiooutput';});
+          var spk=null;
+          for(var j=0;j<outs.length;j++){if(/speaker|alto.?falante/i.test(outs[j].label)){spk=outs[j];break;}}
+          if(!spk&&outs.length){spk=outs[outs.length-1];}
+          if(spk){a.setSinkId(spk.deviceId).catch(function(){});}
+        }).catch(function(){});
+      } else { try{a.setSinkId('default').catch(function(){});}catch(e){} }
+    })(els[i]);}
+  }
   function setVivaVoz(on){
     vvOn=on; var b=$('vv-btn'); if(b){b.classList.toggle('on',on);}
     try{
@@ -173,6 +204,7 @@ export const DISCADOR_APP_JS = `(function(){
         }
       } else if(vvCtx){ try{vvCtx.suspend();}catch(e){} }
     }catch(e){}
+    routeToSpeaker(on);
   }
   function toggleVivaVoz(){ setVivaVoz(!vvOn); }
   function $(id){return document.getElementById(id);}
@@ -232,10 +264,11 @@ export const DISCADOR_APP_JS = `(function(){
       var nome=document.createElement('div');nome.className='nome';nome.textContent=l.nome||'(sem nome)';
       var tel=document.createElement('div');tel.className='tel';tel.textContent=l.telefone;
       info.appendChild(nome);info.appendChild(tel);
-      var btn=document.createElement('button');btn.className='call-btn';btn.textContent='Ligar';
+      var av=document.createElement('div');av.className='avatar';av.textContent=initials(l.nome||l.telefone);
+      var btn=document.createElement('button');btn.className='call-btn';btn.setAttribute('aria-label','Ligar');
       btn.onclick=function(ev){ev.stopPropagation();iniciarLigacao(l);};
       card.onclick=function(){openDetail(l);};
-      card.appendChild(info);card.appendChild(btn);frag.appendChild(card);
+      card.appendChild(av);card.appendChild(info);card.appendChild(btn);frag.appendChild(card);
     });
     $('leads').appendChild(frag);
   }
@@ -292,7 +325,7 @@ export const DISCADOR_APP_JS = `(function(){
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
     setCallStatus('Encerrada');endCallUI();
   }
-  function openCall(lead,status){wantHangup=false;$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
+  function openCall(lead,status){wantHangup=false;var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';setVivaVoz(false);$('call-overlay').style.display='flex';}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
   function endCallUI(){if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;setTimeout(function(){$('call-overlay').style.display='none';},1400);}
