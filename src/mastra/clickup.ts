@@ -415,6 +415,152 @@ export async function iniciarLigacao(
   return { telefone };
 }
 
+/**
+ * Adiciona um comentário numa task (D-P3-04 — redundância field+comentário
+ * da transcrição). Thin wrapper sobre `POST /task/:id/comment`. Token ausente
+ * e falha de infra/HTTP LANÇAM (WR-03) — nunca mascarados como sucesso.
+ */
+export async function comentarTask(taskId: string, texto: string): Promise<boolean> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para comentar na task');
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}/comment`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ comment_text: texto }),
+    });
+  } catch (e) {
+    throw new Error(
+      `[clickup] falha de rede ao comentar na task ${taskId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] POST /task/${taskId}/comment falhou (${res.status})`);
+  }
+  return true;
+}
+
+/**
+ * Grava a transcrição da ligação na Ligação (OPER-01, D-P3-04): custom field
+ * TRANSCRICAO E como comentário na task — redundância intencional (o field é
+ * filtrável/lido pela Análise, o comentário é pra leitura humana no ClickUp).
+ * Substitui `registrarNotaObservacao` (nota no GHL) no webhook RECORD. Erros
+ * de infra/HTTP de qualquer uma das duas escritas LANÇAM (WR-03) — o caller
+ * decide como reagir a uma falha parcial.
+ */
+export async function gravarTranscricao(taskId: string, transcricao: string): Promise<void> {
+  await setCustomField(taskId, CAMPOS_LIGACOES.TRANSCRICAO, transcricao);
+  await comentarTask(taskId, `📞 Transcrição da ligação (Wavoip)\n\n${transcricao}`);
+}
+
+/** Patch de metadados da Ligação derivados do payload Wavoip (D-P3-05, OPER-02, ver analise.ts). */
+export interface PatchMetadadosLigacao {
+  atendeu?: boolean;
+  motivoFalha?: string;
+  fim?: number;
+  duracao?: number;
+  urlGravacao?: string;
+}
+
+/**
+ * Grava os metadados derivados do payload Wavoip na Ligação (D-P3-05,
+ * OPER-02) — só os campos presentes no `patch` são escritos, cada um por
+ * field-id de CAMPOS_LIGACOES (D-07). Preenchimento 100% automático: o
+ * operador nunca digita nada disso. Erro de infra/HTTP em qualquer campo
+ * LANÇA (WR-03) — o caller decide como reagir a uma falha parcial.
+ */
+export async function gravarMetadadosLigacao(taskId: string, patch: PatchMetadadosLigacao): Promise<void> {
+  if (patch.atendeu !== undefined) {
+    await setCustomField(taskId, CAMPOS_LIGACOES.ATENDEU, patch.atendeu);
+  }
+  if (patch.motivoFalha !== undefined) {
+    await setCustomField(taskId, CAMPOS_LIGACOES.MOTIVO_FALHA, patch.motivoFalha);
+  }
+  if (patch.fim !== undefined) {
+    await setCustomField(taskId, CAMPOS_LIGACOES.FIM, patch.fim);
+  }
+  if (patch.duracao !== undefined) {
+    await setCustomField(taskId, CAMPOS_LIGACOES.DURACAO, patch.duracao);
+  }
+  if (patch.urlGravacao !== undefined) {
+    await setCustomField(taskId, CAMPOS_LIGACOES.URL_GRAVACAO, patch.urlGravacao);
+  }
+}
+
+/** Compara dois telefones ignorando formatação (só dígitos). */
+function telefonesIguais(a: unknown, b: string): boolean {
+  if (a === undefined || a === null) return false;
+  return String(a).replace(/\D/g, '') === b.replace(/\D/g, '');
+}
+
+/**
+ * Busca a Ligação ABERTA (Lista 02) cujo TELEFONE (field-id, D-07) casa com
+ * `telefone` — fallback de correlação persistida (D-P3-01) usado quando o map
+ * in-memory `taskAtivaPorTelefone` do webhook não tem a entrada (restart/TTL
+ * expirado). Retorna `null` se nenhuma Ligação aberta casar — resultado
+ * legítimo, distinto de erro de infra (LANÇA via `listarTasks`, WR-03).
+ */
+export async function buscarLigacaoAbertaPorTelefone(telefone: string): Promise<string | null> {
+  const { tasks } = await listarTasks(CLICKUP_LIST_LIGACOES, { includeClosed: false });
+  const match = tasks.find((t) =>
+    telefonesIguais(t.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value, telefone),
+  );
+  return match?.id ?? null;
+}
+
+/**
+ * Cria uma Ligação AVULSA (D-P3-03) quando uma gravação do webhook chega sem
+ * task correspondente na Lista 02 (nem via correlação in-memory, nem via
+ * `buscarLigacaoAbertaPorTelefone`) — nenhuma ligação real fica sem registro.
+ * Sem script/descrição, gravando `CAMPOS_LIGACOES.TELEFONE`. Se um lead da
+ * Lista 01 casar o mesmo telefone, vincula via ID_LEAD/LEAD_REL best-effort
+ * (mesmo padrão de `scripts/gerar-lote.mjs`: se o relationship falhar,
+ * segue — ID_LEAD já foi gravado). Erro de infra/HTTP na CRIAÇÃO da task
+ * LANÇA (WR-03); o vínculo opcional ao lead NÃO aborta a criação. Nada de
+ * PII em log dentro desta função.
+ */
+export async function criarLigacaoAvulsa(telefone: string): Promise<{ id: string }> {
+  const novaTask = await criarTask(CLICKUP_LIST_LIGACOES, {
+    name: `Ligação avulsa — ${telefone}`,
+    custom_fields: [{ id: CAMPOS_LIGACOES.TELEFONE, value: telefone }],
+  });
+  if (!novaTask?.id) {
+    throw new Error('[clickup] criarLigacaoAvulsa: criarTask retornou sem id');
+  }
+
+  try {
+    const { tasks: leads } = await listarTasks(CLICKUP_LIST_LEADS);
+    const leadMatch = leads.find((t) =>
+      telefonesIguais(t.custom_fields?.find((c) => c.id === CAMPOS_LEADS.TELEFONE)?.value, telefone),
+    );
+    if (leadMatch) {
+      const idLead = String(
+        leadMatch.custom_fields?.find((c) => c.id === CAMPOS_LEADS.ID_LEAD_GHL)?.value ?? leadMatch.id,
+      );
+      await setCustomField(novaTask.id, CAMPOS_LIGACOES.ID_LEAD, idLead);
+      try {
+        await setCustomField(novaTask.id, CAMPOS_LIGACOES.LEAD_REL, { add: [leadMatch.id] });
+      } catch (e) {
+        // D-P2-06/mesmo racional de gerar-lote.mjs: se o shape do relationship
+        // falhar, segue — ID_LEAD já foi gravado, o vínculo textual não se perde.
+        console.warn(
+          `[clickup] Ligação avulsa (${novaTask.id}) criada mas LEAD_REL não foi setado: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+  } catch (e) {
+    // Vínculo ao lead é best-effort — a Ligação avulsa já existe (D-P3-03),
+    // uma falha aqui não pode fazer parecer que a gravação ficou sem registro.
+    console.warn(
+      `[clickup] Ligação avulsa (${novaTask.id}) criada mas vínculo ao lead falhou: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  return { id: novaTask.id };
+}
+
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
 // importa so `clickup.ts` (ex: fases 2/3/4).
 export { CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES };
