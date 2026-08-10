@@ -27,27 +27,43 @@
 
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
+import { createAzure } from '@ai-sdk/azure';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
 
 const CLICKUP_API_TOKEN = process.env.CLICKUP_API_TOKEN || '';
 const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
 const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
+// Provider ativo — espelha LLM_PROVIDER de src/mastra/llm.ts para provar o
+// caminho que producao realmente usa (WR-02), nao um caminho fixo em OpenAI.
+const LLM_PROVIDER = process.env.LLM_PROVIDER || 'openai';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
+const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
+const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || '';
+const AZURE_OPENAI_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || '';
+const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '';
 
 // Sai com mensagem clara e exit 1 se faltar env (D-09) — sem fazer nenhuma
 // request antes de validar as chaves.
 function falharConfigAusente(faltando) {
   console.error(
-    `[smoke-fundacao] ${faltando} vazio — preencha OPENAI_API_KEY/CLICKUP_API_TOKEN no .env ` +
+    `[smoke-fundacao] ${faltando} vazio — preencha a(s) variavel(is) no .env ` +
       'antes de rodar o smoke (node --env-file=.env scripts/smoke-fundacao.mjs).',
   );
   process.exit(1);
 }
 
 if (!CLICKUP_API_TOKEN) falharConfigAusente('CLICKUP_API_TOKEN');
-if (!OPENAI_API_KEY) falharConfigAusente('OPENAI_API_KEY');
+// Valida o provider ATIVO (WR-02) — espelha configAusente() de llm.ts: em
+// Azure exige API_KEY + ENDPOINT + DEPLOYMENT; em OpenAI exige OPENAI_API_KEY.
+if (LLM_PROVIDER === 'azure') {
+  if (!AZURE_OPENAI_API_KEY) falharConfigAusente('AZURE_OPENAI_API_KEY (LLM_PROVIDER=azure)');
+  if (!AZURE_OPENAI_ENDPOINT) falharConfigAusente('AZURE_OPENAI_ENDPOINT (LLM_PROVIDER=azure)');
+  if (!AZURE_OPENAI_DEPLOYMENT) falharConfigAusente('AZURE_OPENAI_DEPLOYMENT (LLM_PROVIDER=azure)');
+} else {
+  if (!OPENAI_API_KEY) falharConfigAusente('OPENAI_API_KEY');
+}
 
 function headersClickUp() {
   return { Authorization: CLICKUP_API_TOKEN, 'Content-Type': 'application/json' };
@@ -104,10 +120,25 @@ async function deletarTask(taskId) {
   return true;
 }
 
-/** Espelha chamarLLM() de src/mastra/llm.ts (D-08a: OpenAI direto, default). */
-async function chamarLLM(prompt) {
+/** Espelha chamarLLM()/modeloLLM() de src/mastra/llm.ts — exercita o provider
+ *  ATIVO conforme LLM_PROVIDER (WR-02), nao um caminho fixo em OpenAI. */
+function modeloLLM() {
+  if (LLM_PROVIDER === 'azure') {
+    const azure = createAzure({
+      apiKey: AZURE_OPENAI_API_KEY,
+      baseURL: AZURE_OPENAI_ENDPOINT || undefined,
+      apiVersion: AZURE_OPENAI_API_VERSION || undefined,
+      // Espelha llm.ts (WR-01): formato /deployments/{deploymentId}.
+      useDeploymentBasedUrls: true,
+    });
+    return azure(AZURE_OPENAI_DEPLOYMENT);
+  }
   const openai = createOpenAI({ apiKey: OPENAI_API_KEY });
-  const { text } = await generateText({ model: openai(OPENAI_MODEL), prompt });
+  return openai(OPENAI_MODEL);
+}
+
+async function chamarLLM(prompt) {
+  const { text } = await generateText({ model: modeloLLM(), prompt });
   return text;
 }
 
@@ -122,12 +153,12 @@ async function checarRead() {
 }
 
 async function checarLLM() {
-  console.log('\n[2/3] FUND-03 — chamada real ao LLM...');
+  console.log(`\n[2/3] FUND-03 — chamada real ao LLM (provider=${LLM_PROVIDER})...`);
   const texto = await chamarLLM('Responda apenas OK.');
   if (!texto || typeof texto !== 'string' || texto.trim().length === 0) {
     throw new Error('LLM retornou string vazia');
   }
-  console.log(`  PASS — LLM respondeu (${texto.trim().length} caractere(s)).`);
+  console.log(`  PASS — LLM (${LLM_PROVIDER}) respondeu (${texto.trim().length} caractere(s)).`);
 }
 
 async function checarWrite() {
