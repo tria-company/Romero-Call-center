@@ -42,40 +42,41 @@ const leadFuturo = leadFixture({ taskId: 'futuro', proximoContato: AMANHA });
 // (b) tentativas >= limiteTentativas -> EXCLUÍDO
 const leadEstourouTentativas = leadFixture({ taskId: 'estourou', tentativas: 5 });
 
-// (c) três leads elegíveis para provar ordem: retorno primeiro -> score desc -> tentativas asc
-const leadRetornoScoreBaixo = leadFixture({
-  taskId: 'retorno-score-baixo',
-  score: 10,
-  tentativas: 2,
-  retornoNecessario: true,
+// (c) quatro leads elegíveis para provar ordem: retorno primeiro -> score desc -> tentativas asc.
+// Nota: retornoNecessario é DERIVADO por selecionarLoteElegivel (tentativas > 0 &&
+// proximoContato <= hoje — D-P2-04), não lido do campo `retornoNecessario` da fixture.
+// Como todo lead elegível já tem proximoContato <= hoje, a derivação equivale a
+// "tentativas > 0" dentro do conjunto elegível — por isso as fixtures abaixo controlam
+// tentativas (0 = sem retorno) para produzir o grupo esperado.
+const leadRetornoScoreAlto = leadFixture({
+  taskId: 'retorno-score-alto',
+  score: 95,
+  tentativas: 1, // tentativas > 0 -> retorno necessário
 });
-const leadSemRetornoScoreAlto = leadFixture({
-  taskId: 'sem-retorno-score-alto',
-  score: 90,
-  tentativas: 1,
-  retornoNecessario: false,
+const leadRetornoScoreMedioTentativasBaixa = leadFixture({
+  taskId: 'retorno-score-medio-tentativas-baixa',
+  score: 80,
+  tentativas: 2, // tentativas > 0 -> retorno necessário
 });
-const leadSemRetornoScoreAltoDesempate1 = leadFixture({
-  taskId: 'sem-retorno-desempate-1',
-  score: 40,
-  tentativas: 3,
-  retornoNecessario: false,
+const leadRetornoScoreMedioTentativasAlta = leadFixture({
+  taskId: 'retorno-score-medio-tentativas-alta',
+  score: 80,
+  tentativas: 4, // tentativas > 0 -> retorno necessário; empata score com o anterior
 });
-const leadSemRetornoScoreAltoDesempate2 = leadFixture({
-  taskId: 'sem-retorno-desempate-2',
-  score: 40,
-  tentativas: 1,
-  retornoNecessario: false,
+const leadSemRetornoScoreMaisAlto = leadFixture({
+  taskId: 'sem-retorno-score-mais-alto',
+  score: 99, // maior score de todos, mas SEM retorno (tentativas=0) -> deve ficar por último
+  tentativas: 0,
 });
 
 // (d) tamanho menor que o total -> corta a cauda
 const todosElegiveis = [
   leadFuturo,
   leadEstourouTentativas,
-  leadRetornoScoreBaixo,
-  leadSemRetornoScoreAlto,
-  leadSemRetornoScoreAltoDesempate1,
-  leadSemRetornoScoreAltoDesempate2,
+  leadRetornoScoreAlto,
+  leadRetornoScoreMedioTentativasBaixa,
+  leadRetornoScoreMedioTentativasAlta,
+  leadSemRetornoScoreMaisAlto,
 ];
 
 function testarExclusaoPorData() {
@@ -103,11 +104,13 @@ function testarExclusaoPorTentativas() {
 }
 
 function testarOrdenacao() {
+  // Ordem de entrada embaralhada de propósito — a saída deve ser determinada
+  // só pela regra de ordenação, não pela ordem de entrada.
   const elegiveis = [
-    leadSemRetornoScoreAltoDesempate2,
-    leadSemRetornoScoreAlto,
-    leadRetornoScoreBaixo,
-    leadSemRetornoScoreAltoDesempate1,
+    leadSemRetornoScoreMaisAlto,
+    leadRetornoScoreMedioTentativasAlta,
+    leadRetornoScoreAlto,
+    leadRetornoScoreMedioTentativasBaixa,
   ];
   const resultado = selecionarLoteElegivel(elegiveis, {
     hoje: HOJE,
@@ -116,21 +119,14 @@ function testarOrdenacao() {
   });
   const ordemIds = resultado.map((l) => l.taskId);
   const ordemEsperada = [
-    'retorno-score-baixo', // retornoNecessario=true vem primeiro, mesmo com score baixo
-    'sem-retorno-score-alto', // maior score entre os sem retorno
-    'sem-retorno-desempate-1', // score empatado com desempate-2, menos tentativas asc (3 vs 1) -> desempate-2 primeiro
-    'sem-retorno-desempate-2',
-  ];
-  // desempate-1 tem tentativas=3, desempate-2 tem tentativas=1 -> asc: desempate-2 antes de desempate-1
-  const ordemEsperadaCorrigida = [
-    'retorno-score-baixo',
-    'sem-retorno-score-alto',
-    'sem-retorno-desempate-2',
-    'sem-retorno-desempate-1',
+    'retorno-score-alto', // grupo retorno=true, maior score (95) do grupo -> primeiro
+    'retorno-score-medio-tentativas-baixa', // grupo retorno=true, score 80 empatado, menos tentativas (2) -> antes do próximo
+    'retorno-score-medio-tentativas-alta', // grupo retorno=true, score 80 empatado, mais tentativas (4) -> depois do anterior
+    'sem-retorno-score-mais-alto', // maior score de todos (99), mas retorno=false -> sempre por último
   ];
   checar(
-    JSON.stringify(ordemIds) === JSON.stringify(ordemEsperadaCorrigida),
-    `ordenação incorreta: esperado ${JSON.stringify(ordemEsperadaCorrigida)}, recebido ${JSON.stringify(ordemIds)}`,
+    JSON.stringify(ordemIds) === JSON.stringify(ordemEsperada),
+    `ordenação incorreta: esperado ${JSON.stringify(ordemEsperada)}, recebido ${JSON.stringify(ordemIds)}`,
   );
 }
 
