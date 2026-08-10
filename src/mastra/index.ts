@@ -15,7 +15,9 @@ import { buscarQualificados, registrarNotaObservacao } from './ghl';
 
 // Fila de Ligacoes (Lista 02 ClickUp) do operador logado + detalhe/script de
 // uma Ligacao (LOTE-04/05, Fase 02 Plano 03 — substitui buscarQualificados).
-import { buscarFilaLigacoes, lerLigacao } from './clickup';
+// iniciarLigacao grava INICIO+OPERADOR e move a task pra "em processamento"
+// ao tocar Ligar (OPER-01/02, D-P3-01/02/07, Fase 03 Plano 01).
+import { buscarFilaLigacoes, lerLigacao, iniciarLigacao } from './clickup';
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador } from './operadores';
@@ -45,6 +47,26 @@ function guardarCorrelacao(callId: string, telefone: string): void {
   if (correlacaoCallTelefone.size > 2000) {
     for (const [k, v] of correlacaoCallTelefone) {
       if (agora - v.ts > CORRELACAO_TTL_MS) correlacaoCallTelefone.delete(k);
+    }
+  }
+}
+
+// Correlacao "task ativa" por telefone (D-P3-01): quando o operador toca
+// Ligar, o discador reporta a task em POST /api/discador/ligando ANTES do
+// evento CALL do Wavoip chegar. Guardamos telefone -> taskId aqui como
+// OTIMIZACAO em memoria (usada pelas fatias seguintes, 03-02+, pra evitar uma
+// busca na Lista 02); o fallback confiavel — que sobrevive a restart — e a
+// correlacao ja persistida no proprio ClickUp por `iniciarLigacao`
+// (INICIO+OPERADOR+status), nao esta Map.
+const taskAtivaPorTelefone = new Map<string, { taskId: string; ts: number }>();
+
+/** Guarda telefone -> task ativa e faz a mesma limpeza preguicosa de `guardarCorrelacao`. */
+function guardarTaskAtiva(telefone: string, taskId: string): void {
+  const agora = Date.now();
+  taskAtivaPorTelefone.set(telefone, { taskId, ts: agora });
+  if (taskAtivaPorTelefone.size > 2000) {
+    for (const [k, v] of taskAtivaPorTelefone) {
+      if (agora - v.ts > CORRELACAO_TTL_MS) taskAtivaPorTelefone.delete(k);
     }
   }
 }
@@ -193,6 +215,43 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao carregar a ligação' }, 502);
+          }
+        },
+      },
+      {
+        // Reporta a task ativa ao tocar "Ligar" (OPER-01/02, D-P3-01/02/07):
+        // grava INICIO+OPERADOR na Ligacao IMEDIATAMENTE e move a task pra
+        // "em processamento" (some da fila). Mesmo isolamento por operador
+        // de /api/discador/ligacao/:taskId (CR-01/T-03-01-01) — sem ele, um
+        // taskId arbitrario no body gravaria em Ligacao de outro operador.
+        path: '/api/discador/ligando',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) {
+            return c.json({ erro: 'Ligação não encontrada' }, 404);
+          }
+          const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+          const taskId = String(body.taskId || '');
+          try {
+            const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
+            if (telefone) guardarTaskAtiva(telefone, taskId);
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            console.error('[discador] erro ao registrar ligando:', e);
+            // Mesmo criterio de /ligacao/:taskId: task inexistente/fora da
+            // Lista 02/de outro operador -> 404 identico (nao revela nada);
+            // erro de infra do ClickUp -> 502.
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao iniciar ligação' }, 502);
           }
         },
       },

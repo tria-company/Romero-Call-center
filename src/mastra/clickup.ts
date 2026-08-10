@@ -9,7 +9,7 @@
 // lista/campo, so le/escreve. Escrita de custom field e SEMPRE por field_id
 // (nunca por nome — D-07), usando os mapas CAMPOS_LEADS/CAMPOS_LIGACOES abaixo.
 
-import { CLICKUP_API_TOKEN, CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES } from './config.ts';
+import { CLICKUP_API_TOKEN, CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES, OPER_STATUS_EM_PROCESSAMENTO } from './config.ts';
 import { fetchTimeout } from './http.ts';
 import { mapearFilaLigacao } from './lote.ts';
 import type { ItemFila } from './lote.ts';
@@ -106,6 +106,12 @@ function headers(): Record<string, string> {
     'Authorization': CLICKUP_API_TOKEN,
     'Content-Type': 'application/json',
   };
+}
+
+/** Extrai o nome do status nativo de uma task — `{status} | string | undefined` (TaskClickUp.status). */
+function nomeDoStatus(status: TaskClickUp['status']): string {
+  if (!status) return '';
+  return typeof status === 'string' ? status : status.status;
 }
 
 /**
@@ -313,7 +319,15 @@ export async function buscarFilaLigacoes(
     includeClosed: false,
     assignees: [assigneeId],
   });
-  return mapearFilaLigacao(tasks, CAMPOS_LIGACOES);
+  // D-P3-07: a task que acabou de receber "Ligar" fica num status
+  // intermediário "em processamento" — exclui aqui pra não re-entregar ao
+  // operador uma Ligação que já está sendo processada (webhook/analise em
+  // andamento). Sem OPER_STATUS_EM_PROCESSAMENTO configurado, nenhuma task é
+  // filtrada (comportamento anterior, D-P3-07 ainda não fixado no .env).
+  const abertas = OPER_STATUS_EM_PROCESSAMENTO
+    ? tasks.filter((t) => nomeDoStatus(t.status) !== OPER_STATUS_EM_PROCESSAMENTO)
+    : tasks;
+  return mapearFilaLigacao(abertas, CAMPOS_LIGACOES);
 }
 
 /**
@@ -354,6 +368,51 @@ export async function lerLigacao(taskId: string, assigneeIdEsperado: string): Pr
     idLead: item?.idLead ?? idLead,
     script: task.description ?? task.text_content ?? '',
   };
+}
+
+/**
+ * Registra o início da ligação ao tocar "Ligar" no discador (OPER-01/02,
+ * D-P3-01/02/07): grava INICIO + OPERADOR na task IMEDIATAMENTE (sobrevive a
+ * restart — a correlação call↔task fica persistida no próprio ClickUp) e
+ * move o status nativo para `OPER_STATUS_EM_PROCESSAMENTO`, tirando a task da
+ * fila (`buscarFilaLigacoes`) enquanto ela é processada.
+ *
+ * `assigneeIdEsperado` é OBRIGATÓRIO: mesma validação CR-01 de `lerLigacao`
+ * (task tem que ser da Lista 02 e pertencer ao operador logado) — sem isso,
+ * um `taskId` arbitrário no body do POST permitiria gravar INICIO/OPERADOR
+ * em Ligação de outro operador (IDOR, T-03-01-01).
+ *
+ * Retorna o telefone da task (lido de CAMPOS_LIGACOES.TELEFONE) pro caller
+ * correlacionar em memória (D-P3-01 — otimização; o fallback confiável é a
+ * correlação persistida aqui). Erros de infra/HTTP ou de autorização LANÇAM
+ * (WR-03) — nunca mascarados como sucesso.
+ */
+export async function iniciarLigacao(
+  taskId: string,
+  assigneeIdEsperado: string,
+  operadorLabel: string,
+): Promise<{ telefone: string }> {
+  const task = await lerTask(taskId);
+  if (!task) {
+    throw new Error(`[clickup] iniciarLigacao: task ${taskId} nao encontrada`);
+  }
+  if (task.list?.id !== CLICKUP_LIST_LIGACOES) {
+    throw new Error(`[clickup] iniciarLigacao: task ${taskId} nao e uma Ligacao da Lista 02`);
+  }
+  if (!task.assignees?.some((a) => String(a.id) === assigneeIdEsperado)) {
+    throw new Error(`[clickup] iniciarLigacao: task ${taskId} nao pertence ao operador`);
+  }
+  // D-P3-02: grava INICIO + OPERADOR imediatamente (custom fields, D-07 — por
+  // field_id). Falha de infra LANÇA (WR-03) — o caller decide o 502.
+  await setCustomField(taskId, CAMPOS_LIGACOES.INICIO, Date.now());
+  await setCustomField(taskId, CAMPOS_LIGACOES.OPERADOR, operadorLabel);
+  // D-P3-07: move pro status intermediário nativo, se configurado (ver
+  // OPER_STATUS_EM_PROCESSAMENTO em config.ts — vazio até a descoberta rodar).
+  if (OPER_STATUS_EM_PROCESSAMENTO) {
+    await atualizarTask(taskId, { status: OPER_STATUS_EM_PROCESSAMENTO });
+  }
+  const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
+  return { telefone };
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
