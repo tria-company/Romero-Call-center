@@ -2,8 +2,9 @@ import { Mastra } from '@mastra/core/mastra';
 import { PinoLogger } from '@mastra/loggers';
 
 // Config: token do device Wavoip (SDK do navegador) + credenciais GHL +
-// token do webhook Wavoip (transcricao das calls).
-import { WAVOIP_DEVICE_TOKEN, WAVOIP_WEBHOOK_TOKEN } from './config';
+// token do webhook Wavoip (transcricao das calls) + limiar de aderencia do
+// Agente Analise (D-P3-10, Fase 03 Plano 03).
+import { WAVOIP_DEVICE_TOKEN, WAVOIP_WEBHOOK_TOKEN, ANALISE_ADERENCIA_MINIMA } from './config';
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
 import { verificarCredenciais, emitirToken, verificarToken, tokenDoHeader } from './discador-auth';
@@ -18,6 +19,10 @@ import { buscarQualificados } from './ghl';
 // ao tocar Ligar (OPER-01/02, D-P3-01/02/07, Fase 03 Plano 01). Os helpers de
 // escrita da Ligacao (transcricao/metadados/avulsa) reapontam o webhook RECORD
 // do GHL pro ClickUp (OPER-01/02, D-P3-03/04/05, Fase 03 Plano 02).
+// lerTask + setCustomField + CAMPOS_LIGACOES sao usados pelo passo do Agente
+// Analise (D-P3-08/09/10/11, Fase 03 Plano 03) pra ler o script (descricao da
+// task) e gravar ADERENCIA_SCRIPT/NECESSITA_REVISAO/RETORNO_NECESSARIO/
+// DATA_RETORNO/ANALISE_IA/OBSERVACOES_EXTRAIDAS por field-id (D-07).
 import {
   buscarFilaLigacoes,
   lerLigacao,
@@ -26,6 +31,9 @@ import {
   gravarMetadadosLigacao,
   buscarLigacaoAbertaPorTelefone,
   criarLigacaoAvulsa,
+  lerTask,
+  setCustomField,
+  CAMPOS_LIGACOES,
 } from './clickup';
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
@@ -36,7 +44,22 @@ import { transcreverCallUrl } from './deepgram';
 
 // Derivacoes puras de ATENDEU/MOTIVO_FALHA/DURACAO a partir do payload Wavoip
 // (OPER-02, D-P3-05, Fase 03 Plano 02) — modulo puro, so calculo, sem I/O.
-import { derivarAtendeu, derivarMotivoFalha, derivarDuracao } from './analise';
+// montarPromptAnalise/parseResultadoAnalise/necessitaRevisao/extrairRetorno
+// sao o Agente Analise (OPER-03/04, D-P3-09/10/11/15, Fase 03 Plano 03) —
+// tambem modulo puro, so monta prompt/parseia/decide, nunca chama o LLM.
+import {
+  derivarAtendeu,
+  derivarMotivoFalha,
+  derivarDuracao,
+  montarPromptAnalise,
+  parseResultadoAnalise,
+  necessitaRevisao,
+  extrairRetorno,
+} from './analise';
+
+// chamarLLM(prompt, system) — chamada do provider de IA ativo (D-08), usada
+// pelo passo do Agente Analise (Fase 03 Plano 03).
+import { chamarLLM } from './llm';
 
 // Assets estaticos do PWA discador (HTML/JS/manifest/SW/icon).
 import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISCADOR_ICON_SVG } from './discador-pwa';
@@ -436,6 +459,49 @@ export const mastra = new Mastra({
                 });
               } catch (e) {
                 console.error('[wavoip] falha ao gravar metadados na Ligacao:', e);
+              }
+
+              // ---- Agente Analise (OPER-03/04, D-P3-08/09/10/11/15) ----
+              // Encadeado automaticamente logo apos a transcricao+metadados.
+              // Falha de LLM/parse NAO trava a cadeia (D-P3-08): marca
+              // NECESSITA_REVISAO=true e segue. Nada de transcricao/PII em
+              // log — so ids/flags/status, mesmo padrao do resto do webhook.
+              try {
+                const task = await lerTask(taskId);
+                const script = task?.description ?? task?.text_content ?? '';
+                const { system, prompt } = montarPromptAnalise({ script, transcricao });
+                const textoLLM = await chamarLLM(prompt, system);
+                const resultado = parseResultadoAnalise(textoLLM);
+                const revisao = necessitaRevisao({
+                  aderencia: resultado.aderencia,
+                  limiar: ANALISE_ADERENCIA_MINIMA,
+                  sinaisAlerta: resultado.sinaisAlerta,
+                  falhaTecnica: resultado.falhaTecnica,
+                });
+                const retorno = extrairRetorno(resultado, { hoje: new Date(), defaultDias: 2 });
+
+                await setCustomField(taskId, CAMPOS_LIGACOES.ADERENCIA_SCRIPT, resultado.aderencia);
+                await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, revisao);
+                await setCustomField(taskId, CAMPOS_LIGACOES.RETORNO_NECESSARIO, retorno.necessario);
+                await setCustomField(
+                  taskId,
+                  CAMPOS_LIGACOES.DATA_RETORNO,
+                  retorno.data ? retorno.data.getTime() : null,
+                );
+                await setCustomField(taskId, CAMPOS_LIGACOES.ANALISE_IA, resultado.resumoAnalise);
+                await setCustomField(taskId, CAMPOS_LIGACOES.OBSERVACOES_EXTRAIDAS, resultado.observacoesExtraidas);
+              } catch (e) {
+                // D-P3-08: LLM fora do ar (ou parse/escrita falhou) — marca
+                // revisao e segue, nunca trava a cadeia do webhook. O helper
+                // de ClickUp subjacente ainda lanca em falha de infra (WR-03);
+                // aqui so distinguimos "precisa de revisao humana" de um erro
+                // que derrubaria o 200 do webhook.
+                console.error('[wavoip] falha no Agente Analise, marcando NECESSITA_REVISAO:', e);
+                try {
+                  await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
+                } catch (e2) {
+                  console.error('[wavoip] falha ao marcar NECESSITA_REVISAO apos erro do Agente Analise:', e2);
+                }
               }
 
               return c.json({ status: 'ok' });
