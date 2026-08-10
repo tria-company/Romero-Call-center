@@ -63,8 +63,9 @@ export const CAMPOS_LIGACOES = {
   NECESSITA_REVISAO: 'a666fb85-e76d-43e5-91a2-62a2a005cfbb',
   RETORNO_NECESSARIO: '1b27b754-0cc3-4500-a0ae-a57de2d07243',
   DATA_RETORNO: '1202faf9-13ff-492d-b3d4-fb9ff78bd827',
-  SCRIPT_LIGACAO: '', // preenchido no 01-03 (campo "Script da ligação" a criar)
-  ADERENCIA_SCRIPT: '', // preenchido no 01-03 (campo "Aderência ao script" a criar)
+  // SCRIPT_LIGACAO: não é custom field — o script é a DESCRIÇÃO da task de Ligações (D-06 revisado),
+  // escrita pelo Agente Script na Fase 2. Por isso não há field_id aqui.
+  ADERENCIA_SCRIPT: 'cb84cac6-4b30-488d-a4a8-1ecce9508a79', // "Aderência ao script" (number) — D-06 revisado
 } as const;
 
 export interface CustomFieldClickUp {
