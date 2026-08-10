@@ -102,3 +102,23 @@ export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
 export const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || '';
 export const AZURE_OPENAI_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-5.1';
 export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '';
+
+// ===== ClickUp — store operacional (Listas 01 LEADS / 02 LIGACOES) =====
+//
+// O runtime autentica via Personal API Token (REST v2, D-01/D-02) — o token
+// tem acesso a workspace 9014971829, onde vivem as listas. NAO usar o MCP do
+// ClickUp em runtime (o MCP desta sessao nao enxerga essa workspace).
+
+export const CLICKUP_API_TOKEN = process.env.CLICKUP_API_TOKEN || '';
+
+if (!CLICKUP_API_TOKEN) {
+  console.warn(
+    '[config] CLICKUP_API_TOKEN vazio: o client ClickUp nao consegue ler/escrever ' +
+      'leads/ligacoes (D-01). Pegue o Personal API Token em ClickUp -> Settings -> Apps ' +
+      'e coloque no .env como CLICKUP_API_TOKEN.',
+  );
+}
+
+// IDs das listas ja existentes na workspace 9014971829 (D-04). Nao sao segredos.
+export const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
+export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
