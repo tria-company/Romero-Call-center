@@ -174,15 +174,28 @@ async function checarWrite() {
     await atualizarDescricao(taskId, valorEsperado);
 
     const lida = await lerTask(taskId);
-    const valorLido = (lida?.description ?? '').trim();
-    if (valorLido !== valorEsperado) {
-      throw new Error(`read-back não bateu: esperado "${valorEsperado}", lido "${valorLido}"`);
+    // Read-back robusto (WR-04): o ClickUp normaliza/renderiza a descrição
+    // (markdown, text_content vs description, espaçamento), então comparar por
+    // igualdade estrita é flaky. Basta o marcador único aparecer em qualquer
+    // dos dois campos nativos.
+    const descricao = (lida?.description ?? '').trim();
+    const textContent = (lida?.text_content ?? '').trim();
+    if (!descricao.includes(valorEsperado) && !textContent.includes(valorEsperado)) {
+      throw new Error(
+        `read-back não bateu: marcador "${valorEsperado}" não encontrado em description/text_content`,
+      );
     }
     console.log(`  PASS — write na descrição confirmado por read-back (task ${taskId}).`);
   } finally {
+    // Cleanup protegido (WR-04): uma falha no DELETE não pode sobrescrever o
+    // erro real do teste nem deixar a task órfã sem sinal claro.
     if (taskId) {
-      await deletarTask(taskId);
-      console.log(`  cleanup — task de teste ${taskId} deletada (T-04-03).`);
+      try {
+        await deletarTask(taskId);
+        console.log(`  cleanup — task de teste ${taskId} deletada (T-04-03).`);
+      } catch (e) {
+        console.error(`  cleanup falhou — task ${taskId} pode ter ficado órfã: ${e?.message || e}`);
+      }
     }
   }
 }
