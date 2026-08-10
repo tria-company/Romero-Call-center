@@ -38,9 +38,11 @@ interface CustomFieldLike {
 }
 
 /** Shape mínimo de task que este módulo lê/produz (espelha TaskClickUp de clickup.ts). Exportado
- * para o runner/skill (scripts/gerar-lote.mjs) e para a interface `BackendLote` abaixo. */
+ * para o runner/skill (scripts/gerar-lote.mjs) e para a interface `BackendLote` abaixo. `name` é
+ * opcional (não usado pelo gerador do plano 02-02, mas usado por `mapearFilaLigacao` — plano 02-03). */
 export interface TaskLike {
   id: string;
+  name?: string;
   custom_fields?: CustomFieldLike[];
 }
 
@@ -233,4 +235,42 @@ export function deveCriar(lead: LeadLote, ligacoesAbertas: TaskLike[], idLeadFie
     return campo?.value !== undefined && campo?.value !== null && String(campo.value) === lead.idLead;
   });
   return !jaTemLigacaoAberta;
+}
+
+// ===== Fila do discador — Lista 02 do operador logado (LOTE-04/05, Fase 02 Plano 03) =====
+
+/** Item da fila de ligações do operador (D-P2-08 — uma ligação por vez). Espelhado em
+ * clickup.ts (`export type { ItemFila }`) para o consumo público do módulo continuar
+ * documentado junto do client ClickUp, mesmo o tipo vivendo aqui (módulo puro). */
+export interface ItemFila {
+  taskId: string;
+  nome: string;
+  telefone: string;
+  idLead: string;
+}
+
+function valorCampoTexto(task: TaskLike, fieldId: string): string {
+  return paraString(valorCampo(task, fieldId));
+}
+
+/**
+ * Mapeia tasks da Lista 02 (LIGACOES) para `ItemFila[]` — nome vem do nome
+ * nativo da task, telefone/idLead são lidos por field-id (D-07, nunca por
+ * nome) via `campos` injetado pelo caller (mantém este módulo puro/genérico).
+ * Descarta tasks sem telefone: sem telefone a Ligação não é ligável, então
+ * não faz sentido aparecer na fila do discador. Pura e determinística.
+ */
+export function mapearFilaLigacao(tasks: TaskLike[], campos: CamposLigacoesLike): ItemFila[] {
+  const itens: ItemFila[] = [];
+  for (const task of tasks) {
+    const telefone = valorCampoTexto(task, campos.TELEFONE);
+    if (!telefone) continue;
+    itens.push({
+      taskId: task.id,
+      nome: paraString(task.name) || telefone,
+      telefone,
+      idLead: valorCampoTexto(task, campos.ID_LEAD),
+    });
+  }
+  return itens;
 }

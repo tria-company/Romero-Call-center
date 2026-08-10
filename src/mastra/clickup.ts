@@ -11,6 +11,8 @@
 
 import { CLICKUP_API_TOKEN, CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES } from './config.ts';
 import { fetchTimeout } from './http.ts';
+import { mapearFilaLigacao } from './lote.ts';
+import type { ItemFila } from './lote.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
 
@@ -79,6 +81,21 @@ export interface TaskClickUp {
   name: string;
   status?: { status: string } | string;
   custom_fields?: CustomFieldClickUp[];
+  // Nativos usados pela fila do discador (LOTE-04/05, Fase 02 Plano 03): o
+  // script da Ligação é a DESCRIÇÃO da task (D-06 revisado), não custom
+  // field; `text_content` é o fallback em texto puro que a API às vezes
+  // retorna quando a descrição é rich text.
+  description?: string;
+  text_content?: string;
+  assignees?: Array<{ id: number }>;
+}
+
+/** Item da fila de ligações do operador (ver `ItemFila` em lote.ts — módulo puro). */
+export type { ItemFila };
+
+/** Detalhe de uma Ligação: item da fila + o script (descrição da task — D-06 revisado). */
+export interface DetalheLigacao extends ItemFila {
+  script: string;
 }
 
 function headers(): Record<string, string> {
@@ -94,7 +111,7 @@ function headers(): Record<string, string> {
  */
 export async function listarTasks(
   listId: string,
-  opts: { page?: number; includeClosed?: boolean } = {},
+  opts: { page?: number; includeClosed?: boolean; assignees?: string[] } = {},
 ): Promise<{ tasks: TaskClickUp[]; lastPage: boolean }> {
   // Token ausente e falha de infra/HTTP LANCAM (WR-03): o caller decide
   // retry/abort. Retorno vazio fica reservado a respostas 2xx genuinamente
@@ -107,6 +124,12 @@ export async function listarTasks(
     page: String(opts.page ?? 0),
     include_closed: String(opts.includeClosed ?? true),
   });
+  // Filtro por assignee no SERVIDOR (nao no cliente — T-02-03-E): a fila do
+  // discador so pode ver as tasks do operador logado. `assignees[]` repetido
+  // e o formato que a API REST v2 do ClickUp espera para multiplos valores.
+  for (const assigneeId of opts.assignees ?? []) {
+    if (assigneeId) params.append('assignees[]', assigneeId);
+  }
   let res: Response;
   try {
     res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task?${params.toString()}`, {
@@ -241,6 +264,48 @@ export async function setCustomField(taskId: string, fieldId: string, value: unk
     throw new Error(`[clickup] POST /task/${taskId}/field/${fieldId} falhou (${res.status})`);
   }
   return true;
+}
+
+/**
+ * Busca a fila de Ligações (Lista 02) do operador logado (LOTE-04 — o
+ * discador substitui o GHL QUALIFICADO por esta fila). Filtra por assignee
+ * no SERVIDOR (T-02-03-E — cada operador só vê a própria fila) e só tasks
+ * abertas (`include_closed=false`). Erro de infra/HTTP PROPAGA (WR-03/
+ * T-02-03-D — o caller/rota decide o 502, nunca mascara como fila vazia).
+ */
+export async function buscarFilaLigacoes(
+  assigneeId: string,
+  opts: { page?: number } = {},
+): Promise<ItemFila[]> {
+  const { tasks } = await listarTasks(CLICKUP_LIST_LIGACOES, {
+    page: opts.page,
+    includeClosed: false,
+    assignees: [assigneeId],
+  });
+  return mapearFilaLigacao(tasks, CAMPOS_LIGACOES);
+}
+
+/**
+ * Lê o detalhe de uma Ligação (script + campos da fila) por ID (LOTE-05).
+ * O script é a DESCRIÇÃO nativa da task (D-06 revisado), com `text_content`
+ * como fallback quando a API devolve o texto plano em vez da descrição rica.
+ * Erro de infra/HTTP ou task inexistente PROPAGA (WR-03).
+ */
+export async function lerLigacao(taskId: string): Promise<DetalheLigacao> {
+  const task = await lerTask(taskId);
+  if (!task) {
+    throw new Error(`[clickup] lerLigacao: task ${taskId} nao encontrada`);
+  }
+  const [item] = mapearFilaLigacao([task], CAMPOS_LIGACOES);
+  const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
+  const idLead = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.ID_LEAD)?.value ?? '');
+  return {
+    taskId: task.id,
+    nome: item?.nome ?? task.name ?? telefone,
+    telefone: item?.telefone ?? telefone,
+    idLead: item?.idLead ?? idLead,
+    script: task.description ?? task.text_content ?? '',
+  };
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
