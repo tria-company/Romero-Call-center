@@ -160,3 +160,23 @@ if (!OPER_STATUS_EM_PROCESSAMENTO) {
 // Ligação. O módulo puro não importa esta env — o limiar é injetado como
 // argumento pelo webhook (index.ts) e pelos smokes.
 export const ANALISE_ADERENCIA_MINIMA = Number(process.env.ANALISE_ADERENCIA_MINIMA) || 6;
+
+// ===== Agente Contexto — regra fixa de PROXIMO_CONTATO (OPER-05, Fase 03 Plano 04) =====
+//
+// Usados por `proximoContato` (contexto.ts) quando a ligação NÃO trouxe um
+// compromisso de retorno explícito (DATA_RETORNO da análise sempre vence
+// quando presente — D-P3-14): não atendeu -> hoje + OPER_RETORNO_NAO_ATENDEU_DIAS;
+// atendeu sem retorno combinado -> hoje + OPER_RETORNO_DEFAULT_DIAS. O
+// módulo puro não importa esta env — os dias são injetados como argumento
+// pelo webhook (index.ts) e pelo smoke.
+export const OPER_RETORNO_NAO_ATENDEU_DIAS = Number(process.env.OPER_RETORNO_NAO_ATENDEU_DIAS) || 1;
+export const OPER_RETORNO_DEFAULT_DIAS = Number(process.env.OPER_RETORNO_DEFAULT_DIAS) || 2;
+
+// ===== Operação — status de fechamento da Ligação (OPER-05, D-P3-06, Fase 03 Plano 04) =====
+//
+// Nome EXATO do status de conclusão nativo da Lista 02 LIGACOES, descoberto
+// via scripts/descobrir-status-ligacoes.mjs (03-01-SUMMARY.md): "complete".
+// Usado por `fecharLigacao` (clickup.ts) para fechar a task sozinha no
+// pós-processamento (D-P3-06) — sem passo manual do operador ("Próxima" no
+// discador só avança a UI). Sobrescrevível via env caso o nome real mude.
+export const OPER_STATUS_FECHADO = process.env.OPER_STATUS_FECHADO || 'complete';
