@@ -9,7 +9,13 @@
 // lista/campo, so le/escreve. Escrita de custom field e SEMPRE por field_id
 // (nunca por nome — D-07), usando os mapas CAMPOS_LEADS/CAMPOS_LIGACOES abaixo.
 
-import { CLICKUP_API_TOKEN, CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES, OPER_STATUS_EM_PROCESSAMENTO } from './config.ts';
+import {
+  CLICKUP_API_TOKEN,
+  CLICKUP_LIST_LEADS,
+  CLICKUP_LIST_LIGACOES,
+  OPER_STATUS_EM_PROCESSAMENTO,
+  OPER_STATUS_FECHADO,
+} from './config.ts';
 import { fetchTimeout } from './http.ts';
 import { mapearFilaLigacao } from './lote.ts';
 import type { ItemFila } from './lote.ts';
@@ -559,6 +565,94 @@ export async function criarLigacaoAvulsa(telefone: string): Promise<{ id: string
   }
 
   return { id: novaTask.id };
+}
+
+/**
+ * Resolve o `taskId` do lead (Lista 01 LEADS) a partir de uma task de
+ * Ligação (Lista 02) — OPER-05, Claude's Discretion (03-CONTEXT.md): tenta
+ * primeiro `CAMPOS_LIGACOES.LEAD_REL` (relationship nativo, valor = array de
+ * tasks linkadas); se ausente/vazio, cai no fallback por match de TELEFONE
+ * contra a Lista 01 (mesmo padrão de `criarLigacaoAvulsa`/`telefonesIguais`).
+ * Retorna `null` quando nenhuma das duas estratégias resolve — resultado
+ * legítimo (lead não encontrado), distinto de erro de infra (LANÇA via
+ * `lerTask`/`listarTasks`, WR-03).
+ */
+export async function resolverLeadDaLigacao(taskLigacaoId: string): Promise<string | null> {
+  const task = await lerTask(taskLigacaoId);
+  if (!task) return null;
+
+  const leadRel = task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.LEAD_REL)?.value;
+  if (Array.isArray(leadRel) && leadRel.length > 0) {
+    const primeiro = leadRel[0] as unknown;
+    const id = primeiro && typeof primeiro === 'object' ? (primeiro as { id?: string }).id : primeiro;
+    if (id) return String(id);
+  }
+
+  const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
+  if (!telefone) return null;
+  const { tasks: leads } = await listarTasks(CLICKUP_LIST_LEADS);
+  const leadMatch = leads.find((t) =>
+    telefonesIguais(t.custom_fields?.find((c) => c.id === CAMPOS_LEADS.TELEFONE)?.value, telefone),
+  );
+  return leadMatch?.id ?? null;
+}
+
+/** Patch de contadores mecânicos do lead — mesmo shape de `ContadoresLead` (contexto.ts), injetado pelo caller. */
+export interface PatchContadoresLead {
+  tentativas: number;
+  atendimentos: number;
+  naoAtendimentos: number;
+  ultimoContato: number;
+  ultimoAtendimento: number | null;
+  ultimoResultado: string;
+}
+
+/** Patch de consolidação do lead (OPER-05, D-P3-12/13/14): campos calculados pelo caller (contexto.ts), gravados por field-id (D-07). */
+export interface PatchConsolidarLead {
+  observacaoConsolidada?: string;
+  /** Epoch ms — PROXIMO_CONTATO (D-P3-14). */
+  proximoContato?: number;
+  contadores?: PatchContadoresLead;
+}
+
+/**
+ * Consolida o resultado da ligação no lead (Lista 01, OPER-05): reescreve
+ * OBSERVACAO_CONSOLIDADA (resumo vivo, D-P3-13), grava PROXIMO_CONTATO
+ * (D-P3-14) e os contadores mecânicos (QTD_TENTATIVAS/QTD_ATENDIMENTOS/
+ * QTD_NAO_ATENDIMENTOS/ULTIMO_CONTATO/ULTIMO_ATENDIMENTO/ULTIMO_RESULTADO) —
+ * só os campos presentes em `patch` são escritos, cada um por field-id de
+ * `CAMPOS_LEADS` (D-07). Erro de infra/HTTP em qualquer campo LANÇA (WR-03) —
+ * o caller (webhook) decide como reagir a uma falha parcial (log-e-segue).
+ */
+export async function consolidarLead(leadTaskId: string, patch: PatchConsolidarLead): Promise<void> {
+  if (patch.observacaoConsolidada !== undefined) {
+    await setCustomField(leadTaskId, CAMPOS_LEADS.OBSERVACAO_CONSOLIDADA, patch.observacaoConsolidada);
+  }
+  if (patch.proximoContato !== undefined) {
+    await setCustomField(leadTaskId, CAMPOS_LEADS.PROXIMO_CONTATO, patch.proximoContato);
+  }
+  if (patch.contadores) {
+    const c = patch.contadores;
+    await setCustomField(leadTaskId, CAMPOS_LEADS.QTD_TENTATIVAS, c.tentativas);
+    await setCustomField(leadTaskId, CAMPOS_LEADS.QTD_ATENDIMENTOS, c.atendimentos);
+    await setCustomField(leadTaskId, CAMPOS_LEADS.QTD_NAO_ATENDIMENTOS, c.naoAtendimentos);
+    await setCustomField(leadTaskId, CAMPOS_LEADS.ULTIMO_CONTATO, c.ultimoContato);
+    if (c.ultimoAtendimento !== null) {
+      await setCustomField(leadTaskId, CAMPOS_LEADS.ULTIMO_ATENDIMENTO, c.ultimoAtendimento);
+    }
+    await setCustomField(leadTaskId, CAMPOS_LEADS.ULTIMO_RESULTADO, c.ultimoResultado);
+  }
+}
+
+/**
+ * Fecha a task de Ligação sozinha no pós-processamento (D-P3-06) — a task
+ * fica fechada assim que a cadeia (transcrição/análise/consolidação) termina;
+ * "Próxima" no discador só avança a UI, nunca fecha a task diretamente.
+ * Thin wrapper sobre `atualizarTask` com `OPER_STATUS_FECHADO` (config.ts).
+ * Erro de infra/HTTP LANÇA (WR-03) — o caller decide como reagir.
+ */
+export async function fecharLigacao(taskId: string): Promise<void> {
+  await atualizarTask(taskId, { status: OPER_STATUS_FECHADO });
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
