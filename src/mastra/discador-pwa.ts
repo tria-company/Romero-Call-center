@@ -8,7 +8,7 @@ export const DISCADOR_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBo
 export const DISCADOR_MANIFEST = JSON.stringify({
   name: 'Discador USI',
   short_name: 'Discador',
-  description: 'Discador de leads qualificados — AUTON Health',
+  description: 'Discador da fila de ligações do dia — RomeroCall',
   start_url: '/discador',
   scope: '/discador',
   display: 'standalone',
@@ -20,7 +20,9 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-export const DISCADOR_SW_JS = `const CACHE='discador-v6';
+// CACHE bump (discador-v6 -> discador-v7): invalida o app.js antigo (fila
+// GHL/lista rolável) nos dispositivos já instalados como PWA (D-P2-07).
+export const DISCADOR_SW_JS = `const CACHE='discador-v7';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -49,33 +51,21 @@ export const DISCADOR_HTML = `<!doctype html>
   header h1{font-size:18px;margin:0;flex:1;font-weight:700}
   .pill{font-size:12px;color:var(--mut)}
   input,button{font-size:16px;font-family:inherit}
-  .search{width:100%;margin-top:10px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card2);color:var(--txt)}
-  .search::placeholder{color:var(--mut)}
   main{flex:1;padding:12px 16px calc(24px + env(safe-area-inset-bottom))}
-  .card{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:10px}
-  .card .info{flex:1;min-width:0}
-  .card .nome{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize}
-  .card .tel{color:var(--mut);font-size:14px;margin-top:2px}
-  .card .avatar{width:46px;height:46px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--teal2);flex:0 0 auto;text-transform:uppercase;font-size:16px}
-  .call-btn{background:var(--teal);color:#fff;border:0;border-radius:50%;width:46px;height:46px;padding:0;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:20px;flex:0 0 auto}
-  .call-btn:active{background:var(--teal2)}
-  .call-btn::before{content:'\\1F4DE'}
   .muted{color:var(--mut);text-align:center;padding:14px;font-size:14px}
-  .loadmore{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:4px}
   .ghost{background:none;border:0;color:var(--mut);padding:8px}
-  .card{cursor:pointer}
-  .card .info{pointer-events:none}
-  /* detail sheet */
-  #detail-overlay{position:fixed;inset:0;background:rgba(3,7,15,.6);display:none;align-items:flex-end;z-index:15}
-  #detail-overlay .sheet{background:var(--card);width:100%;max-width:640px;margin:0 auto;border-radius:20px 20px 0 0;max-height:88dvh;overflow-y:auto;padding:16px 18px calc(24px + env(safe-area-inset-bottom))}
-  .sheet-head{display:flex;align-items:flex-start;gap:10px;position:sticky;top:0;background:var(--card);padding:4px 0 10px;border-bottom:1px solid var(--line);margin-bottom:8px}
-  .d-nome{font-size:20px;font-weight:700;text-transform:capitalize}
-  .d-tel{color:var(--mut);margin-top:2px}
-  .d-resumo{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--teal2);border-radius:10px;padding:10px 12px;margin:2px 0 10px;font-size:14px;line-height:1.45;white-space:pre-wrap}
-  .d-form .frow{padding:9px 0;border-bottom:1px solid var(--line)}
-  .d-form .flabel{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px}
-  .d-form .fval{font-size:15px;margin-top:2px}
-  .call-lg{margin-top:16px;padding:16px;font-size:17px}
+  /* card da proxima ligacao (uma-por-vez — D-P2-08) */
+  .card-ligacao{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .lig-head{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .lig-avatar{width:52px;height:52px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--teal2);flex:0 0 auto;text-transform:uppercase;font-size:18px}
+  .lig-info{flex:1;min-width:0}
+  .lig-nome{font-size:19px;font-weight:700;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lig-tel{color:var(--mut);margin-top:2px}
+  .lig-script-wrap{margin-bottom:16px}
+  .lig-script-label{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px}
+  .lig-script{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--teal2);border-radius:10px;padding:12px 14px;font-size:14px;line-height:1.5;white-space:pre-wrap}
+  .loadmore{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+  .call-lg{margin-top:0;padding:16px;font-size:17px}
   /* login */
   #login-view{flex:1;display:flex;flex-direction:column;justify-content:center;padding:28px;gap:14px;max-width:420px;margin:0 auto;width:100%}
   #login-view .logo{width:64px;height:64px;margin:0 auto 6px;border-radius:18px;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:30px}
@@ -105,43 +95,40 @@ export const DISCADOR_HTML = `<!doctype html>
   <div id="login-view" style="display:none">
     <div class="logo">\u{1F4DE}</div>
     <h2>Discador USI</h2>
-    <p class="sub">Leads qualificados — AUTON Health</p>
+    <p class="sub">Fila de ligações do dia — RomeroCall</p>
     <input id="u" class="field" placeholder="Usuário" autocapitalize="none" autocomplete="username">
     <input id="p" class="field" type="password" placeholder="Senha" autocomplete="current-password">
     <div id="login-err" class="err"></div>
     <button id="login-btn" class="primary">Entrar</button>
   </div>
 
-  <div id="list-view" style="display:none">
+  <div id="fila-view" style="display:none">
     <header>
       <div class="row">
-        <h1>Qualificados</h1>
-        <span id="total" class="pill"></span>
+        <h1>Próxima ligação</h1>
+        <span id="fila-contador" class="pill"></span>
         <button id="reload-btn" class="ghost">↻</button>
         <button id="logout-btn" class="ghost">Sair</button>
       </div>
-      <input id="search" class="search" placeholder="Buscar por nome..." autocapitalize="none">
     </header>
     <main>
-      <div id="leads"></div>
-      <div id="load-status" class="muted"></div>
-      <button id="loadmore-btn" class="loadmore">Carregar mais</button>
-    </main>
-  </div>
-
-  <div id="detail-overlay">
-    <div class="sheet">
-      <div class="sheet-head">
-        <div style="flex:1;min-width:0">
-          <div id="d-nome" class="d-nome"></div>
-          <div id="d-tel" class="d-tel"></div>
+      <div id="fila-status" class="muted" style="display:none"></div>
+      <div id="fila-card" class="card-ligacao" style="display:none">
+        <div class="lig-head">
+          <div id="lig-avatar" class="lig-avatar"></div>
+          <div class="lig-info">
+            <div id="lig-nome" class="lig-nome"></div>
+            <div id="lig-tel" class="lig-tel"></div>
+          </div>
         </div>
-        <button id="detail-close" class="ghost">Fechar</button>
+        <div class="lig-script-wrap">
+          <div class="lig-script-label">Script</div>
+          <div id="lig-script" class="lig-script"></div>
+        </div>
+        <button id="lig-ligar" class="primary call-lg">\u{1F4DE} Ligar</button>
+        <button id="lig-proxima" class="loadmore">Concluir / Próxima</button>
       </div>
-      <div id="d-resumo" class="d-resumo"></div>
-      <div id="d-form" class="d-form"></div>
-      <button id="detail-call" class="primary call-lg">\u{1F4DE} Ligar</button>
-    </div>
+    </main>
   </div>
 
   <div id="call-overlay">
@@ -165,7 +152,7 @@ export const DISCADOR_HTML = `<!doctype html>
 export const DISCADOR_APP_JS = `(function(){
   var tokenKey='discador_token';
   var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
-  var page={q:'',startAfter:null,startAfterId:null,done:false,loading:false};
+  var fila=null, filaIdx=0;
   var timerInt=null, timerStart=0;
   var vvOn=false, vvCtx=null, vvSrc=null;
   function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
@@ -210,7 +197,7 @@ export const DISCADOR_APP_JS = `(function(){
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
   function setToken(t){if(t){localStorage.setItem(tokenKey,t);}else{localStorage.removeItem(tokenKey);}}
-  function show(v){$('login-view').style.display=(v==='login')?'flex':'none';$('list-view').style.display=(v==='list')?'block':'none';}
+  function show(v){$('login-view').style.display=(v==='login')?'flex':'none';$('fila-view').style.display=(v==='fila')?'block':'none';}
   function api(path){
     var opts={headers:{}};var t=getToken();if(t){opts.headers['Authorization']='Bearer '+t;}
     return fetch(path,opts).then(function(res){if(res.status===401){setToken('');show('login');throw new Error('401');}return res;});
@@ -219,59 +206,72 @@ export const DISCADOR_APP_JS = `(function(){
     var u=$('u').value.trim(), p=$('p').value;$('login-err').textContent='';
     fetch('/api/discador/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,senha:p})})
     .then(function(res){return res.json().then(function(j){return {ok:res.ok,j:j};});})
-    .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';startList();})
+    .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';startFila();})
     .catch(function(){$('login-err').textContent='Erro ao entrar.';});
   }
-  function startList(){show('list');resetList();}
-  function openDetail(lead){
-    $('d-nome').textContent=lead.nome||lead.telefone;
-    $('d-tel').textContent=lead.telefone;
-    var res=$('d-resumo');
-    if(lead.resumo){res.textContent=lead.resumo;res.style.display='block';}else{res.style.display='none';}
-    var form=$('d-form');form.innerHTML='';
-    var campos=lead.formulario||[];
-    campos.forEach(function(f){
-      var row=document.createElement('div');row.className='frow';
-      var la=document.createElement('div');la.className='flabel';la.textContent=f.label;
-      var va=document.createElement('div');va.className='fval';va.textContent=f.valor;
-      row.appendChild(la);row.appendChild(va);form.appendChild(row);
+  function startFila(){show('fila');carregarFila();}
+  // Fila do operador logado (Lista 02 ClickUp — LOTE-04). Substitui a antiga
+  // lista rolável do GHL QUALIFICADO (D-P2-07): /api/discador/qualificados
+  // NAO e mais chamada por esta tela.
+  function mostrarStatus(msg){$('fila-card').style.display='none';$('fila-status').textContent=msg;$('fila-status').style.display='block';}
+  function carregarFila(){
+    mostrarStatus('Carregando fila...');
+    api('/api/discador/fila').then(function(res){
+      return res.json().catch(function(){return {};}).then(function(data){return {status:res.status,data:data};});
+    }).then(function(r){
+      if(r.status!==200){
+        // Erro de carregamento e DISTINTO de fila vazia (WR-03/T-02-03-D) —
+        // nunca mostra "sem ligações" quando na verdade a chamada falhou.
+        mostrarStatus('Erro ao carregar a fila. Toque em ↻ para tentar de novo.');
+        return;
+      }
+      if(r.data.semMapeamento){
+        mostrarStatus('Seu usuário ainda não está vinculado a um operador do ClickUp. Configure DISCADOR_ASSIGNEES.');
+        return;
+      }
+      fila=r.data.fila||[];filaIdx=0;
+      mostrarItemAtual();
+    }).catch(function(e){
+      if(e&&e.message==='401'){return;}
+      mostrarStatus('Erro ao carregar a fila. Toque em ↻ para tentar de novo.');
     });
-    if(!campos.length&&!lead.resumo){form.innerHTML='<div class="muted">Sem respostas de formulário nesta oportunidade.</div>';}
-    $('detail-call').onclick=function(){closeDetail();iniciarLigacao(lead);};
-    $('detail-overlay').style.display='flex';
   }
-  function closeDetail(){$('detail-overlay').style.display='none';}
-  function resetList(){page={q:$('search').value.trim(),startAfter:null,startAfterId:null,done:false,loading:false};$('leads').innerHTML='';loadMore();}
-  function loadMore(){
-    if(page.loading||page.done){return;}page.loading=true;$('load-status').textContent='Carregando...';
-    var url='/api/discador/qualificados?limit=30';
-    if(page.q){url+='&q='+encodeURIComponent(page.q);}
-    if(page.startAfter){url+='&startAfter='+encodeURIComponent(page.startAfter)+'&startAfterId='+encodeURIComponent(page.startAfterId||'');}
-    api(url).then(function(res){return res.json();}).then(function(data){
-      renderLeads(data.leads||[]);
-      if(data.startAfter&&(data.leads||[]).length){page.startAfter=data.startAfter;page.startAfterId=data.startAfterId;}else{page.done=true;}
-      if(typeof data.total==='number'){$('total').textContent=data.total+' no total';}
-      $('load-status').textContent=page.done?'Fim da lista.':'';
-      $('loadmore-btn').style.display=page.done?'none':'block';
-      page.loading=false;
-    }).catch(function(){$('load-status').textContent='Erro ao carregar.';page.loading=false;});
+  function mostrarItemAtual(){
+    if(!fila||!fila.length){
+      $('fila-contador').textContent='';
+      mostrarStatus('Sem ligações na sua fila hoje.');
+      return;
+    }
+    if(filaIdx>=fila.length){
+      $('fila-contador').textContent=fila.length+' de '+fila.length;
+      mostrarStatus('Fila concluída — toque em ↻ para recarregar.');
+      return;
+    }
+    $('fila-status').style.display='none';
+    var item=fila[filaIdx];
+    $('fila-contador').textContent=(filaIdx+1)+' de '+fila.length;
+    $('lig-avatar').textContent=initials(item.nome||item.telefone);
+    $('lig-nome').textContent=item.nome||item.telefone;
+    $('lig-tel').textContent=item.telefone;
+    $('lig-script').textContent='Carregando script...';
+    $('fila-card').style.display='block';
+    $('lig-ligar').onclick=function(){iniciarLigacao(item);};
+    carregarScriptDoItem(item);
   }
-  function renderLeads(leads){
-    var frag=document.createDocumentFragment();
-    leads.forEach(function(l){
-      var card=document.createElement('div');card.className='card';
-      var info=document.createElement('div');info.className='info';
-      var nome=document.createElement('div');nome.className='nome';nome.textContent=l.nome||'(sem nome)';
-      var tel=document.createElement('div');tel.className='tel';tel.textContent=l.telefone;
-      info.appendChild(nome);info.appendChild(tel);
-      var av=document.createElement('div');av.className='avatar';av.textContent=initials(l.nome||l.telefone);
-      var btn=document.createElement('button');btn.className='call-btn';btn.setAttribute('aria-label','Ligar');
-      btn.onclick=function(ev){ev.stopPropagation();iniciarLigacao(l);};
-      card.onclick=function(){openDetail(l);};
-      card.appendChild(av);card.appendChild(info);card.appendChild(btn);frag.appendChild(card);
+  function carregarScriptDoItem(item){
+    api('/api/discador/ligacao/'+encodeURIComponent(item.taskId)).then(function(res){
+      return res.json().catch(function(){return {};}).then(function(data){return {status:res.status,data:data};});
+    }).then(function(r){
+      if(!fila||fila[filaIdx]!==item){return;} // fila avancou enquanto o script carregava
+      if(r.status!==200||!r.data.ligacao){$('lig-script').textContent='Não foi possível carregar o script.';return;}
+      $('lig-script').textContent=r.data.ligacao.script||'(sem script)';
+    }).catch(function(e){
+      if(e&&e.message==='401'){return;}
+      if(!fila||fila[filaIdx]!==item){return;}
+      $('lig-script').textContent='Não foi possível carregar o script.';
     });
-    $('leads').appendChild(frag);
   }
+  function avancarFila(){filaIdx+=1;mostrarItemAtual();}
   function garantirWavoip(){
     if(wavoip){return Promise.resolve(wavoip);}
     return api('/api/discador/config').then(function(res){return res.json();}).then(function(cfg){
@@ -333,14 +333,11 @@ export const DISCADOR_APP_JS = `(function(){
     $('login-btn').onclick=doLogin;
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
     $('logout-btn').onclick=function(){setToken('');show('login');};
-    $('reload-btn').onclick=resetList;
-    var st=null;$('search').addEventListener('input',function(){if(st){clearTimeout(st);}st=setTimeout(resetList,400);});
-    $('loadmore-btn').onclick=loadMore;
+    $('reload-btn').onclick=carregarFila;
+    $('lig-proxima').onclick=avancarFila;
     $('hangup-btn').onclick=hangup;
     $('vv-btn').onclick=toggleVivaVoz;
-    $('detail-close').onclick=closeDetail;
-    $('detail-overlay').addEventListener('click',function(e){if(e.target===$('detail-overlay')){closeDetail();}});
-    if(getToken()){startList();}else{show('login');}
+    if(getToken()){startFila();}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/discador/sw.js').catch(function(){});}
   });
 })();`;
