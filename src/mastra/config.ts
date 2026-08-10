@@ -152,3 +152,11 @@ if (!OPER_STATUS_EM_PROCESSAMENTO) {
       'e configure no .env.',
   );
 }
+
+// ===== Agente Análise — limiar de aderência (OPER-03, Fase 03 Plano 03) =====
+//
+// Limiar parametrizável (D-P3-10) usado por `necessitaRevisao` (analise.ts):
+// aderencia < ANALISE_ADERENCIA_MINIMA marca NECESSITA_REVISAO=true na
+// Ligação. O módulo puro não importa esta env — o limiar é injetado como
+// argumento pelo webhook (index.ts) e pelos smokes.
+export const ANALISE_ADERENCIA_MINIMA = Number(process.env.ANALISE_ADERENCIA_MINIMA) || 6;
