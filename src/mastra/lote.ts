@@ -37,10 +37,38 @@ interface CustomFieldLike {
   value?: unknown;
 }
 
-/** Shape mínimo de task que este módulo lê (espelha TaskClickUp de clickup.ts). */
-interface TaskLike {
+/** Shape mínimo de task que este módulo lê/produz (espelha TaskClickUp de clickup.ts). Exportado
+ * para o runner/skill (scripts/gerar-lote.mjs) e para a interface `BackendLote` abaixo. */
+export interface TaskLike {
   id: string;
   custom_fields?: CustomFieldLike[];
+}
+
+/** Payload aceito por `criarTask` (clickup.ts) — espelhado aqui para `montarTaskLigacao`
+ * continuar puro (sem importar clickup.ts). */
+export interface PayloadCriarTask {
+  name: string;
+  description?: string;
+  assignees?: number[];
+  custom_fields?: Array<{ id: string; value: unknown }>;
+}
+
+/** Mapa de field-ids da Lista 02 (LIGACOES) que `montarTaskLigacao`/`deveCriar` precisam
+ * (subconjunto de CAMPOS_LIGACOES, injetado pelo caller — D-07). */
+export interface CamposLigacoesLike {
+  ID_LEAD: string;
+  TELEFONE: string;
+}
+
+/**
+ * Backend plugável (D-P2-02) para a etapa "subir lote": a implementação REST
+ * (scripts/gerar-lote.mjs, via clickup.ts) é o default executável desta fase;
+ * MCP fica documentado como alternativa futura (não implementada aqui). Só o
+ * TIPO vive em lote.ts (puro) — a implementação concreta é do runner.
+ */
+export interface BackendLote {
+  ligacoesAbertasDoLead(idLead: string): Promise<TaskLike[]>;
+  criarLigacao(payload: PayloadCriarTask): Promise<{ id: string }>;
 }
 
 /** Mapa de field-ids da Lista 01 que este parser precisa (subconjunto de CAMPOS_LEADS). */
@@ -137,4 +165,72 @@ export function selecionarLoteElegivel(leads: LeadLote[], opts: OpcoesLote): Lea
   });
 
   return elegiveis.slice(0, opts.tamanho);
+}
+
+// ===== Agente Script + geração de tasks da Ligação (LOTE-02/03, Fase 02 Plano 02) =====
+
+/**
+ * Monta o pedido ao LLM (Agente Script, D-P2-05) para gerar o roteiro
+ * estruturado de um lead. NÃO chama o LLM (isso é do runner via `chamarLLM`)
+ * — só monta `system`/`prompt`, puro e determinístico.
+ */
+export function montarPromptScript(lead: LeadLote): { system: string; prompt: string } {
+  const system = [
+    'Você é o Agente Script da campanha RomeroCall.',
+    'Escreva sempre em português do Brasil, num tom cordial e consultivo — nunca agressivo, nunca robótico.',
+    'Gere APENAS o roteiro estruturado pedido, sem comentários fora dele.',
+  ].join(' ');
+
+  const prompt = [
+    `Gere um roteiro de ligação para o lead "${lead.nome}" (telefone ${lead.telefone}) da campanha RomeroCall.`,
+    'O roteiro deve ter EXATAMENTE estas 5 seções, cada uma com um título claro e nesta ordem:',
+    '1. Abertura — cumprimento e identificação do operador/campanha.',
+    '2. Contexto do lead — retome o histórico dele nesta campanha.',
+    '3. Objetivo — o que queremos alcançar nesta ligação.',
+    '4. Objeções — antecipe 2 a 3 objeções comuns e como respondê-las.',
+    '5. Fechamento — o próximo passo combinado com o lead.',
+    '',
+    `Dados do lead: nome=${lead.nome}, telefone=${lead.telefone}, score=${lead.score}, ` +
+      `tentativas anteriores=${lead.tentativas}, retorno necessário=${lead.retornoNecessario ? 'sim' : 'não'}.`,
+  ].join('\n');
+
+  return { system, prompt };
+}
+
+/**
+ * Monta o payload de `criarTask` (clickup.ts) para a Ligação de um lead
+ * (D-P2-06): name identificando o lead, script na descrição, assignee do
+ * operador e vínculo (ID_LEAD/TELEFONE) por field-id injetado (D-07). Puro —
+ * não importa clickup.ts.
+ */
+export function montarTaskLigacao(
+  lead: LeadLote,
+  script: string,
+  assigneeId: string,
+  campos: CamposLigacoesLike,
+): PayloadCriarTask {
+  return {
+    name: `Ligar — ${lead.nome}`,
+    description: script,
+    assignees: [Number(assigneeId)],
+    custom_fields: [
+      { id: campos.ID_LEAD, value: lead.idLead },
+      { id: campos.TELEFONE, value: lead.telefone },
+    ],
+  };
+}
+
+/**
+ * Dedupe idempotente (D-P2-03): `false` se alguma Ligação da lista
+ * `ligacoesAbertas` (já filtrada para "abertas" pelo caller, via
+ * `listarTasks(..., { includeClosed: false })`) já referencia o lead — match
+ * por `idLeadFieldId` (field-id de `ID_LEAD` na Lista 02) === `lead.idLead`.
+ * `true` = pode criar. Puro e determinística.
+ */
+export function deveCriar(lead: LeadLote, ligacoesAbertas: TaskLike[], idLeadFieldId: string): boolean {
+  const jaTemLigacaoAberta = ligacoesAbertas.some((task) => {
+    const campo = task.custom_fields?.find((c) => c.id === idLeadFieldId);
+    return campo?.value !== undefined && campo?.value !== null && String(campo.value) === lead.idLead;
+  });
+  return !jaTemLigacaoAberta;
 }

@@ -15,7 +15,7 @@ import {
   AZURE_OPENAI_ENDPOINT,
   AZURE_OPENAI_DEPLOYMENT,
   AZURE_OPENAI_API_VERSION,
-} from './config';
+} from './config.ts';
 
 /**
  * Retorna o LanguageModel a usar pelos agentes, selecionado por LLM_PROVIDER.

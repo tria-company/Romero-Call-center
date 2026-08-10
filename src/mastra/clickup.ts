@@ -147,12 +147,19 @@ export async function lerTask(taskId: string): Promise<TaskClickUp | null> {
 
 /**
  * Cria uma task numa lista (D-05 — a lista ja existe, nao cria lista/campo).
- * `customFields` aceita `{ id, value }` — o caller deve resolver o id via
- * CAMPOS_LEADS/CAMPOS_LIGACOES (D-07).
+ * `custom_fields` aceita `{ id, value }` — o caller deve resolver o id via
+ * CAMPOS_LEADS/CAMPOS_LIGACOES (D-07). `description`/`assignees` sao campos
+ * nativos do ClickUp aceitos na criacao (Fase 2, D-P2-06 — script na
+ * descricao da task de Ligacoes + assignee do operador).
  */
 export async function criarTask(
   listId: string,
-  payload: { name: string; custom_fields?: Array<{ id: string; value: unknown }> },
+  payload: {
+    name: string;
+    description?: string;
+    assignees?: number[];
+    custom_fields?: Array<{ id: string; value: unknown }>;
+  },
 ): Promise<TaskClickUp | null> {
   // Token ausente e falha de infra/HTTP LANCAM (WR-03) — nunca retorna `null`
   // para mascarar erro de rede/HTTP.
