@@ -88,6 +88,9 @@ export interface TaskClickUp {
   description?: string;
   text_content?: string;
   assignees?: Array<{ id: number }>;
+  // Lista a que a task pertence — usado por `lerLigacao` para provar que a
+  // task lida por ID e realmente uma Ligacao da Lista 02 (CR-01, T-02-03-E).
+  list?: { id: string };
 }
 
 /** Item da fila de ligações do operador (ver `ItemFila` em lote.ts — módulo puro). */
@@ -290,11 +293,28 @@ export async function buscarFilaLigacoes(
  * O script é a DESCRIÇÃO nativa da task (D-06 revisado), com `text_content`
  * como fallback quando a API devolve o texto plano em vez da descrição rica.
  * Erro de infra/HTTP ou task inexistente PROPAGA (WR-03).
+ *
+ * `assigneeIdEsperado` (memberId do ClickUp do operador logado, resolvido
+ * via `assigneeDoOperador`) e OBRIGATORIO: sem ele, a rota de detalhe
+ * repassaria qualquer `taskId` direto pra API do ClickUp, permitindo que um
+ * operador autenticado lesse a Ligacao de outro operador ou qualquer task
+ * da workspace (Lista 01 LEADS inclusive, telefone sem mascara) — quebrando
+ * a garantia T-02-03-E (CR-01, IDOR/LGPD).
  */
-export async function lerLigacao(taskId: string): Promise<DetalheLigacao> {
+export async function lerLigacao(taskId: string, assigneeIdEsperado: string): Promise<DetalheLigacao> {
   const task = await lerTask(taskId);
   if (!task) {
     throw new Error(`[clickup] lerLigacao: task ${taskId} nao encontrada`);
+  }
+  // A task tem que ser uma Ligacao da Lista 02 (nao uma task de outra lista,
+  // ex.: Lista 01 LEADS, cujo field-id de TELEFONE colide com o da Lista 02).
+  if (task.list?.id !== CLICKUP_LIST_LIGACOES) {
+    throw new Error(`[clickup] lerLigacao: task ${taskId} nao e uma Ligacao da Lista 02`);
+  }
+  // E tem que estar atribuida ao operador logado — cada operador so pode ler
+  // a propria Ligacao (T-02-03-E), igual ao filtro server-side de /fila.
+  if (!task.assignees?.some((a) => String(a.id) === assigneeIdEsperado)) {
+    throw new Error(`[clickup] lerLigacao: task ${taskId} nao pertence ao operador`);
   }
   const [item] = mapearFilaLigacao([task], CAMPOS_LIGACOES);
   const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');

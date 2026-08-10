@@ -161,18 +161,38 @@ export const mastra = new Mastra({
       },
       {
         // Detalhe de uma Ligacao (script na descricao — LOTE-05, D-06 revisado).
+        // T-02-03-E/CR-01: precisa do MESMO isolamento por operador que a
+        // rota /fila — sem resolver o assignee aqui e passa-lo pra
+        // lerLigacao, qualquer operador autenticado poderia ler a Ligacao de
+        // outro (ou qualquer task da workspace) so trocando o taskId na URL.
         path: '/api/discador/ligacao/:taskId',
         method: 'GET',
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) {
+            // Sem mapeamento, o operador nao tem Ligacao nenhuma pra ver —
+            // mesmo 404 generico do caso "task nao e sua" (nao revela nada).
+            return c.json({ erro: 'Ligação não encontrada' }, 404);
+          }
           const taskId = c.req.param('taskId');
           try {
-            const ligacao = await lerLigacao(taskId);
+            const ligacao = await lerLigacao(taskId, assignee);
             return c.json({ ligacao });
           } catch (e) {
             console.error('[discador] erro ao ler ligacao:', e);
-            return c.json({ erro: 'Erro ao carregar a ligação' }, 502);
+            // Task inexistente, fora da Lista 02 ou de outro operador ->
+            // 404 identico (nao revela se a task existe, so que "nao e
+            // sua"). Erro de infra/rede do ClickUp continua 502.
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao carregar a ligação' }, 502);
           }
         },
       },
