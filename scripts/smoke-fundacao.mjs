@@ -4,18 +4,22 @@
 // Smoke da fundação do RomeroCall (Fase 01, Plano 01-04): prova a vertical
 // slice mais fina — ClickUp(read+write) + LLM(provider) — funcionando de
 // ponta a ponta contra os serviços REAIS. Fecha FUND-04 (read do seed),
-// FUND-03 (chamada real ao LLM) e FUND-02 (write real com read-back).
+// FUND-03 (chamada real ao LLM) e FUND-02 (create+update+read-back de task).
 //
 // Por que este script REPLICA a lógica de src/mastra/clickup.ts e
 // src/mastra/llm.ts em vez de importá-los: o Node (mesmo com strip nativo de
 // tipos TS) não resolve os imports extensionless usados em src/mastra
-// (ex: `from './config'`), e o projeto não tem `tsx` como devDependency
-// (ver package.json). `.mastra/output` (gerado por `npm run build`) é um
-// bundle de servidor opaco, sem exports individuais reaproveitáveis. Por
-// isso este smoke reimplementa a MESMA semântica de listarTasks / criarTask /
-// setCustomField / lerTask (clickup.ts) e chamarLLM (llm.ts), usando os
-// MESMOS nomes de env var e o MESMO field_id de CAMPOS_LIGACOES
-// (fonte da verdade: src/mastra/clickup.ts — D-07, sempre por ID).
+// (ex: `from './config'`), e o projeto não tem `tsx` como devDependency.
+// `.mastra/output` (gerado por `npm run build`) é um bundle de servidor opaco.
+// Por isso este smoke reimplementa a MESMA semântica de listarTasks /
+// criarTask / atualizarTask / lerTask (clickup.ts) e chamarLLM (llm.ts),
+// usando os MESMOS nomes de env var.
+//
+// WRITE via DESCRIÇÃO (campo nativo), não custom field: o plano do workspace
+// ClickUp bloqueia escrita de custom field (400 FIELD_033 "Custom field usages
+// exceeded for your plan"). A descrição/comentários são nativos e não entram
+// nessa cota — e casam com D-06 revisado (script/observações vão na descrição
+// da task). A prova de FUND-02 aqui é create + update(descrição) + read-back.
 //
 // Uso: node --env-file=.env scripts/smoke-fundacao.mjs
 // LGPD (D-10): nunca imprime nome/telefone/cpf de lead — só contagem/ids técnicos.
@@ -31,11 +35,6 @@ const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
 const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
-
-// field_id de "Observações extraídas" na Lista 02 LIGACOES — copiado de
-// CAMPOS_LIGACOES.OBSERVACOES_EXTRAIDAS em src/mastra/clickup.ts (D-07: campo
-// já existente, não criado por este plano — D-06 revisado).
-const CAMPO_OBSERVACOES_EXTRAIDAS = '6dbddd74-0df0-4e2b-9f50-5d1abf78cf0f';
 
 // Sai com mensagem clara e exit 1 se faltar env (D-09) — sem fazer nenhuma
 // request antes de validar as chaves.
@@ -76,14 +75,15 @@ async function criarTask(listId, payload) {
   return res.json();
 }
 
-/** Espelha setCustomField() de src/mastra/clickup.ts (D-07: sempre por field_id). */
-async function setCustomField(taskId, fieldId, value) {
-  const res = await fetch(`${CLICKUP_BASE_URL}/task/${taskId}/field/${fieldId}`, {
-    method: 'POST',
+/** Atualiza a DESCRIÇÃO da task (campo nativo — PUT /task/{id}). Não usa custom
+ *  field por causa do limite de plano (FIELD_033). */
+async function atualizarDescricao(taskId, descricao) {
+  const res = await fetch(`${CLICKUP_BASE_URL}/task/${taskId}`, {
+    method: 'PUT',
     headers: headersClickUp(),
-    body: JSON.stringify({ value }),
+    body: JSON.stringify({ description: descricao }),
   });
-  if (!res.ok) throw new Error(`POST /task/${taskId}/field/${fieldId} falhou (${res.status})`);
+  if (!res.ok) throw new Error(`PUT /task/${taskId} (description) falhou (${res.status})`);
   return true;
 }
 
@@ -111,11 +111,6 @@ async function chamarLLM(prompt) {
   return text;
 }
 
-function extrairValorCampo(task, fieldId) {
-  const campo = (task?.custom_fields || []).find((f) => f.id === fieldId);
-  return campo?.value ?? null;
-}
-
 async function checarRead() {
   console.log('\n[1/3] FUND-04 — leitura da Lista 01 LEADS...');
   const tasks = await listarTasks(CLICKUP_LIST_LEADS);
@@ -136,7 +131,7 @@ async function checarLLM() {
 }
 
 async function checarWrite() {
-  console.log('\n[3/3] FUND-02 — write + read-back na Lista 02 LIGACOES...');
+  console.log('\n[3/3] FUND-02 — create + update(descrição) + read-back na Lista 02 LIGACOES...');
   const valorEsperado = `smoke ${Date.now()}`;
   let taskId = null;
   try {
@@ -144,14 +139,15 @@ async function checarWrite() {
     taskId = task?.id;
     if (!taskId) throw new Error('criarTask não retornou id');
 
-    await setCustomField(taskId, CAMPO_OBSERVACOES_EXTRAIDAS, valorEsperado);
+    // WRITE na descrição (nativo; custom field bloqueado pelo plano — FIELD_033).
+    await atualizarDescricao(taskId, valorEsperado);
 
     const lida = await lerTask(taskId);
-    const valorLido = extrairValorCampo(lida, CAMPO_OBSERVACOES_EXTRAIDAS);
+    const valorLido = (lida?.description ?? '').trim();
     if (valorLido !== valorEsperado) {
       throw new Error(`read-back não bateu: esperado "${valorEsperado}", lido "${valorLido}"`);
     }
-    console.log(`  PASS — write confirmado por read-back (task ${taskId}).`);
+    console.log(`  PASS — write na descrição confirmado por read-back (task ${taskId}).`);
   } finally {
     if (taskId) {
       await deletarTask(taskId);
