@@ -122,3 +122,14 @@ if (!CLICKUP_API_TOKEN) {
 // IDs das listas ja existentes na workspace 9014971829 (D-04). Nao sao segredos.
 export const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
 export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
+
+// ===== Lote diario priorizado (LOTE-01, Fase 02 Plano 01) =====
+//
+// Parametros da selecao/priorizacao do lote do dia (src/mastra/lote.ts).
+// Claude's Discretion (D-P2-03): parametrizaveis via env, sem cron nesta fase.
+
+// Numero maximo de tentativas antes do lead sair da elegibilidade do lote.
+export const LOTE_LIMITE_TENTATIVAS = Number(process.env.LOTE_LIMITE_TENTATIVAS) || 5;
+
+// Tamanho padrao do lote diario (quantos leads entram na fila de hoje).
+export const LOTE_TAMANHO_DEFAULT = Number(process.env.LOTE_TAMANHO_DEFAULT) || 30;
