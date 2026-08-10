@@ -1,35 +1,24 @@
-// Configuracao central — SDR AUTON Health
+// Configuracao central — Discador Wavoip (AUTON Health)
+//
+// Enxuto: apenas o que o discador precisa — credenciais GHL (para listar os
+// leads qualificados do pipeline COMERCIAL USI) e o token do device Wavoip
+// (para o SDK do navegador abrir a ligacao via WebRTC).
 
-// Evolution API — DEPRECATED. Substituido por GoHighLevel (ver GHL_*).
-// Mantido apenas pra rollback rapido se precisar.
-export const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL || 'http://localhost:8080';
-export const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
-export const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE_NAME || 'sdr-auton';
-
-// GoHighLevel (canal WhatsApp via API oficial Meta).
-// PIT (Private Integration Token): Settings -> Integrations -> Private Integrations.
-// Scopes minimos: conversations.write, conversations/message.write, contacts.readonly.
+// GoHighLevel (GHL) — PIT (Private Integration Token). Scopes:
+// opportunities.readonly (lista de qualificados) + contacts.readonly e
+// contacts.write (nota de transcricao no contato). Usado por ghl.ts.
 export const GHL_PIT_TOKEN = process.env.GHL_PIT_TOKEN || '';
-// Versao da API GHL (LeadConnector). 2021-04-15 e a estavel default.
-export const GHL_API_VERSION = process.env.GHL_API_VERSION || '2021-04-15';
-// Tipo padrao de mensagem pra envio. Opcoes comuns: 'WhatsApp', 'SMS', 'Email', 'GMB', 'IG', 'FB'.
-export const GHL_DEFAULT_TYPE = process.env.GHL_DEFAULT_TYPE || 'WhatsApp';
 
-// =================== SDR AUTON — pipeline/calendario GHL (COMERCIAL USI) ===================
-// IDs descobertos via API oficial (ver .planning/notes/ghl-config-ids.md). Nao sao segredos.
-// Endpoints de opportunities/calendars usam Version 2021-07-28 (conversations usa 2021-04-15).
+// Version 2021-04-15 (contacts/notes) e 2021-07-28 (opportunities/contacts-search).
+export const GHL_API_VERSION = process.env.GHL_API_VERSION || '2021-04-15';
 export const GHL_API_VERSION_V2 = process.env.GHL_API_VERSION_V2 || '2021-07-28';
+
+// Location + pipeline COMERCIAL USI e o stage QUALIFICADO (fonte da lista do discador).
 export const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || 'zEFpdSK1pMIC9d8aY4Lm';
 export const GHL_PIPELINE_ID = process.env.GHL_PIPELINE_ID || 'uVLzqVXjBjI7sACn3vKL'; // COMERCIAL USI
-export const GHL_CALENDAR_ID = process.env.GHL_CALENDAR_ID || 'nZ8n9QSZttjChj1CLwjC'; // Call Comercial USI (45min, Sidney)
-// Closers do overflow de agendamento: Sidnei primeiro, Petriv quando Sidnei sem slot
-// (ver .planning/notes/ghl-config-ids.md, secao Closers). IDs GHL, nao sao segredos.
-export const GHL_CLOSER_SIDNEI = process.env.GHL_CLOSER_SIDNEI || 'IpN8uafQzHc3Rm6LVd3g';
-export const GHL_CLOSER_PETRIV = process.env.GHL_CLOSER_PETRIV || 'rR3bhyhsMMzVssbhzxAR';
 
-// Stages do pipeline COMERCIAL USI (chave logica -> id no GHL). O Qualificador e a
-// Camila movem o card via a tool move_pipeline_stage usando estas chaves.
-// Nota: no GHL o stage 'FORMULARIO_RESPONDIDO' esta grafado 'FOMULARIO' (typo da conta).
+// Stages do pipeline COMERCIAL USI (chave logica -> id no GHL). O discador so
+// usa QUALIFICADO, mas mantemos o mapa completo por clareza. IDs nao sao segredos.
 export const GHL_STAGES = {
   LEAD_NOVO: '6408b8ae-ed1a-4e8f-994a-7394d7d0cac7',
   CONTATO_REALIZADO: '89fcc487-6b0f-4ca8-860b-ebcefb2c4673',
@@ -45,291 +34,71 @@ export const GHL_STAGES = {
 } as const;
 export type GhlStage = keyof typeof GHL_STAGES;
 
-// Campo personalizado da OPORTUNIDADE (não do contato) que marca se a ligação
-// da Wavoip foi atendida — "Sim"/"Não" (dataType TEXT). id/key descobertos via
-// GET /locations/{id}/customFields?model=opportunity. Usado pelo webhook Wavoip
-// (/api/webhook/wavoip) via atualizarOportunidadeCall (ghl.ts).
-export const GHL_OPP_ATENDEU_FIELD_ID = process.env.GHL_OPP_ATENDEU_FIELD_ID || 'L1X1q7tb4WqdE024cF6z';
-export const GHL_OPP_ATENDEU_FIELD_KEY = process.env.GHL_OPP_ATENDEU_FIELD_KEY || 'opportunity.atendeu';
+// Device token da Wavoip pro SDK do NAVEGADOR (PWA discador). E exposto
+// client-side por design (o SDK `new Wavoip({tokens:[...]})` precisa dele pra
+// abrir a call via WebRTC). Configure WAVOIP_DEVICE_TOKEN no .env.
+export const WAVOIP_DEVICE_TOKEN = process.env.WAVOIP_DEVICE_TOKEN || '';
 
-// Guard anti-regressão do webhook Wavoip: NÃO rebaixa o card p/ CALL REALIZADA
-// se ele já está nesta ou numa stage à frente (CALL REALIZADA já registrada,
-// no-show, negociação, ganho, perdido). Só move p/ frente a partir de stages
-// anteriores (lead novo ... call agendada). Ver atualizarOportunidadeCall.
-export const GHL_STAGES_NAO_REBAIXAR_CALL = [
-  GHL_STAGES.CALL_REALIZADA,
-  GHL_STAGES.NO_SHOW,
-  GHL_STAGES.NEGOCIACAO,
-  GHL_STAGES.GANHO,
-  GHL_STAGES.PERDIDO,
-] as const;
-
-// OpenAI direto (deprecated — usar Azure abaixo). Mantido para rollback.
-export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-
-// Azure OpenAI — substitui OpenAI direto pra atender requisitos de compliance
-// (residencia de dados na regiao Azure). Endpoint base e
-// https://<AZURE_OPENAI_RESOURCE_NAME>.openai.azure.com.
-export const AZURE_OPENAI_RESOURCE_NAME = process.env.AZURE_OPENAI_RESOURCE_NAME || '';
-export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
-// Sufixo do host do recurso. Recursos "AI Services" unificados tambem resolvem
-// em cognitiveservices.azure.com, mas recursos Azure OpenAI puros (ex.:
-// auton-health) SO resolvem em openai.azure.com — ENOTFOUND no outro dominio.
-export const AZURE_OPENAI_HOST = process.env.AZURE_OPENAI_HOST || 'openai.azure.com';
-// Responses API (/openai/v1/responses) usada pelo @ai-sdk/azure v3 exige
-// 2024-10-01-preview ou mais novo. Versoes mais antigas (ex: 2024-08-01-preview)
-// retornam BadRequest "API version not supported".
-export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '2024-12-01-preview';
-export const AZURE_OPENAI_DEPLOYMENT_GPT41 = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41 || 'gpt-4.1';
-export const AZURE_OPENAI_DEPLOYMENT_GPT41_MINI = process.env.AZURE_OPENAI_DEPLOYMENT_GPT41_MINI || 'gpt-4.1-mini';
-// SDR AUTON — modelos dos agentes novos (Qualificador + Camila). Mesmo azure-client.ts
-// (azure.chat(...)), sem provider novo. Se o Azure recusar por api-version, subir
-// AZURE_OPENAI_API_VERSION no .env (o default atual e 2024-12-01-preview).
-export const AZURE_OPENAI_DEPLOYMENT_GPT51 = process.env.AZURE_OPENAI_DEPLOYMENT_GPT51 || 'gpt-5.1'; // Camila
-export const AZURE_OPENAI_DEPLOYMENT_GPT5_MINI = process.env.AZURE_OPENAI_DEPLOYMENT_GPT5_MINI || 'gpt-5-mini'; // Qualificador
-// Embedding: o recurso atual tem 'text-embedding-3-large' (3072 dim).
-// Atencao: se o pgvector ja foi populado com embeddings 1536d (small), trocar
-// para 3-large quebra os indices vetoriais — limpe a tabela antes ou recrie.
-export const AZURE_OPENAI_DEPLOYMENT_EMBEDDING = process.env.AZURE_OPENAI_DEPLOYMENT_EMBEDDING || 'text-embedding-3-large';
-// Transcricao: 'gpt-4o-transcribe-diarize' substitui Whisper no Azure moderno.
-// Mesmo endpoint /audio/transcriptions, deployment diferente.
-// whisper (transcricao simples, 1 locutor) — ideal pra nota de voz de WhatsApp.
-// O gpt-4o-transcribe-diarize alucinava "falantes" em audio de 1 pessoa so
-// (verificado 2026-07-14). Diarize fica reservado pra gravacao de call
-// (multi-locutor) se/quando for plugado via env separada.
-export const AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO = process.env.AZURE_OPENAI_DEPLOYMENT_TRANSCRICAO || 'whisper';
-
-// Identificador da campanha do lancamento — vai como utm_campaign no link
-export const CAMPANHA_NOME = process.env.CAMPANHA_NOME || 'lancamento';
-
-// Webhook do formulario 14q (SDR AUTON, /api/webhook/formulario) — CR-01.
-// A rota do Kiwify que validava ?token= foi removida do projeto (quick task
-// 260713-t0f); este e o token novo, escrito do zero seguindo o MESMO padrao
-// fail-closed acima: vem como ?token=xxx na URL (ou header x-webhook-token)
-// e precisa ser colado na URL do GHL Workflow (Automation -> Workflow do
-// formulario 14q -> acao de Webhook -> URL). Token vazio = endpoint
-// DESABILITADO (nenhum POST e aceito) — sem isso, qualquer POST anonimo
-// dispararia qualificacao + mutacao de CRM + mensagem proativa da Camila
-// pra um telefone arbitrario (ver 01-REVIEW.md CR-01).
-export const FORMULARIO_WEBHOOK_TOKEN = process.env.FORMULARIO_WEBHOOK_TOKEN || '';
-
-if (!FORMULARIO_WEBHOOK_TOKEN) {
+if (!WAVOIP_DEVICE_TOKEN) {
   console.warn(
-    '[config] FORMULARIO_WEBHOOK_TOKEN vazio: o webhook /api/webhook/formulario esta DESABILITADO ' +
-      '(fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo ' +
-      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como FORMULARIO_WEBHOOK_TOKEN " +
-      "e cole '?token=<esse-segredo>' na URL do GHL Workflow do formulario (stage 'Formulario respondido').",
+    '[config] WAVOIP_DEVICE_TOKEN vazio: o discador nao consegue abrir ligacoes ' +
+      '(o SDK do navegador precisa do token do device). Pegue o "Token" do device no ' +
+      'painel Wavoip e coloque no .env como WAVOIP_DEVICE_TOKEN.',
   );
 }
 
-// Gate de follow-up do formulario (/api/fup/pode-enviar) — MESMO padrao
-// fail-closed dos webhooks. O Workflow [04] do GHL (FUP do formulario) chama
-// este endpoint ANTES de enviar o lembrete/convite e so envia se a resposta
-// vier {enviar:true} (ver rota em index.ts + statusFormularioPorContato em
-// supabase.ts). Segredo dedicado via ?token=xxx na URL (ou header
-// x-webhook-token). Token vazio = endpoint DESABILITADO (401 em toda chamada).
-export const FUP_GATE_TOKEN = process.env.FUP_GATE_TOKEN || '';
+// ===== Transcricao da call (webhook Wavoip -> Deepgram -> nota no GHL) =====
 
-if (!FUP_GATE_TOKEN) {
-  console.warn(
-    '[config] FUP_GATE_TOKEN vazio: o endpoint /api/fup/pode-enviar esta DESABILITADO ' +
-      '(fail-closed) — toda chamada sera rejeitada com 401 ate o token ser configurado. Gere um segredo ' +
-      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como FUP_GATE_TOKEN " +
-      "e cole '?token=<esse-segredo>' na URL do Webhook do Workflow [04] do GHL (FUP do formulario).",
-  );
-}
-
-// Webhook de gravacao de call/ligacao (Fase 3, GRAV-01/GRAV-04,
-// /api/webhook/gravacao) — MESMO padrao fail-closed de
-// FORMULARIO_WEBHOOK_TOKEN acima: segredo dedicado, vem como ?token=xxx na
-// URL (ou header x-webhook-token) e precisa ser colado no Workflow GHL que
-// dispara ao concluir a gravacao de uma call/ligacao (Automation -> Workflow
-// -> acao Webhook). Token vazio = endpoint DESABILITADO (fail-closed) —
-// qualquer POST e rejeitado com 401 ANTES de qualquer download/transcricao/
-// persistencia (T-03-01).
-export const GRAVACAO_WEBHOOK_TOKEN = process.env.GRAVACAO_WEBHOOK_TOKEN || '';
-
-if (!GRAVACAO_WEBHOOK_TOKEN) {
-  console.warn(
-    '[config] GRAVACAO_WEBHOOK_TOKEN vazio: o webhook /api/webhook/gravacao esta DESABILITADO ' +
-      '(fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo ' +
-      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como GRAVACAO_WEBHOOK_TOKEN " +
-      "e cole '?token=<esse-segredo>' na URL do Workflow GHL que dispara ao concluir a gravacao " +
-      'de uma call/ligacao (Automation -> Workflow -> acao Webhook).',
-  );
-}
-
-// Webhook da WAVOIP (rastreador de ligacao -> /api/webhook/wavoip) — MESMO
-// padrao fail-closed dos demais. Segredo dedicado, vem como ?token=xxx na URL
-// (ou header x-webhook-token) e e colado no app Wavoip em
-// Integrations > Webhook. Token vazio = endpoint DESABILITADO (fail-closed):
-// todo POST e rejeitado com 401 ANTES de qualquer efeito (move de card,
-// download/transcricao/nota).
+// Token fail-closed do webhook Wavoip (/api/webhook/wavoip). Vem como ?token=xxx
+// na URL (ou header x-webhook-token) e e colado no app Wavoip em
+// Integrations > Webhook. Token vazio = webhook DESABILITADO (401 em todo POST).
 export const WAVOIP_WEBHOOK_TOKEN = process.env.WAVOIP_WEBHOOK_TOKEN || '';
 
 if (!WAVOIP_WEBHOOK_TOKEN) {
   console.warn(
-    '[config] WAVOIP_WEBHOOK_TOKEN vazio: o webhook /api/webhook/wavoip esta DESABILITADO ' +
-      '(fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo ' +
-      "aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como WAVOIP_WEBHOOK_TOKEN " +
-      "e cole '?token=<esse-segredo>' na URL configurada no app Wavoip (Integrations > Webhook).",
+    '[config] WAVOIP_WEBHOOK_TOKEN vazio: o webhook /api/webhook/wavoip (transcricao das calls) ' +
+      "esta DESABILITADO. Gere um segredo (ex: 'openssl rand -hex 24'), coloque no .env como " +
+      "WAVOIP_WEBHOOK_TOKEN e cole '?token=<segredo>' na URL do webhook no app Wavoip.",
   );
 }
 
-// Device token da Wavoip pro SDK do NAVEGADOR (PWA discador). E exposto
-// client-side por design (o SDK `new Wavoip({tokens:[...]})` precisa dele pra
-// abrir a call via WebRTC). Default = mesmo valor do webhook token: no painel
-// Wavoip o "Token" do device serve tanto pra configurar o webhook quanto pro SDK.
-export const WAVOIP_DEVICE_TOKEN = process.env.WAVOIP_DEVICE_TOKEN || WAVOIP_WEBHOOK_TOKEN || '';
+// Deepgram — transcricao da gravacao da call (a partir da record_url do evento
+// RECORD). A API pre-recorded aceita a URL direto (nao baixamos o audio).
+export const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || '';
+export const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';
+export const DEEPGRAM_LANGUAGE = process.env.DEEPGRAM_LANGUAGE || 'pt';
 
-// Allowlist de hosts pra baixar recordingUrl (anti-SSRF, T-03-02) — so URLs
-// https com host presente nesta lista (ou na familia de dominios do proprio
-// GHL, ver ehHostDominioGhl em ghl.ts) sao baixadas por baixarGravacaoBase64;
-// qualquer outro host (inclusive IP direto, localhost, hosts internos) e
-// recusado antes do fetch.
+if (!DEEPGRAM_API_KEY) {
+  console.warn(
+    '[config] DEEPGRAM_API_KEY vazio: a transcricao das calls esta DESABILITADA ' +
+      '(o webhook Wavoip ainda registra a correlacao, mas nao transcreve). ' +
+      'Coloque sua key da Deepgram no .env como DEEPGRAM_API_KEY.',
+  );
+}
+
+// ===== Provider de IA (LLM) — abstracao plugavel para os 3 agentes =====
 //
-// CR-03: o default e RESTRITO a hosts especificos do GHL/LeadConnector. NAO
-// ha mais wildcard *.amazonaws.com (cobria endpoints de computacao
-// controlaveis por atacante — API Gateway/ELB — que, combinados com o retry
-// Bearer PIT, permitiam exfiltrar o PIT token) nem storage.googleapis.com
-// (host multi-tenant: qualquer bucket GCS de terceiro passava).
-//
-// GRAVACAO_HOSTS_PERMITIDOS (env, lista separada por virgula) e o OVERRIDE
-// EXPLICITO do operador: se a URL real de gravacao vier de um bucket
-// S3/GCS especifico, adicione o HOST EXATO (ex:
-// 'meu-bucket.s3.sa-east-1.amazonaws.com' ou 'storage.googleapis.com') —
-// ciente de que hosts de object storage sao multi-tenant (o allowlist
-// restringe INFRAESTRUTURA, nao PROPRIEDADE do bucket) e de que o retry com
-// Bearer PIT continua bloqueado pra hosts fora do dominio GHL de qualquer
-// forma (ghl.ts, CR-03).
-//
-// WAVOIP: a gravacao da call vem de um host de storage da Wavoip (record_url do
-// evento RECORD). Descubra o host EXATO da primeira record_url real e adicione
-// em GRAVACAO_HOSTS_PERMITIDOS no .env — sem isso, baixarGravacaoBase64 recusa o
-// download (fail-closed) e a transcricao da call Wavoip nao acontece.
-export const GRAVACAO_HOSTS_PERMITIDOS = (
-  process.env.GRAVACAO_HOSTS_PERMITIDOS ||
-  // storage.wavoip.com = host das gravacoes da Wavoip (record_url do evento
-  // RECORD), confirmado ao vivo no 1o teste real de call via discador Wavoip.
-  'services.leadconnectorhq.com,msg.leadconnectorhq.com,storage.wavoip.com'
-)
-  .split(',')
-  .map((h) => h.trim().toLowerCase())
-  .filter(Boolean);
+// LLM_PROVIDER escolhe entre OpenAI direto (default, D-08a) e Azure OpenAI
+// (D-08b, quando houver chaves). Ver src/mastra/llm.ts para a selecao do
+// modelo. Um provider unico para os 3 agentes (Contexto/Script/Analise).
 
-// Webhook de MENSAGENS do WhatsApp (/api/webhook/evolution) — CR-02 (4a
-// rodada, 04-REVIEW.md): MESMO padrao fail-closed dos tokens acima. Segredo
-// dedicado, vem como ?token=xxx na URL (ou header x-webhook-token). Token
-// vazio = endpoint DESABILITADO (fail-closed) — qualquer POST e rejeitado
-// com 401 ANTES de qualquer parse/dedup/sessao/buffer.
-//
-// USER SETUP: a URL deste webhook e configurada na ORIGEM das mensagens de
-// WhatsApp. Hoje a origem e o GHL Workflow de mensagens (a rota mantem o
-// path legado /api/webhook/evolution pra nao reconfigurar o Workflow) —
-// edite a acao de Webhook do Workflow e cole '?token=<segredo>' no fim da
-// URL. Se a Evolution API voltar a ser usada como canal (rollback), o mesmo
-// token vai na URL do webhook global configurado na instancia da Evolution.
-export const EVOLUTION_WEBHOOK_TOKEN = process.env.EVOLUTION_WEBHOOK_TOKEN || '';
+export const LLM_PROVIDER = process.env.LLM_PROVIDER || 'openai';
 
-if (!EVOLUTION_WEBHOOK_TOKEN) {
+// OpenAI direto (D-08a) — usado enquanto LLM_PROVIDER=openai (default).
+export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
+
+if (!OPENAI_API_KEY) {
   console.warn(
-    '[config] EVOLUTION_WEBHOOK_TOKEN vazio: o webhook /api/webhook/evolution (mensagens WhatsApp) esta ' +
-      'DESABILITADO (fail-closed) — todo POST sera rejeitado com 401 ate o token ser configurado. Gere um ' +
-      "segredo aleatorio (ex: 'openssl rand -hex 24'), coloque no .env do deploy como EVOLUTION_WEBHOOK_TOKEN " +
-      "e cole '?token=<esse-segredo>' na URL do webhook de mensagens configurada na origem (GHL Workflow de " +
-      'mensagens; ou na instancia da Evolution API, se ela voltar a ser o canal).',
+    '[config] OPENAI_API_KEY vazio: chamarLLM() nao consegue chamar a IA ' +
+      '(nenhuma request e feita sem a chave — D-09). Coloque sua key no .env ' +
+      'como OPENAI_API_KEY.',
   );
 }
 
-// Token admin de /api/desbloquear — CR-03 (4a rodada, 04-REVIEW.md).
-// /api/desbloquear desfaz a pausa DURAVEL de crise (limpa bloqueado_ate E
-// volta a conversa aguardando_humano pra em_atendimento) — um endpoint que
-// desmonta uma escalacao de seguranca (CVV-188) nao pode ser anonimo.
-// MESMO padrao fail-closed: vem como ?token=xxx na URL (ou header
-// x-admin-token). Token vazio = endpoint DESABILITADO (401 pra todo POST).
-export const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || '';
-
-// Tag no contato do GHL que PAUSA a IA: enquanto estiver presente no contato, a
-// Camila nao responde mensagens nem abre proativamente (handoff humano por tag).
-// Removida a tag, a IA volta a operar. Fonte da verdade = tags do contato no GHL.
-export const TAG_PAUSAR_AGENTE = (process.env.TAG_PAUSAR_AGENTE || 'pausar-agente').trim().toLowerCase();
-
-// Interruptor global da Camila (agente conversacional). CAMILA_ATIVA=false
-// desativa a Camila TEMPORARIAMENTE: sem abertura proativa no lead QUALIFICADO
-// e sem responder mensagens (leads em estado 'camila' ficam em silencio, humano
-// atende). A QUALIFICACAO segue 100% funcional — o Qualificador continua
-// pontuando BANT, gravando bant_*/ancora/spin_stage e movendo o card. Default: ativa.
-export const CAMILA_ATIVA = (process.env.CAMILA_ATIVA || 'true').trim().toLowerCase() !== 'false';
-
-// Interruptor dos SCHEDULERS automaticos (rodam em background, independentes da
-// Camila conversacional). SCHEDULERS_ATIVOS=false NAO liga nenhum deles no boot:
-// lembretes de call (D-1/H-1/5min), recuperacao de no-show, resgate 48h,
-// follow-up/buffer-recovery e cleanup. Use junto com CAMILA_ATIVA=false pra
-// silencio TOTAL de saida (a qualificacao/CRM segue, sem mandar nada pro lead).
-// Default: ativos.
-export const SCHEDULERS_ATIVOS = (process.env.SCHEDULERS_ATIVOS || 'true').trim().toLowerCase() !== 'false';
-
-if (!ADMIN_API_TOKEN) {
-  console.warn(
-    '[config] ADMIN_API_TOKEN vazio: o endpoint /api/desbloquear esta DESABILITADO (fail-closed) — ' +
-      'todo POST sera rejeitado com 401 ate o token ser configurado. Gere um segredo aleatorio ' +
-      "(ex: 'openssl rand -hex 24'), coloque no .env do deploy como ADMIN_API_TOKEN e use " +
-      "'?token=<esse-segredo>' (ou header x-admin-token) ao chamar o endpoint.",
-  );
-}
-
-// Allowlist do comando de reset de teste (#55555) — CR-02 (4a rodada).
-// resetarConversaTeste DESTROI dados do lead (mensagens, conversas, memoria
-// Mastra) e derruba o bloqueio de crise — nao pode ser acionavel por
-// conteudo de mensagem de um numero arbitrario. Lista separada por virgula
-// de telefones de TESTE (somente digitos, ex: '5511999999999'). Vazia =
-// comando DESABILITADO pra todo mundo (fail-closed).
-export const RESET_TELEFONES_PERMITIDOS = (process.env.RESET_TELEFONES_PERMITIDOS || '')
-  .split(',')
-  .map((t) => t.trim().replace(/[^\d]/g, ''))
-  .filter(Boolean);
-
-if (RESET_TELEFONES_PERMITIDOS.length === 0) {
-  console.warn(
-    '[config] RESET_TELEFONES_PERMITIDOS vazio: o comando de reset de teste (#55555) esta DESABILITADO ' +
-      '(fail-closed) para todos os numeros. Configure uma lista separada por virgula com os telefones de ' +
-      'teste autorizados (somente digitos) para reativa-lo.',
-  );
-}
-
-// Telefone 1:1 (E.164, ex: '5511999999999') do responsavel de plantao que
-// recebe o aviso quando a IA escala pra humano (inclusive sofrimento agudo
-// / CVV 188). EXIGENCIA: precisa ser um telefone 1:1 valido — a API oficial
-// do GHL NAO entrega mensagem pra grupo de WhatsApp (constraint documentada
-// no CLAUDE.md do projeto). NAO usar JID de grupo (formato '<id>@g.us',
-// herdado da Evolution) nem '@broadcast' aqui: o aviso seria apenas logado
-// (ver notificacoes.ts, enviarAvisoAoSuporte), nunca entregue de fato.
-// Vazio = notificacao 1:1 desabilitada; a escalacao ainda garante sinal
-// humano-visivel via task URGENTE + move RETORNAR_CONTATO (ver Gap 7/CR-07
-// em escalate-to-human.ts) — mas o aviso direto ao plantonista nao ocorre.
-export const SUPORTE_GRUPO_JID = process.env.SUPORTE_GRUPO_JID || '';
-
-if (!SUPORTE_GRUPO_JID) {
-  console.warn(
-    '[config] SUPORTE_GRUPO_JID vazio: a notificacao 1:1 do grupo de suporte esta DESABILITADA. ' +
-      'Em escalacoes (inclusive sofrimento agudo/CVV 188), o unico sinal humano-visivel sera a ' +
-      'task URGENTE + move de card pra RETORNAR_CONTATO (escalate-to-human.ts). Configure um ' +
-      'telefone 1:1 (E.164) do responsavel de plantao pra tambem receber o aviso direto.',
-  );
-} else if (SUPORTE_GRUPO_JID.includes('@g.us') || SUPORTE_GRUPO_JID.includes('@broadcast')) {
-  console.warn(
-    `[config] SUPORTE_GRUPO_JID="${SUPORTE_GRUPO_JID}" parece ser um JID de GRUPO do WhatsApp. ` +
-      'O GHL (API oficial) NAO entrega mensagens pra grupos WhatsApp — esse aviso sera apenas ' +
-      'logado, nunca chega no plantonista. Troque SUPORTE_GRUPO_JID pra um telefone 1:1 (E.164), ' +
-      'sem "@g.us"/"@broadcast".',
-  );
-}
-
-// Tempos
-export const JANELA_CONVERSA_FLUIDA = 2 * 60 * 60 * 1000; // 2h
-export const DURACAO_BLOQUEIO = 1 * 24 * 60 * 60 * 1000;  // 1 dia
-
-// Dashboard de metricas (Basic Auth em /api/dashboard).
-// Se ambos vazios, dashboard responde 503 (nao habilitado) — seguro por default.
-export const DASHBOARD_USER = process.env.DASHBOARD_USER || '';
-export const DASHBOARD_PASS = process.env.DASHBOARD_PASS || '';
+// Azure OpenAI (D-08b) — caminho futuro, so usado quando LLM_PROVIDER=azure.
+// Sem warn-if-empty: Azure nao e o caminho atual, so falha quando selecionado.
+export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
+export const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || '';
+export const AZURE_OPENAI_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-5.1';
+export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '';
