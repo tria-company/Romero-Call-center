@@ -96,41 +96,53 @@ export async function listarTasks(
   listId: string,
   opts: { page?: number; includeClosed?: boolean } = {},
 ): Promise<{ tasks: TaskClickUp[]; lastPage: boolean }> {
-  if (!CLICKUP_API_TOKEN) return { tasks: [], lastPage: true };
+  // Token ausente e falha de infra/HTTP LANCAM (WR-03): o caller decide
+  // retry/abort. Retorno vazio fica reservado a respostas 2xx genuinamente
+  // vazias — nunca colapsa erro no mesmo shape de sucesso (o loop diario
+  // precisa DETECTAR a falha, nao produzir um lote vazio silencioso).
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para listar tasks');
+  }
   const params = new URLSearchParams({
     page: String(opts.page ?? 0),
     include_closed: String(opts.includeClosed ?? true),
   });
+  let res: Response;
   try {
-    const res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task?${params.toString()}`, {
+    res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task?${params.toString()}`, {
       headers: headers(),
     });
-    if (!res.ok) {
-      console.error(`[clickup] GET /list/${listId}/task falhou (${res.status})`);
-      return { tasks: [], lastPage: true };
-    }
-    const data = await res.json();
-    return { tasks: data?.tasks || [], lastPage: Boolean(data?.last_page) };
   } catch (e) {
-    console.error(`[clickup] erro ao listar tasks da lista ${listId}:`, e);
-    return { tasks: [], lastPage: true };
+    throw new Error(
+      `[clickup] falha de rede ao listar tasks da lista ${listId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /list/${listId}/task falhou (${res.status})`);
+  }
+  const data = await res.json();
+  return { tasks: data?.tasks || [], lastPage: Boolean(data?.last_page) };
 }
 
 /** Le uma task por ID (com custom_fields). */
 export async function lerTask(taskId: string): Promise<TaskClickUp | null> {
-  if (!CLICKUP_API_TOKEN) return null;
-  try {
-    const res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}`, { headers: headers() });
-    if (!res.ok) {
-      console.error(`[clickup] GET /task/${taskId} falhou (${res.status})`);
-      return null;
-    }
-    return await res.json();
-  } catch (e) {
-    console.error(`[clickup] erro ao ler task ${taskId}:`, e);
-    return null;
+  // Token ausente e falha de infra/HTTP LANCAM (WR-03) — `null` fica reservado
+  // a caminhos de sucesso, nunca a mascarar erro de rede/HTTP.
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para ler task');
   }
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}`, { headers: headers() });
+  } catch (e) {
+    throw new Error(
+      `[clickup] falha de rede ao ler task ${taskId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /task/${taskId} falhou (${res.status})`);
+  }
+  return await res.json();
 }
 
 /**
@@ -142,22 +154,27 @@ export async function criarTask(
   listId: string,
   payload: { name: string; custom_fields?: Array<{ id: string; value: unknown }> },
 ): Promise<TaskClickUp | null> {
-  if (!CLICKUP_API_TOKEN) return null;
+  // Token ausente e falha de infra/HTTP LANCAM (WR-03) — nunca retorna `null`
+  // para mascarar erro de rede/HTTP.
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para criar task');
+  }
+  let res: Response;
   try {
-    const res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task`, {
+    res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task`, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      console.error(`[clickup] POST /list/${listId}/task falhou (${res.status})`);
-      return null;
-    }
-    return await res.json();
   } catch (e) {
-    console.error(`[clickup] erro ao criar task na lista ${listId}:`, e);
-    return null;
+    throw new Error(
+      `[clickup] falha de rede ao criar task na lista ${listId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
+  if (!res.ok) {
+    throw new Error(`[clickup] POST /list/${listId}/task falhou (${res.status})`);
+  }
+  return await res.json();
 }
 
 /** Atualiza campos "nativos" da task (name, status, etc — nao custom fields). */
@@ -165,22 +182,27 @@ export async function atualizarTask(
   taskId: string,
   patch: Record<string, unknown>,
 ): Promise<TaskClickUp | null> {
-  if (!CLICKUP_API_TOKEN) return null;
+  // Token ausente e falha de infra/HTTP LANCAM (WR-03) — nunca retorna `null`
+  // para mascarar erro de rede/HTTP.
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para atualizar task');
+  }
+  let res: Response;
   try {
-    const res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}`, {
+    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}`, {
       method: 'PUT',
       headers: headers(),
       body: JSON.stringify(patch),
     });
-    if (!res.ok) {
-      console.error(`[clickup] PUT /task/${taskId} falhou (${res.status})`);
-      return null;
-    }
-    return await res.json();
   } catch (e) {
-    console.error(`[clickup] erro ao atualizar task ${taskId}:`, e);
-    return null;
+    throw new Error(
+      `[clickup] falha de rede ao atualizar task ${taskId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
+  if (!res.ok) {
+    throw new Error(`[clickup] PUT /task/${taskId} falhou (${res.status})`);
+  }
+  return await res.json();
 }
 
 /**
@@ -188,26 +210,30 @@ export async function atualizarTask(
  * nome). `fieldId` deve vir de CAMPOS_LEADS/CAMPOS_LIGACOES.
  */
 export async function setCustomField(taskId: string, fieldId: string, value: unknown): Promise<boolean> {
-  if (!CLICKUP_API_TOKEN) return false;
-  if (!fieldId) {
-    console.error(`[clickup] setCustomField chamado sem fieldId para a task ${taskId}`);
-    return false;
+  // Token/fieldId ausentes e falha de infra/HTTP LANCAM (WR-03) — `false` fica
+  // reservado a caminhos legitimos, nunca a mascarar erro de rede/HTTP.
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para setar custom field');
   }
+  if (!fieldId) {
+    throw new Error(`[clickup] setCustomField chamado sem fieldId para a task ${taskId}`);
+  }
+  let res: Response;
   try {
-    const res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}/field/${fieldId}`, {
+    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}/field/${fieldId}`, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({ value }),
     });
-    if (!res.ok) {
-      console.error(`[clickup] POST /task/${taskId}/field/${fieldId} falhou (${res.status})`);
-      return false;
-    }
-    return true;
   } catch (e) {
-    console.error(`[clickup] erro ao setar custom field ${fieldId} na task ${taskId}:`, e);
-    return false;
+    throw new Error(
+      `[clickup] falha de rede ao setar custom field ${fieldId} na task ${taskId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
+  if (!res.ok) {
+    throw new Error(`[clickup] POST /task/${taskId}/field/${fieldId} falhou (${res.status})`);
+  }
+  return true;
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
