@@ -27,6 +27,11 @@ export function modeloLLM(): LanguageModel {
       apiKey: AZURE_OPENAI_API_KEY,
       baseURL: AZURE_OPENAI_ENDPOINT || undefined,
       apiVersion: AZURE_OPENAI_API_VERSION || undefined,
+      // Usa o formato classico /deployments/{deploymentId}?api-version=... —
+      // casa com AZURE_OPENAI_DEPLOYMENT (nome do deployment). Sem esta flag,
+      // @ai-sdk/azure@4 monta URLs no esquema novo /v1{path} tratando o
+      // argumento como model id, o que quebra o caminho Azure (WR-01).
+      useDeploymentBasedUrls: true,
     });
     return azure(AZURE_OPENAI_DEPLOYMENT);
   }
