@@ -9,8 +9,8 @@
 // lista/campo, so le/escreve. Escrita de custom field e SEMPRE por field_id
 // (nunca por nome — D-07), usando os mapas CAMPOS_LEADS/CAMPOS_LIGACOES abaixo.
 
-import { CLICKUP_API_TOKEN, CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES } from './config';
-import { fetchTimeout } from './http';
+import { CLICKUP_API_TOKEN, CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES } from './config.ts';
+import { fetchTimeout } from './http.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
 
