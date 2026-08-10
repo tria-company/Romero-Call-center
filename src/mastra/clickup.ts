@@ -270,6 +270,34 @@ export async function setCustomField(taskId: string, fieldId: string, value: unk
 }
 
 /**
+ * Lista os nomes dos statuses reais de uma lista (D-P3-07 — nunca adivinhar
+ * status no código: `scripts/descobrir-status-ligacoes.mjs` usa esta função
+ * pra descobrir os statuses da Lista 02 antes de fixar
+ * OPER_STATUS_EM_PROCESSAMENTO no .env). Thin wrapper sobre `GET /list/:id`.
+ * Token ausente e falha de infra/HTTP LANÇAM (WR-03) — nunca retorna array
+ * vazio pra mascarar erro.
+ */
+export async function listarStatusLista(listId: string): Promise<string[]> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para listar statuses da lista');
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}`, { headers: headers() });
+  } catch (e) {
+    throw new Error(
+      `[clickup] falha de rede ao ler a lista ${listId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /list/${listId} falhou (${res.status})`);
+  }
+  const data = await res.json();
+  const statuses: Array<{ status?: string }> = data?.statuses || [];
+  return statuses.map((s) => String(s?.status || '')).filter(Boolean);
+}
+
+/**
  * Busca a fila de Ligações (Lista 02) do operador logado (LOTE-04 — o
  * discador substitui o GHL QUALIFICADO por esta fila). Filtra por assignee
  * no SERVIDOR (T-02-03-E — cada operador só vê a própria fila) e só tasks

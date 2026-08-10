@@ -133,3 +133,22 @@ export const LOTE_LIMITE_TENTATIVAS = Number(process.env.LOTE_LIMITE_TENTATIVAS)
 
 // Tamanho padrao do lote diario (quantos leads entram na fila de hoje).
 export const LOTE_TAMANHO_DEFAULT = Number(process.env.LOTE_TAMANHO_DEFAULT) || 30;
+
+// ===== Operação — status intermediário da Ligação (OPER-02, Fase 03 Plano 01) =====
+//
+// Nome EXATO (status nativo da Lista 02 LIGACOES) usado por `iniciarLigacao`
+// (clickup.ts) para mover a task pra "em processamento" ao tocar Ligar
+// (D-P3-07), e por `buscarFilaLigacoes` para excluir essa task da fila
+// enquanto ela está sendo processada. Default vazio de proposito — o valor
+// real so pode vir do output de `scripts/descobrir-status-ligacoes.mjs`
+// (os statuses da Lista 02 sao descobertos, nunca adivinhados no codigo).
+export const OPER_STATUS_EM_PROCESSAMENTO = process.env.OPER_STATUS_EM_PROCESSAMENTO || '';
+
+if (!OPER_STATUS_EM_PROCESSAMENTO) {
+  console.warn(
+    '[config] OPER_STATUS_EM_PROCESSAMENTO vazio: tocar Ligar nao vai mover a task pra ' +
+      '"em processamento" nem tira-la da fila (D-P3-07). Rode ' +
+      'scripts/descobrir-status-ligacoes.mjs pra descobrir o nome exato do status na Lista 02 ' +
+      'e configure no .env.',
+  );
+}
