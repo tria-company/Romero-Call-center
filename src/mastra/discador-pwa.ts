@@ -20,9 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v6 -> discador-v7): invalida o app.js antigo (fila
-// GHL/lista rolável) nos dispositivos já instalados como PWA (D-P2-07).
-export const DISCADOR_SW_JS = `const CACHE='discador-v7';
+// CACHE bump (discador-v7 -> discador-v8): invalida o app.js antigo (sem o
+// report de "task ativa" ao Ligar) nos dispositivos já instalados como PWA
+// (Fase 03 Plano 01, D-P3-01).
+export const DISCADOR_SW_JS = `const CACHE='discador-v8';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -202,6 +203,12 @@ export const DISCADOR_APP_JS = `(function(){
     var opts={headers:{}};var t=getToken();if(t){opts.headers['Authorization']='Bearer '+t;}
     return fetch(path,opts).then(function(res){if(res.status===401){setToken('');show('login');throw new Error('401');}return res;});
   }
+  // POST autenticado (D-P3-01) — mesmo tratamento de token/401 de api().
+  function apiPost(path,body){
+    var t=getToken();var opts={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})};
+    if(t){opts.headers['Authorization']='Bearer '+t;}
+    return fetch(path,opts).then(function(res){if(res.status===401){setToken('');show('login');throw new Error('401');}return res;});
+  }
   function doLogin(){
     var u=$('u').value.trim(), p=$('p').value;$('login-err').textContent='';
     fetch('/api/discador/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,senha:p})})
@@ -284,6 +291,11 @@ export const DISCADOR_APP_JS = `(function(){
   }
   function iniciarLigacao(lead){
     openCall(lead,'Pedindo microfone...');
+    // D-P3-01: reporta a task ativa ao backend (grava INICIO+OPERADOR e move
+    // pra "em processamento" — D-P3-02/07) best-effort — nunca bloqueia a
+    // discagem se o backend falhar (mesmo tom de degradacao graciosa do
+    // resto do app).
+    apiPost('/api/discador/ligando',{taskId:lead.taskId}).catch(function(){});
     // iOS: o prompt de microfone SO aparece se getUserMedia rodar DENTRO do
     // gesto do toque, antes de qualquer await. Pedimos aqui pra conceder a
     // permissao; o SDK depois adquire o proprio stream (sem novo prompt).
