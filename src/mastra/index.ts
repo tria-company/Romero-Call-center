@@ -4,7 +4,16 @@ import { PinoLogger } from '@mastra/loggers';
 // Config: token do device Wavoip (SDK do navegador) + credenciais GHL +
 // token do webhook Wavoip (transcricao das calls) + limiar de aderencia do
 // Agente Analise (D-P3-10, Fase 03 Plano 03).
-import { WAVOIP_DEVICE_TOKEN, WAVOIP_WEBHOOK_TOKEN, ANALISE_ADERENCIA_MINIMA } from './config';
+// OPER_RETORNO_NAO_ATENDEU_DIAS/OPER_RETORNO_DEFAULT_DIAS: regra fixa de
+// PROXIMO_CONTATO quando a ligacao nao trouxe DATA_RETORNO explicito
+// (D-P3-14, Agente Contexto — Fase 03 Plano 04).
+import {
+  WAVOIP_DEVICE_TOKEN,
+  WAVOIP_WEBHOOK_TOKEN,
+  ANALISE_ADERENCIA_MINIMA,
+  OPER_RETORNO_NAO_ATENDEU_DIAS,
+  OPER_RETORNO_DEFAULT_DIAS,
+} from './config';
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
 import { verificarCredenciais, emitirToken, verificarToken, tokenDoHeader } from './discador-auth';
@@ -23,6 +32,9 @@ import { buscarQualificados } from './ghl';
 // Analise (D-P3-08/09/10/11, Fase 03 Plano 03) pra ler o script (descricao da
 // task) e gravar ADERENCIA_SCRIPT/NECESSITA_REVISAO/RETORNO_NECESSARIO/
 // DATA_RETORNO/ANALISE_IA/OBSERVACOES_EXTRAIDAS por field-id (D-07).
+// resolverLeadDaLigacao + consolidarLead + fecharLigacao + CAMPOS_LEADS
+// fecham o loop (OPER-05, D-P3-06/12/13/14, Fase 03 Plano 04): resolvem o
+// lead da Ligacao, escrevem a consolidacao na Lista 01 e fecham a task.
 import {
   buscarFilaLigacoes,
   lerLigacao,
@@ -34,6 +46,10 @@ import {
   lerTask,
   setCustomField,
   CAMPOS_LIGACOES,
+  CAMPOS_LEADS,
+  resolverLeadDaLigacao,
+  consolidarLead,
+  fecharLigacao,
 } from './clickup';
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
@@ -57,8 +73,15 @@ import {
   extrairRetorno,
 } from './analise';
 
+// montarPromptContexto/proximoContato/derivarContadores sao o Agente
+// Contexto (OPER-05, D-P3-12/13/14, Fase 03 Plano 04) — modulo puro que
+// monta o prompt de consolidacao do lead e calcula PROXIMO_CONTATO +
+// contadores; tambem nunca chama o LLM diretamente.
+import { montarPromptContexto, proximoContato, derivarContadores } from './contexto';
+
 // chamarLLM(prompt, system) — chamada do provider de IA ativo (D-08), usada
-// pelo passo do Agente Analise (Fase 03 Plano 03).
+// pelos passos do Agente Analise (Fase 03 Plano 03) e do Agente Contexto
+// (Fase 03 Plano 04).
 import { chamarLLM } from './llm';
 
 // Assets estaticos do PWA discador (HTML/JS/manifest/SW/icon).
@@ -114,6 +137,112 @@ function telefoneDoEventoCall(payload: Record<string, any>): string {
     ? String(payload.caller || '')
     : String(payload.receiver || payload.caller || '');
   return raw.replace(/[^\d]/g, '');
+}
+
+// ===== Agente Contexto — consolidacao do lead + fechamento da Ligacao =====
+// (OPER-05, D-P3-06/12/13/14/15, Fase 03 Plano 04 — fecha o loop diario)
+
+/** Le os valores atuais do lead (Lista 01) que `derivarContadores`/`consolidarLead` precisam. Defaults seguros quando o campo ainda nao tem valor (primeira ligacao do lead). */
+function valoresAtuaisDoLead(lead: Awaited<ReturnType<typeof lerTask>>): {
+  observacaoAtual: string;
+  tentativasAtuais: number;
+  atendimentosAtuais: number;
+  naoAtendimentosAtuais: number;
+} {
+  const campo = (id: string) => lead?.custom_fields?.find((c) => c.id === id)?.value;
+  const numero = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  return {
+    observacaoAtual: String(campo(CAMPOS_LEADS.OBSERVACAO_CONSOLIDADA) ?? ''),
+    tentativasAtuais: numero(campo(CAMPOS_LEADS.QTD_TENTATIVAS)),
+    atendimentosAtuais: numero(campo(CAMPOS_LEADS.QTD_ATENDIMENTOS)),
+    naoAtendimentosAtuais: numero(campo(CAMPOS_LEADS.QTD_NAO_ATENDIMENTOS)),
+  };
+}
+
+/**
+ * Consolida o resultado da ligacao no lead (Lista 01) e fecha a task de
+ * Ligacao (Lista 02) — usado nos DOIS caminhos do webhook (atendida, apos o
+ * Agente Analise; nao-atendida, sem transcricao/LLM de analise). Resolve o
+ * lead via `resolverLeadDaLigacao` (LEAD_REL, fallback telefone); le os
+ * valores atuais do lead; chama o Agente Contexto (`montarPromptContexto` +
+ * `chamarLLM`) pra reescrever o resumo vivo (D-P3-13) — falha do LLM loga e
+ * MANTEM a observacao anterior (nao trava a consolidacao dos contadores/
+ * proximo contato); calcula `proximoContato` (D-P3-14) e `derivarContadores`;
+ * grava tudo via `consolidarLead`. Fecha a Ligacao (`fecharLigacao`, D-P3-06)
+ * SEMPRE ao final, mesmo se a consolidacao do lead falhar (a task nao pode
+ * ficar aberta pra sempre so por causa de uma falha isolada de escrita no
+ * lead — cada passo loga-e-segue, WR-03/D-P3-08). Nenhuma PII em log — so
+ * ids/flags.
+ */
+async function consolidarEFecharLigacao(
+  taskLigacaoId: string,
+  opts: {
+    atendeu: boolean;
+    resumoAnalise: string;
+    aderencia: number | null;
+    retorno: { necessario: boolean; data: Date | null };
+  },
+): Promise<void> {
+  try {
+    const leadTaskId = await resolverLeadDaLigacao(taskLigacaoId);
+    if (!leadTaskId) {
+      console.warn(`[wavoip] consolidacao: lead nao resolvido a partir da Ligacao ${taskLigacaoId} — pulando consolidarLead`);
+    } else {
+      const lead = await lerTask(leadTaskId);
+      const atuais = valoresAtuaisDoLead(lead);
+      const hoje = new Date();
+
+      // D-P3-13: reescreve o resumo vivo. Falha do LLM (indisponibilidade/
+      // erro de parse-livre, este prompt nao pede JSON) loga e mantem a
+      // observacao anterior — os contadores/proximo contato ainda sao
+      // gravados abaixo, a cadeia nao trava (mesmo racional do Agente Analise).
+      let observacaoConsolidada = atuais.observacaoAtual;
+      try {
+        const { system, prompt } = montarPromptContexto({
+          observacaoAtual: atuais.observacaoAtual,
+          atendeu: opts.atendeu,
+          resumoAnalise: opts.resumoAnalise,
+          aderencia: opts.aderencia,
+          retorno: opts.retorno,
+        });
+        const textoLLM = await chamarLLM(prompt, system);
+        if (textoLLM) observacaoConsolidada = textoLLM.trim();
+      } catch (e) {
+        console.error('[wavoip] falha no Agente Contexto (LLM) — mantendo observacao anterior:', e);
+      }
+
+      const proximoContatoData = proximoContato({
+        dataRetorno: opts.retorno.data,
+        atendeu: opts.atendeu,
+        hoje,
+        diasNaoAtendeu: OPER_RETORNO_NAO_ATENDEU_DIAS,
+        diasDefault: OPER_RETORNO_DEFAULT_DIAS,
+      });
+      const contadores = derivarContadores({
+        atendeu: opts.atendeu,
+        tentativasAtuais: atuais.tentativasAtuais,
+        atendimentosAtuais: atuais.atendimentosAtuais,
+        naoAtendimentosAtuais: atuais.naoAtendimentosAtuais,
+        hoje,
+      });
+
+      await consolidarLead(leadTaskId, {
+        observacaoConsolidada,
+        proximoContato: proximoContatoData.getTime(),
+        contadores,
+      });
+    }
+  } catch (e) {
+    console.error('[wavoip] falha ao consolidar o lead — a Ligacao ainda sera fechada:', e);
+  }
+
+  // D-P3-06: a task fecha sozinha no pos-processamento, mesmo se a
+  // consolidacao do lead falhou acima — "Proxima" no discador so avanca a UI.
+  try {
+    await fecharLigacao(taskLigacaoId);
+  } catch (e) {
+    console.error('[wavoip] falha ao fechar a Ligacao:', e);
+  }
 }
 
 /**
@@ -361,6 +490,18 @@ export const mastra = new Mastra({
                     // este catch so evita que o 200 do CALL vire 500.
                     console.error('[wavoip] falha ao gravar metadados de nao-atendida:', e);
                   }
+
+                  // ---- Agente Contexto (OPER-05, D-P3-06/12/14) — caminho NAO-ATENDIDO ----
+                  // Sem gravacao/transcricao, PULA o Agente Analise (aderencia)
+                  // — nao ha o que avaliar. Consolida direto com atendeu:false
+                  // (observacao objetiva; proximoContato = D+OPER_RETORNO_NAO_ATENDEU_DIAS,
+                  // D-P3-14) e fecha a Ligacao (D-P3-06).
+                  await consolidarEFecharLigacao(taskAtiva.taskId, {
+                    atendeu: false,
+                    resumoAnalise: `Não atendida em ${new Date().toISOString().slice(0, 10)}.`,
+                    aderencia: null,
+                    retorno: { necessario: false, data: null },
+                  });
                 }
               }
               return c.json({ status: 'ok', correlacionado: Boolean(whatsappCallId && telefone) });
@@ -466,6 +607,11 @@ export const mastra = new Mastra({
               // Falha de LLM/parse NAO trava a cadeia (D-P3-08): marca
               // NECESSITA_REVISAO=true e segue. Nada de transcricao/PII em
               // log — so ids/flags/status, mesmo padrao do resto do webhook.
+              // `resultadoAnalise`/`retornoAnalise` ficam fora do try (hoisted)
+              // pro passo do Agente Contexto (abaixo) poder consolidar o lead
+              // mesmo quando a Analise falhou (valores ficam `null`).
+              let resultadoAnalise: ReturnType<typeof parseResultadoAnalise> | null = null;
+              let retornoAnalise: ReturnType<typeof extrairRetorno> | null = null;
               try {
                 const task = await lerTask(taskId);
                 const script = task?.description ?? task?.text_content ?? '';
@@ -479,6 +625,8 @@ export const mastra = new Mastra({
                   falhaTecnica: resultado.falhaTecnica,
                 });
                 const retorno = extrairRetorno(resultado, { hoje: new Date(), defaultDias: 2 });
+                resultadoAnalise = resultado;
+                retornoAnalise = retorno;
 
                 await setCustomField(taskId, CAMPOS_LIGACOES.ADERENCIA_SCRIPT, resultado.aderencia);
                 await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, revisao);
@@ -503,6 +651,22 @@ export const mastra = new Mastra({
                   console.error('[wavoip] falha ao marcar NECESSITA_REVISAO apos erro do Agente Analise:', e2);
                 }
               }
+
+              // ---- Agente Contexto (OPER-05, D-P3-06/12/13/14/15) — caminho ATENDIDO ----
+              // Consolida o lead com o resultado da Analise (quando disponivel)
+              // e fecha a Ligacao (D-P3-06). D-P3-15: sinais de alerta (opt-out
+              // inclusive) entram no resumo consolidado — NUNCA removem o lead
+              // nem o tornam inelegivel automaticamente, so a decisao humana
+              // (via NECESSITA_REVISAO, ja gravado acima) faz isso.
+              const sinaisTexto = resultadoAnalise?.sinaisAlerta?.length
+                ? ` Sinais de alerta: ${resultadoAnalise.sinaisAlerta.join('; ')}.`
+                : '';
+              await consolidarEFecharLigacao(taskId, {
+                atendeu: true,
+                resumoAnalise: (resultadoAnalise?.resumoAnalise ?? '') + sinaisTexto,
+                aderencia: resultadoAnalise?.aderencia ?? null,
+                retorno: retornoAnalise ?? { necessario: false, data: null },
+              });
 
               return c.json({ status: 'ok' });
             }
