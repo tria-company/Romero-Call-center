@@ -204,12 +204,22 @@ export async function criarTask(
   if (!CLICKUP_API_TOKEN) {
     throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para criar task');
   }
+  // A API v2 NAO renderiza markdown no campo nativo `description` (mostra
+  // `##`/`**` literais) — só renderiza em `markdown_description`. O mapeamento
+  // fica aqui, no choke point (D-07), para nao se espalhar pelos callers.
+  // A LEITURA nao muda: o GET devolve o conteudo em `description`/`text_content`
+  // (lerLigacao L~375, index.ts L~637, marcador "já tem dossiê" em montar-dossies).
+  const { description, ...camposNativos } = payload;
+  const body: Record<string, unknown> = { ...camposNativos };
+  if (description !== undefined) {
+    body.markdown_description = description;
+  }
   let res: Response;
   try {
     res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task`, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
   } catch (e) {
     throw new Error(
@@ -232,12 +242,20 @@ export async function atualizarTask(
   if (!CLICKUP_API_TOKEN) {
     throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para atualizar task');
   }
+  // Mesmo mapeamento de criarTask (D-07): `description` cru nao renderiza
+  // markdown na API v2 — vira `markdown_description`. `status` e demais chaves
+  // (iniciarLigacao/fecharLigacao) passam intactos via `...resto`.
+  const { description, ...resto } = patch;
+  const body: Record<string, unknown> = { ...resto };
+  if (description !== undefined) {
+    body.markdown_description = description;
+  }
   let res: Response;
   try {
     res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}`, {
       method: 'PUT',
       headers: headers(),
-      body: JSON.stringify(patch),
+      body: JSON.stringify(body),
     });
   } catch (e) {
     throw new Error(

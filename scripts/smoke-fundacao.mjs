@@ -94,10 +94,13 @@ async function criarTask(listId, payload) {
 /** Atualiza a DESCRIÇÃO da task (campo nativo — PUT /task/{id}). Não usa custom
  *  field por causa do limite de plano (FIELD_033). */
 async function atualizarDescricao(taskId, descricao) {
+  // Espelha o choke point de src/mastra/clickup.ts: a API v2 só renderiza
+  // markdown em `markdown_description` (o campo `description` cru mostra
+  // `##`/`**` literais).
   const res = await fetch(`${CLICKUP_BASE_URL}/task/${taskId}`, {
     method: 'PUT',
     headers: headersClickUp(),
-    body: JSON.stringify({ description: descricao }),
+    body: JSON.stringify({ markdown_description: descricao }),
   });
   if (!res.ok) throw new Error(`PUT /task/${taskId} (description) falhou (${res.status})`);
   return true;
