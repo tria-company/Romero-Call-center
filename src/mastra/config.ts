@@ -180,3 +180,56 @@ export const OPER_RETORNO_DEFAULT_DIAS = Number(process.env.OPER_RETORNO_DEFAULT
 // pós-processamento (D-P3-06) — sem passo manual do operador ("Próxima" no
 // discador só avança a UI). Sobrescrevível via env caso o nome real mude.
 export const OPER_STATUS_FECHADO = process.env.OPER_STATUS_FECHADO || 'complete';
+
+// ===== Supabase self-hosted — base de militantes/triagem/follow-ups (DOSS-01/02, Fase 04 Plano 01) =====
+//
+// Instância self-hosted própria (D-P4-10/11) — NUNCA a instância gerenciada
+// pelo MCP desta sessão. `src/mastra/supabase.ts` monta o REST endpoint a
+// partir de SUPABASE_URL (nunca hardcoded). SUPABASE_SERVICE_KEY autentica
+// server-side only (bypassa RLS) — o valor NUNCA é logado/commitado, só vai
+// no .env do usuário (D-P4-11); se vazio, a leitura/descoberta LANÇA erro
+// claro em vez de devolver um resultado vazio silencioso (WR-03).
+export const SUPABASE_URL = process.env.SUPABASE_URL || '';
+export const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+
+if (!SUPABASE_URL) {
+  console.warn(
+    '[config] SUPABASE_URL vazio: a ingestão (DOSS-02) e as seções 1/5 do dossiê (DOSS-01) ' +
+      'não conseguem ler a base self-hosted de militantes/triagem/follow-ups. Coloque a URL da ' +
+      'instância no .env como SUPABASE_URL.',
+  );
+}
+if (!SUPABASE_SERVICE_KEY) {
+  console.warn(
+    '[config] SUPABASE_SERVICE_KEY vazio: a ingestão (DOSS-02) e as seções 1/5 do dossiê ' +
+      '(DOSS-01) não conseguem autenticar na base self-hosted. Coloque a service key (server-side ' +
+      'only) no .env como SUPABASE_SERVICE_KEY — NUNCA em log/comentário/docs.',
+  );
+}
+
+// Mapa de esquema PARAMETRIZÁVEL (descoberto via scripts/descobrir-supabase-ghl.mjs, nunca
+// hardcoded — mesmo padrão de OPER_STATUS_EM_PROCESSAMENTO): nomes de tabela default vazio
+// (preenchidos pelo humano após rodar a descoberta); colunas de identidade com defaults
+// razoáveis a confirmar na descoberta.
+export const SUPABASE_TABLE_MILITANTES = process.env.SUPABASE_TABLE_MILITANTES || '';
+export const SUPABASE_TABLE_FOLLOWUPS = process.env.SUPABASE_TABLE_FOLLOWUPS || '';
+
+if (!SUPABASE_TABLE_MILITANTES) {
+  console.warn(
+    '[config] SUPABASE_TABLE_MILITANTES vazio: buscarMilitante não sabe em qual tabela ler. ' +
+      'Rode scripts/descobrir-supabase-ghl.mjs para descobrir o nome real da tabela e configure ' +
+      'no .env.',
+  );
+}
+if (!SUPABASE_TABLE_FOLLOWUPS) {
+  console.warn(
+    '[config] SUPABASE_TABLE_FOLLOWUPS vazio: listarFollowUps não sabe em qual tabela ler. ' +
+      'Rode scripts/descobrir-supabase-ghl.mjs para descobrir o nome real da tabela e configure ' +
+      'no .env.',
+  );
+}
+
+export const SUPABASE_COL_ID = process.env.SUPABASE_COL_ID || 'id';
+export const SUPABASE_COL_CPF = process.env.SUPABASE_COL_CPF || 'cpf';
+export const SUPABASE_COL_TELEFONE = process.env.SUPABASE_COL_TELEFONE || 'telefone';
+export const SUPABASE_COL_NOME = process.env.SUPABASE_COL_NOME || 'nome';
