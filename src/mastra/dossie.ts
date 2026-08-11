@@ -121,6 +121,127 @@ export function mesclarCamposVazios(
   return patch;
 }
 
+// ===== planejarIngestao — dedupe incremental puro (fecha CR-03) =====
+
+/** Shape de entrada de `planejarIngestao` — espelha o retorno de `normalizarRegistro` (ingerir-supabase.mjs). */
+export interface RegistroNormalizado {
+  idSupabase: string;
+  cpf: string;
+  telefone: string;
+  nome: string;
+  patchCandidato: Record<string, string>;
+}
+
+/** Ação de criar um lead novo (registro sem match em nenhum nível da cascata). `refNovo` é um
+ * identificador sintético estável (`novo#<indice>`) — o caller resolve pro taskId real após `criarTask`. */
+export interface AcaoCriar {
+  acao: 'criar';
+  indice: number;
+  refNovo: string;
+}
+
+/** Ação de mesclar um patch num lead que já existe (na Lista 01 ou criado nesta mesma rodada).
+ * `alvoTaskId` aponta pra um lead pré-existente; `alvoRefNovo` aponta pra um lead criado nesta
+ * rodada (o caller resolve via o mapa `refNovo -> taskId real`). Exatamente um dos dois está presente. */
+export interface AcaoMesclar {
+  acao: 'mesclar';
+  indice: number;
+  nivel: NivelDedupe;
+  alvoTaskId?: string;
+  alvoRefNovo?: string;
+  patch: Record<string, string>;
+}
+
+/** Ação sem nenhum campo a preencher (match encontrado, mas o patch resultante ficou vazio — D-P4-09). */
+export interface AcaoSemAlteracao {
+  acao: 'sem-alteracao';
+  indice: number;
+  nivel: NivelDedupe;
+  alvoTaskId?: string;
+  alvoRefNovo?: string;
+}
+
+export type AcaoIngestao = AcaoCriar | AcaoMesclar | AcaoSemAlteracao;
+
+/**
+ * Resolve o dedupe da ingestão Supabase -> Lista 01 de forma INCREMENTAL,
+ * registro a registro, contra uma coleção VIVA (fecha CR-03,
+ * 04-VERIFICATION.md/04-REVIEW.md): ao contrário de pré-computar o dedupe de
+ * todos os registros contra um snapshot estático de `leadsExistentes` (o bug
+ * original — dois registros da mesma pessoa na mesma leitura nunca casam
+ * entre si e ambos viram lead novo), esta função mantém uma coleção viva que
+ * cresce/atualiza a cada ação do plano, exatamente como o loop de escrita
+ * faria — só que aqui é puro, sem I/O, então o CALLER (ingerir-supabase.mjs)
+ * só precisa iterar o plano NA ORDEM e aplicar cada ação.
+ *
+ * Comportamento (puro, sem log — CPF nunca é impresso):
+ * - Clona `leadsExistentes` (e os `campos` de cada lead) numa coleção viva
+ *   local — NUNCA muta a entrada do caller (Test C do smoke).
+ * - Para cada registro (na ordem, com índice): `resolverDedupe(chave, coleçãoViva)`.
+ *   - Sem match -> `{ acao:'criar', indice, refNovo }` (`refNovo = 'novo#<indice>'`)
+ *     e ANEXA à coleção viva um `LeadExistente` sintético (`taskId: refNovo`,
+ *     `idSupabase/cpf/telefone` da chave, `campos = patchCandidato`) — assim um
+ *     próximo registro da MESMA pessoa nesta rodada casa este lead recém-criado
+ *     (Test A do smoke).
+ *   - Com match -> `patch = mesclarCamposVazios(match, patchCandidato, idSupabaseFieldId)`;
+ *     o alvo é `alvoRefNovo` quando o match foi criado nesta rodada
+ *     (`match.taskId` começa com `'novo#'`), senão `alvoTaskId: match.taskId`.
+ *     REFLETE o patch no objeto vivo do match (`campos` + `idSupabase`, se o
+ *     patch trouxe `idSupabaseFieldId`) — um 3º registro da mesma pessoa já vê
+ *     os campos preenchidos pelo 2º, então nunca sobrescreve (D-P4-09 intra-run,
+ *     Test B do smoke). Patch vazio -> `sem-alteracao`; senão `mesclar`.
+ */
+export function planejarIngestao(
+  registros: RegistroNormalizado[],
+  leadsExistentes: LeadExistente[],
+  idSupabaseFieldId: string,
+): AcaoIngestao[] {
+  // Clone profundo da coleção viva (nunca muta a entrada do caller — Test C).
+  const colecaoViva: LeadExistente[] = leadsExistentes.map((lead) => ({ ...lead, campos: { ...lead.campos } }));
+  const acoes: AcaoIngestao[] = [];
+
+  registros.forEach((registro, indice) => {
+    const chave = { idSupabase: registro.idSupabase, cpf: registro.cpf, telefone: registro.telefone };
+    const resultado = resolverDedupe(chave, colecaoViva);
+
+    if (resultado.match === null) {
+      const refNovo = `novo#${indice}`;
+      acoes.push({ acao: 'criar', indice, refNovo });
+      colecaoViva.push({
+        taskId: refNovo,
+        idSupabase: registro.idSupabase,
+        cpf: registro.cpf,
+        telefone: registro.telefone,
+        campos: { ...registro.patchCandidato },
+      });
+      return;
+    }
+
+    const match = resultado.match;
+    const patch = mesclarCamposVazios(match, registro.patchCandidato, idSupabaseFieldId);
+    const criadoNestaRodada = match.taskId.startsWith('novo#');
+    const alvo = criadoNestaRodada ? { alvoRefNovo: match.taskId } : { alvoTaskId: match.taskId };
+
+    if (Object.keys(patch).length === 0) {
+      acoes.push({ acao: 'sem-alteracao', indice, nivel: resultado.nivel, ...alvo });
+      return;
+    }
+
+    // Reflete o patch no objeto vivo do match — um registro seguinte da mesma
+    // pessoa vê esses campos já preenchidos (D-P4-09 intra-run, Test B).
+    for (const [fieldId, valor] of Object.entries(patch)) {
+      match.campos[fieldId] = valor;
+    }
+    if (patch[idSupabaseFieldId] !== undefined) {
+      match.idSupabase = patch[idSupabaseFieldId];
+    }
+
+    acoes.push({ acao: 'mesclar', indice, nivel: resultado.nivel, ...alvo, patch });
+  });
+
+  return acoes;
+}
+
 // ===== montarPromptDossie — 6 seções, degradação explícita, anti-injeção (D-P4-06) =====
 
 /**

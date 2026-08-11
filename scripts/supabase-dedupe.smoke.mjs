@@ -11,7 +11,7 @@
 //
 // Uso: node --experimental-strip-types scripts/supabase-dedupe.smoke.mjs
 
-import { resolverDedupe, mesclarCamposVazios } from '../src/mastra/dossie.ts';
+import { resolverDedupe, mesclarCamposVazios, planejarIngestao } from '../src/mastra/dossie.ts';
 
 const falhas = [];
 
@@ -125,6 +125,79 @@ function testarMesclarNuncaMutaEntrada() {
   checar(JSON.stringify(leadExistente) === campanhaOriginal, 'mesclarCamposVazios NUNCA deveria mutar leadExistente');
 }
 
+// ===== planejarIngestao — dedupe incremental (coleção viva) — fecha CR-03 =====
+// (04-06-PLAN.md Task 2: Test A-D)
+
+function registroFixture(overrides = {}) {
+  return {
+    idSupabase: '',
+    cpf: '',
+    telefone: '',
+    nome: '',
+    patchCandidato: {},
+    ...overrides,
+  };
+}
+
+function testarPlanejarIngestaoDuasPessoaIguaisMesmaRodadaSemLeadExistente() {
+  // Test A: 2 registros da mesma pessoa (mesmo CPF, ids diferentes), sem lead existente
+  // -> EXATAMENTE 1 ação 'criar' e 1 ação que casa (aponta para o ref recém-criado).
+  const regX = registroFixture({ cpf: '11122233344', patchCandidato: { NOME: 'Fulano' } });
+  const regX2 = registroFixture({ cpf: '111.222.333-44', patchCandidato: { CEP: '01310-000' } });
+  const plano = planejarIngestao([regX, regX2], [], ID_SUPABASE_FIELD);
+
+  const criar = plano.filter((a) => a.acao === 'criar');
+  checar(criar.length === 1, `planejarIngestao (Test A): deveria ter exatamente 1 ação 'criar', recebido ${criar.length}`);
+
+  const segundaAcao = plano[1];
+  checar(
+    segundaAcao.acao !== 'criar',
+    `planejarIngestao (Test A): o 2º registro (mesma pessoa) NÃO deveria criar um 2º lead, recebido acao='${segundaAcao.acao}'`,
+  );
+  checar(
+    segundaAcao.alvoRefNovo === criar[0].refNovo,
+    `planejarIngestao (Test A): o 2º registro deveria apontar via alvoRefNovo para o ref do 1º ('${criar[0].refNovo}'), recebido '${segundaAcao.alvoRefNovo}'`,
+  );
+}
+
+function testarPlanejarIngestaoNaoSobrescreveNaMesmaRodada() {
+  // Test B (D-P4-09 intra-run): 2 registros casam o MESMO lead existente; o registro 1 preenche
+  // um campo vazio (CEP), o registro 2 traz outro valor pro MESMO campo -> o patch do registro 2
+  // NÃO inclui esse campo (já foi preenchido pelo registro 1 na coleção viva).
+  const leadExistente = { taskId: 'task-existente-1', idSupabase: 'sb-1', cpf: '11122233344', telefone: '', campos: { CEP: '' } };
+  const reg1 = registroFixture({ cpf: '11122233344', patchCandidato: { CEP: '01310-000' } });
+  const reg2 = registroFixture({ cpf: '11122233344', patchCandidato: { CEP: '99999-999' } });
+  const plano = planejarIngestao([reg1, reg2], [leadExistente], ID_SUPABASE_FIELD);
+
+  checar(plano[0].acao === 'mesclar' && plano[0].patch.CEP === '01310-000', 'planejarIngestao (Test B): o 1º registro deveria mesclar CEP=01310-000');
+  const acao2 = plano[1];
+  checar(
+    acao2.acao === 'sem-alteracao' || acao2.patch?.CEP === undefined,
+    `planejarIngestao (Test B): o patch do 2º registro NÃO deveria incluir CEP (já preenchido pelo 1º na coleção viva) — recebido acao='${acao2.acao}', patch=${JSON.stringify(acao2.patch)}`,
+  );
+}
+
+function testarPlanejarIngestaoPureza() {
+  // Test C: NÃO muta o array leadsExistentes de entrada nem os objetos dentro dele.
+  const leadsExistentes = [{ taskId: 'task-1', idSupabase: 'sb-1', cpf: '11122233344', telefone: '', campos: { NOME: '' } }];
+  const antes = JSON.stringify(leadsExistentes);
+  const registros = [registroFixture({ cpf: '11122233344', patchCandidato: { NOME: 'Novo Nome' } })];
+  planejarIngestao(registros, leadsExistentes, ID_SUPABASE_FIELD);
+  checar(JSON.stringify(leadsExistentes) === antes, 'planejarIngestao (Test C): NÃO deveria mutar leadsExistentes nem os objetos dentro dele');
+}
+
+function testarPlanejarIngestaoMatchContraLeadExistenteReal() {
+  // Test D: registro que casa um lead existente por CPF -> ação com alvoTaskId (não alvoRefNovo) e nível 'cpf'.
+  const leadExistente = { taskId: 'task-real-1', idSupabase: '', cpf: '55566677788', telefone: '', campos: { NOME: '' } };
+  const registro = registroFixture({ cpf: '55566677788', patchCandidato: { NOME: 'Ciclano' } });
+  const plano = planejarIngestao([registro], [leadExistente], ID_SUPABASE_FIELD);
+
+  checar(plano[0].acao === 'mesclar', `planejarIngestao (Test D): deveria mesclar, recebido acao='${plano[0].acao}'`);
+  checar(plano[0].alvoTaskId === 'task-real-1', `planejarIngestao (Test D): alvoTaskId deveria ser 'task-real-1', recebido '${plano[0].alvoTaskId}'`);
+  checar(plano[0].alvoRefNovo === undefined, 'planejarIngestao (Test D): alvoRefNovo NÃO deveria estar presente (é um lead existente real)');
+  checar(plano[0].nivel === 'cpf', `planejarIngestao (Test D): nível deveria ser 'cpf', recebido '${plano[0].nivel}'`);
+}
+
 testarMatchNivelIdSupabase();
 testarMatchNivelCpf();
 testarMatchNivelTelefone();
@@ -134,6 +207,10 @@ testarPrecedenciaDaCascata();
 testarMesclarSoPreencheCampoVazio();
 testarMesclarNaoIncluiIdSupabaseQuandoJaPresente();
 testarMesclarNuncaMutaEntrada();
+testarPlanejarIngestaoDuasPessoaIguaisMesmaRodadaSemLeadExistente();
+testarPlanejarIngestaoNaoSobrescreveNaMesmaRodada();
+testarPlanejarIngestaoPureza();
+testarPlanejarIngestaoMatchContraLeadExistenteReal();
 
 if (falhas.length > 0) {
   console.error('=== SMOKE FAIL ===');
