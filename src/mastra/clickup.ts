@@ -547,6 +547,26 @@ function telefonesIguais(a: unknown, b: string): boolean {
 }
 
 /**
+ * Normaliza um telefone cru para E.164 (`+<pais><ddd><numero>`), formato
+ * exigido pelo custom field TELEFONE (tipo "phone") da Lista 02 LIGACOES no
+ * ClickUp. O Wavoip entrega o telefone só em dígitos (às vezes com sufixo
+ * `@c.us`), sem `+` — mandar isso cru pro campo phone causa 400 na API.
+ * Função PURA (sem I/O, sem log) — testável isoladamente. Retorna `null`
+ * quando o resultado não é um E.164 plausível (12–15 dígitos); o caller deve
+ * tratar `null` como "não dá pra normalizar" (fallback sem o campo).
+ */
+export function normalizarTelefoneE164(raw: string): string | null {
+  if (!raw) return null;
+  const semSufixo = raw.split('@')[0];
+  const digitos = semSufixo.replace(/\D/g, '');
+  // BR local (10 ou 11 dígitos, sem DDI) -> prefixa '55'. Se já vier
+  // country-coded (12+ dígitos, ex os 13 de '5581984048278'), NÃO re-prefixa.
+  const comDDI = digitos.length === 10 || digitos.length === 11 ? `55${digitos}` : digitos;
+  if (comDDI.length < 12 || comDDI.length > 15) return null;
+  return `+${comDDI}`;
+}
+
+/**
  * Busca a Ligação ABERTA (Lista 02) cujo TELEFONE (field-id, D-07) casa com
  * `telefone` — fallback de correlação persistida (D-P3-01) usado quando o map
  * in-memory `taskAtivaPorTelefone` do webhook não tem a entrada (restart/TTL
@@ -573,12 +593,25 @@ export async function buscarLigacaoAbertaPorTelefone(telefone: string): Promise<
  * PII em log dentro desta função.
  */
 export async function criarLigacaoAvulsa(telefone: string): Promise<{ id: string }> {
+  // O campo TELEFONE é tipo "phone" -> exige E.164 ('+'); o telefone cru do
+  // Wavoip não tem '+' e causava 400. Se não normalizar, melhor criar a
+  // avulsa SEM o campo (o `name` já carrega o número cru) do que perder o
+  // registro da gravação em um 400 (D-P3-03).
+  const e164 = normalizarTelefoneE164(telefone);
   const novaTask = await criarTask(CLICKUP_LIST_LIGACOES, {
     name: `Ligação avulsa — ${telefone}`,
-    custom_fields: [{ id: CAMPOS_LIGACOES.TELEFONE, value: telefone }],
+    ...(e164 !== null ? { custom_fields: [{ id: CAMPOS_LIGACOES.TELEFONE, value: e164 }] } : {}),
   });
   if (!novaTask?.id) {
     throw new Error('[clickup] criarLigacaoAvulsa: criarTask retornou sem id');
+  }
+  if (e164 === null) {
+    // LGPD: nunca logar o telefone completo — só os últimos 4 dígitos.
+    const digitos = telefone.replace(/\D/g, '');
+    const mascarado = digitos.length > 4 ? `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}` : digitos;
+    console.warn(
+      `[clickup] Ligação avulsa (${novaTask.id}) criada SEM o campo TELEFONE — telefone não normalizável p/ E.164 (${mascarado})`,
+    );
   }
 
   try {
