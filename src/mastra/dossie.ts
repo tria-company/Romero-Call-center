@@ -54,6 +54,28 @@ function vazio(valor: string | null | undefined): boolean {
 }
 
 /**
+ * Gera as variantes só-dígitos de um telefone BR alternando o prefixo de
+ * país 55 — usado por `listarServicosPrestados` (supabase.ts) para casar o
+ * telefone do lead contra o formato que cada tabela `romero_db_*` gravou
+ * (formatos mistos: 11/13/15 dígitos, com/sem '+', com/sem prefixo 55).
+ * Pura, sem I/O, sem log — telefone NUNCA é impresso (LGPD), só comparado
+ * como dígitos. Sempre devolve a própria forma só-dígitos + a forma com/sem
+ * prefixo 55 (adiciona 55 quando ausente; remove o 55 líder quando
+ * presente), sem duplicatas (Set). Entrada vazia/só-símbolos -> [].
+ */
+export function variantesTelefoneBr(telefoneCru: string): string[] {
+  const digitos = normalizarDigitos(telefoneCru);
+  if (!digitos) return [];
+  const variantes = new Set<string>([digitos]);
+  if (digitos.startsWith('55')) {
+    variantes.add(digitos.slice(2));
+  } else {
+    variantes.add(`55${digitos}`);
+  }
+  return Array.from(variantes);
+}
+
+/**
  * Resolve a identidade cruzada de um registro Supabase contra os leads já
  * existentes na Lista 01 (D-P4-08): cascata ID_SUPABASE -> CPF normalizado
  * (só dígitos) -> telefone normalizado (só dígitos), casando no primeiro
@@ -262,6 +284,20 @@ export interface FontesDossie {
   supabaseMilitante: Record<string, unknown> | null;
   /** Seção 5 (Follow-ups pendentes). */
   supabaseFollowUps: Array<{ descricao?: string; data?: string; [chave: string]: unknown }> | null;
+  /** Seção 5 (serviços prestados) — histórico multi-tabela `romero_db_*` (quick 260811-l7k). Opcional/retrocompatível. */
+  servicosPrestados?: Array<{
+    tabela?: string;
+    servico?: string;
+    status?: string;
+    fase?: string;
+    criadoEm?: string;
+    atualizadoEm?: string;
+    observacao?: string;
+    feedback?: string;
+    [chave: string]: unknown;
+  }> | null;
+  /** Seção 5 — tabelas `romero_db_*` que falharam ao ler (degradação por tabela, não aborta as demais). Opcional/retrocompatível. */
+  tabelasComErro?: Array<{ tabela: string; erro: string }> | null;
   /** Seções 3 e 6 — resumo vivo do histórico RomeroCall (D-P4-03, OBSERVACAO_CONSOLIDADA). */
   observacaoConsolidada: string | null;
   /** Seções 3 e 6 — resultado da última ligação registrada (D-P4-03). */
@@ -348,8 +384,15 @@ export function montarPromptDossie(fontes: FontesDossie): { system: string; prom
   linhas.push('', '## 4. Histórico de chamados');
   injetarFonte(linhas, 'oportunidades GHL', fontes.ghlOportunidades);
 
-  linhas.push('', '## 5. Follow-ups pendentes');
+  linhas.push('', '## 5. Follow-ups e serviços prestados');
   injetarFonte(linhas, 'follow-ups pendentes (Supabase)', fontes.supabaseFollowUps);
+  injetarFonte(linhas, 'serviços prestados (Supabase)', fontes.servicosPrestados ?? null);
+  if (Array.isArray(fontes.tabelasComErro) && fontes.tabelasComErro.length > 0) {
+    const nomesTabelas = fontes.tabelasComErro.map((item) => item.tabela).join(', ');
+    linhas.push(
+      `(atenção: falha ao ler estas tabelas de serviço — degradação por tabela, as demais seguem normalmente: ${nomesTabelas})`,
+    );
+  }
 
   linhas.push('', '## 6. Gancho / próxima ação');
   linhas.push('Com base nas seções 2 (Síntese) e 3 (Última interação) acima, defina o GANCHO — o argumento/abertura mais forte para a próxima ligação.');

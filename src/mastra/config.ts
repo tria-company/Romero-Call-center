@@ -251,3 +251,42 @@ if (!SUPABASE_COL_FOLLOWUP_REF) {
       'real da tabela de follow-ups e configure no .env.',
   );
 }
+
+// ===== Supabase self-hosted — tabelas de serviço romero_db_* (seção 5 do dossiê, DOSS-01) =====
+//
+// Lista CSV das tabelas de serviço prestado que `listarServicosPrestados`
+// (supabase.ts) lê para montar a seção 5 do dossiê (histórico real de
+// serviços prestados — castração, cirurgias, consultas, cesta básica,
+// resgate etc.), além da triagem/follow-ups já lida por SUPABASE_TABLE_FOLLOWUPS.
+// SUPABASE_TABLES_SERVICOS no .env sobrescreve; quando vazio, aplica o
+// default abaixo com as 17 tabelas reais passadas pelo usuário no processo
+// de ingestão. Todas compartilham o mesmo shape por-pessoa (id_contato,
+// telefone, servico, status, fase, criado_em, atualizado_em, observacao,
+// feedback) — colunas extras de cada tabela NUNCA são selecionadas. Como há
+// default sensato, sem console.warn (mesmo espírito de GHL_API_VERSION/
+// LOTE_TAMANHO_DEFAULT, que não avisam).
+const SUPABASE_TABLES_SERVICOS_DEFAULT = [
+  'romero_db_ajuda_diversas',
+  'romero_db_carona',
+  'romero_db_castracao',
+  'romero_db_cesta_basica',
+  'romero_db_cirurgias',
+  'romero_db_consultas',
+  'romero_db_demandas_veterinarias_municipios_parceiros',
+  'romero_db_denuncias',
+  'romero_db_emergencia',
+  'romero_db_emprego_recomendacao',
+  'romero_db_exames',
+  'romero_db_ghl_adocao',
+  'romero_db_medicacao',
+  'romero_db_municipios_com_atuacao',
+  'romero_db_outros_municipios',
+  'romero_db_racao',
+  'romero_db_resgate',
+];
+
+export const SUPABASE_TABLES_SERVICOS: string[] = process.env.SUPABASE_TABLES_SERVICOS
+  ? process.env.SUPABASE_TABLES_SERVICOS.split(',')
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0)
+  : SUPABASE_TABLES_SERVICOS_DEFAULT;
