@@ -308,12 +308,22 @@ export async function setCustomField(taskId: string, fieldId: string, value: unk
   // qualquer outro caso passa `value` intacto.
   const opcoes = (OPCOES_LIGACOES as Record<string, { sim: string; nao: string }>)[fieldId];
   const valorFinal = opcoes && typeof value === 'boolean' ? (value ? opcoes.sim : opcoes.nao) : value;
+  // A API v2 do ClickUp trunca campos date para meia-noite do fuso do
+  // workspace quando o POST nao inclui `value_options: { time: true }`.
+  // INICIO/FIM (Lista 02) precisam da hora exata da ligacao; DATA_RETORNO
+  // e os demais campos ficam de fora (retorno e por dia, date-only correto).
+  // Centralizado aqui (choke point unico de escrita), mesmo racional dos
+  // fixes OPCOES_LIGACOES/markdown_description — nao espalhar pelos callers (D-07).
+  const body: Record<string, unknown> = { value: valorFinal };
+  if (fieldId === CAMPOS_LIGACOES.INICIO || fieldId === CAMPOS_LIGACOES.FIM) {
+    body.value_options = { time: true };
+  }
   let res: Response;
   try {
     res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}/field/${fieldId}`, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ value: valorFinal }),
+      body: JSON.stringify(body),
     });
   } catch (e) {
     throw new Error(
