@@ -67,6 +67,8 @@ import {
   derivarAtendeu,
   derivarMotivoFalha,
   derivarDuracao,
+  ehStatusFalhaTerminal,
+  deveProcessarFalhaTerminal,
   montarPromptAnalise,
   parseResultadoAnalise,
   necessitaRevisao,
@@ -97,6 +99,10 @@ import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISC
 const correlacaoCallTelefone = new Map<string, { telefone: string; ts: number }>();
 // Dedup de RECORD ja processado (retry do webhook nao re-transcreve).
 const recordsProcessados = new Set<string>();
+// Dedup do caminho de falha terminal do branch CALL (CR-02, gap-closure
+// 03-06) — espelha recordsProcessados: um segundo evento CALL terminal
+// (retry/reentrega do webhook) para a mesma chamada e no-op.
+const callsFalhaProcessadas = new Set<string>();
 const CORRELACAO_TTL_MS = 6 * 60 * 60 * 1000; // 6h
 
 /** Guarda call_id -> telefone e faz uma limpeza preguicosa de entradas velhas. */
@@ -467,16 +473,25 @@ export const mastra = new Mastra({
               if (whatsappCallId && telefone) {
                 guardarCorrelacao(whatsappCallId, telefone);
               }
-              // D-P3-05: se este evento CALL ja descreve uma ligacao encerrada
-              // SEM gravacao (nao atendida — status conhecido de falha, nunca
-              // um status ainda indeterminado como "chamando"), grava os
-              // metadados de falha na Ligacao correlacionada (D-P3-01, map
-              // in-memory). Nao ha task a fechar aqui se a correlacao ainda
-              // nao existe — essa Ligacao so ganha metadados quando a task
-              // ativa foi reportada em /api/discador/ligando.
-              if (telefone && String(payload.status || '') && derivarAtendeu(payload, false) === false) {
+              // CR-01 (gap-closure 03-06): so entra aqui quando o `status` do
+              // evento e uma falha terminal CONFIRMADA (STATUS_NAO_ATENDIDA
+              // conhecido, via ehStatusFalhaTerminal) — status de transicao
+              // (RINGING/CALLING), desconhecido ou ausente NUNCA gravam
+              // ATENDEU=false/consolidam/fecham a Ligacao enquanto a chamada
+              // ainda esta tocando. Nao ha task a fechar aqui se a correlacao
+              // ainda nao existe — essa Ligacao so ganha metadados quando a
+              // task ativa foi reportada em /api/discador/ligando.
+              if (telefone && ehStatusFalhaTerminal(payload)) {
                 const taskAtiva = taskAtivaPorTelefone.get(telefone);
-                if (taskAtiva) {
+                if (taskAtiva && deveProcessarFalhaTerminal(whatsappCallId, callsFalhaProcessadas)) {
+                  // CR-02: marca dedup ANTES do trabalho async (mesma ordem
+                  // de recordsProcessados.add no RECORD) — um segundo evento
+                  // CALL terminal para a mesma chamada vira no-op.
+                  callsFalhaProcessadas.add(whatsappCallId);
+                  if (callsFalhaProcessadas.size > 5000) {
+                    callsFalhaProcessadas.clear(); // backstop de memoria (dedup e best-effort)
+                  }
+
                   try {
                     await gravarMetadadosLigacao(taskAtiva.taskId, {
                       atendeu: false,
@@ -502,6 +517,11 @@ export const mastra = new Mastra({
                     aderencia: null,
                     retorno: { necessario: false, data: null },
                   });
+
+                  // CR-02: limpa a entrada telefone->task apos consolidar/
+                  // fechar — uma ligacao futura ao mesmo telefone nunca
+                  // re-consolida sobre esta task ja fechada.
+                  taskAtivaPorTelefone.delete(telefone);
                 }
               }
               return c.json({ status: 'ok', correlacionado: Boolean(whatsappCallId && telefone) });
@@ -667,6 +687,11 @@ export const mastra = new Mastra({
                 aderencia: resultadoAnalise?.aderencia ?? null,
                 retorno: retornoAnalise ?? { necessario: false, data: null },
               });
+
+              // CR-02: limpa a entrada telefone->task apos consolidar/fechar —
+              // uma ligacao futura ao mesmo telefone nunca re-consolida sobre
+              // esta task ja fechada.
+              taskAtivaPorTelefone.delete(telefone);
 
               return c.json({ status: 'ok' });
             }
