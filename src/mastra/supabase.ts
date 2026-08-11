@@ -23,8 +23,12 @@ import {
   SUPABASE_COL_CPF,
   SUPABASE_COL_TELEFONE,
   SUPABASE_COL_FOLLOWUP_REF,
+  SUPABASE_TABLES_SERVICOS,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
+// dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
+// sentido de outros consumidores (gerar-lote.mjs/montar-dossies.mjs).
+import { variantesTelefoneBr } from './dossie.ts';
 
 // Endpoint REST montado do env — instancia self-hosted, nunca hardcoded (D-P4-11).
 export const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
@@ -192,4 +196,147 @@ export async function listarFollowUps(
   }
   const filtros = montarFiltroFollowUps(opts, SUPABASE_COL_FOLLOWUP_REF);
   return listarTabela(SUPABASE_TABLE_FOLLOWUPS, { filtros });
+}
+
+// ===== listarServicosPrestados — seção 5 do dossiê, leitura multi-tabela (quick 260811-l7k) =====
+
+export interface ServicoPrestado {
+  tabela: string;
+  servico?: string;
+  status?: string;
+  fase?: string;
+  criadoEm?: string;
+  atualizadoEm?: string;
+  observacao?: string;
+  feedback?: string;
+}
+
+export interface TabelaComErro {
+  tabela: string;
+  erro: string;
+}
+
+/** Colunas selecionadas em cada tabela romero_db_* — as colunas extras de cada tabela NUNCA são lidas. */
+const SELECT_SERVICOS_PRESTADOS =
+  'servico,status,fase,criado_em,atualizado_em,observacao,feedback,telefone,id_contato';
+
+function valorOuIndefinido(v: unknown): string | undefined {
+  return v === null || v === undefined ? undefined : String(v);
+}
+
+/** Normaliza a linha crua (snake_case do PostgREST) para o shape que montarPromptDossie espera (camelCase) — normalização acontece aqui, na camada de I/O. */
+function mapearLinhaServico(tabela: string, linha: Record<string, unknown>): ServicoPrestado {
+  return {
+    tabela,
+    servico: valorOuIndefinido(linha.servico),
+    status: valorOuIndefinido(linha.status),
+    fase: valorOuIndefinido(linha.fase),
+    criadoEm: valorOuIndefinido(linha.criado_em),
+    atualizadoEm: valorOuIndefinido(linha.atualizado_em),
+    observacao: valorOuIndefinido(linha.observacao),
+    feedback: valorOuIndefinido(linha.feedback),
+  };
+}
+
+/**
+ * Lê UMA tabela de serviço por telefone (variantes, `filtroTelefoneIn`) e/ou
+ * id_contato — GET separado por caminho (mesmo padrão de `buscarMilitante`,
+ * cascata de filtros), sempre `order=criado_em.desc&limit=10` (T-L7K-03,
+ * DoS). Faz merge dos dois caminhos e dedupe por chave estável do registro
+ * (sem coluna `id` no `select` — usa id_contato+criado_em+servico+telefone,
+ * D-P4 mesmo racional de resolverDedupe). Erro de rede/HTTP LANÇA — o
+ * caller (`listarServicosPrestados`) captura por tabela.
+ */
+async function buscarLinhasServicoDaTabela(
+  tabela: string,
+  opts: { filtroTelefoneIn?: string; idContato?: string },
+): Promise<Record<string, unknown>[]> {
+  const linhasBrutas: Record<string, unknown>[] = [];
+
+  if (opts.filtroTelefoneIn) {
+    const params = new URLSearchParams({ select: SELECT_SERVICOS_PRESTADOS, order: 'criado_em.desc', limit: '10' });
+    params.set('telefone', opts.filtroTelefoneIn);
+    let res: Response;
+    try {
+      res = await fetchTimeout(`${SUPABASE_REST_URL}/${tabela}?${params.toString()}`, { headers: headers() });
+    } catch (e) {
+      throw new Error(
+        `[supabase] falha de rede ao listar servicos em ${tabela} (telefone): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (!res.ok) {
+      throw new Error(`[supabase] GET /${tabela} (telefone) falhou (${res.status})`);
+    }
+    const data = await res.json();
+    if (Array.isArray(data)) linhasBrutas.push(...data);
+  }
+
+  if (opts.idContato) {
+    const params = new URLSearchParams({ select: SELECT_SERVICOS_PRESTADOS, order: 'criado_em.desc', limit: '10' });
+    params.set('id_contato', `eq.${opts.idContato}`);
+    let res: Response;
+    try {
+      res = await fetchTimeout(`${SUPABASE_REST_URL}/${tabela}?${params.toString()}`, { headers: headers() });
+    } catch (e) {
+      throw new Error(
+        `[supabase] falha de rede ao listar servicos em ${tabela} (id_contato): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (!res.ok) {
+      throw new Error(`[supabase] GET /${tabela} (id_contato) falhou (${res.status})`);
+    }
+    const data = await res.json();
+    if (Array.isArray(data)) linhasBrutas.push(...data);
+  }
+
+  const vistos = new Set<string>();
+  const dedupe: Record<string, unknown>[] = [];
+  for (const linha of linhasBrutas) {
+    const chave = JSON.stringify([linha.id_contato ?? '', linha.criado_em ?? '', linha.servico ?? '', linha.telefone ?? '']);
+    if (vistos.has(chave)) continue;
+    vistos.add(chave);
+    dedupe.push(linha);
+  }
+  return dedupe;
+}
+
+/**
+ * Lê TODAS as tabelas de serviço `romero_db_*` (SUPABASE_TABLES_SERVICOS,
+ * config.ts) por telefone do lead (variantes BR — `variantesTelefoneBr`,
+ * dossie.ts) e/ou id_contato opcional, para montar a seção 5 do dossiê
+ * (histórico real de serviços prestados: castração, cirurgias, consultas,
+ * cesta básica, resgate etc.).
+ *
+ * Contrato de erro (WR-03, mesmo do client atual): `checarConfig()` no topo
+ * — SUPABASE_URL/SUPABASE_SERVICE_KEY ausentes LANÇAM (nunca resultado vazio
+ * silencioso). Já a falha HTTP/rede de UMA tabela NÃO aborta as demais — é
+ * capturada e acumulada em `tabelasComErro` (degradação explícita por
+ * tabela, T-L7K-03).
+ *
+ * Nunca loga telefone/CPF/chave (LGPD) — este módulo só compara dígitos.
+ */
+export async function listarServicosPrestados(
+  opts: { telefone: string; idContato?: string },
+): Promise<{ servicos: ServicoPrestado[]; tabelasComErro: TabelaComErro[] }> {
+  checarConfig();
+
+  const variantes = variantesTelefoneBr(opts.telefone);
+  const filtroTelefoneIn = variantes.length > 0 ? `in.(${variantes.join(',')})` : undefined;
+
+  const servicos: ServicoPrestado[] = [];
+  const tabelasComErro: TabelaComErro[] = [];
+
+  for (const tabela of SUPABASE_TABLES_SERVICOS) {
+    if (!filtroTelefoneIn && !opts.idContato) continue; // sem telefone e sem id_contato: nada para filtrar nesta tabela.
+    try {
+      const linhasBrutas = await buscarLinhasServicoDaTabela(tabela, { filtroTelefoneIn, idContato: opts.idContato });
+      for (const linha of linhasBrutas) {
+        servicos.push(mapearLinhaServico(tabela, linha));
+      }
+    } catch (e) {
+      tabelasComErro.push({ tabela, erro: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  return { servicos, tabelasComErro };
 }
