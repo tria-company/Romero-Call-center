@@ -22,6 +22,7 @@ import {
   SUPABASE_COL_ID,
   SUPABASE_COL_CPF,
   SUPABASE_COL_TELEFONE,
+  SUPABASE_COL_FOLLOWUP_REF,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 
@@ -143,23 +144,52 @@ export async function buscarMilitante(
 }
 
 /**
- * Le os follow-ups (SUPABASE_TABLE_FOLLOWUPS) por id/cpf/telefone — mesma
- * cascata de identidade de `buscarMilitante` (D-P4-08). Erro de config/rede/
- * HTTP LANCA (WR-03); lista vazia e resultado legitimo (sem follow-up).
+ * Monta o filtro PostgREST da tabela de follow-ups a partir da FK dedicada
+ * (SUPABASE_COL_FOLLOWUP_REF), NUNCA das colunas de identidade da tabela de
+ * MILITANTES (SUPABASE_COL_ID/CPF/TELEFONE) — fecha CR-02 (04-VERIFICATION.md):
+ * a tabela de follow-ups tem sua PRÓPRIA PK `id`, distinta da FK que aponta
+ * pro militante dono do follow-up; filtrar pela coluna errada arrisca trazer
+ * o follow-up de OUTRA PESSOA pro dossiê do lead (contaminação cruzada de
+ * PII, violação LGPD). Função PURA (sem I/O) — testável por smoke sem rede.
+ *
+ * LANCA (nunca retorna filtro vazio/parcial):
+ *  - `colFollowupRef` vazio -> "configuração de follow-ups ausente" (env não configurada).
+ *  - `opts.refMilitante` vazio -> "referência do militante ausente" (sem chave, sem filtro).
+ */
+export function montarFiltroFollowUps(
+  opts: { refMilitante?: string },
+  colFollowupRef: string,
+): Record<string, string> {
+  if (!colFollowupRef) {
+    throw new Error(
+      '[supabase] configuração de follow-ups ausente — SUPABASE_COL_FOLLOWUP_REF não configurada ' +
+        '(não dá para filtrar follow-ups por militante sem arriscar misturar identidade de outra ' +
+        'pessoa — LGPD)',
+    );
+  }
+  if (!opts.refMilitante) {
+    throw new Error('[supabase] referência do militante ausente — montarFiltroFollowUps chamado sem refMilitante');
+  }
+  return { [colFollowupRef]: `eq.${opts.refMilitante}` };
+}
+
+/**
+ * Le os follow-ups (SUPABASE_TABLE_FOLLOWUPS) filtrando pela FK dedicada do
+ * militante (SUPABASE_COL_FOLLOWUP_REF via `montarFiltroFollowUps`) — NUNCA
+ * pelas colunas de identidade da tabela de MILITANTES (SUPABASE_COL_ID/CPF/
+ * TELEFONE, usadas só por `buscarMilitante` acima). Fecha CR-02
+ * (04-VERIFICATION.md): a FK de follow-ups é uma coluna distinta da PK da
+ * própria tabela de follow-ups e das colunas de identidade de militantes.
+ * Erro de config/rede/HTTP LANCA (WR-03); lista vazia e resultado legitimo
+ * (sem follow-up para aquele militante).
  */
 export async function listarFollowUps(
-  opts: { idSupabase?: string; cpf?: string; telefone?: string },
+  opts: { refMilitante?: string },
 ): Promise<Record<string, unknown>[]> {
   checarConfig();
   if (!SUPABASE_TABLE_FOLLOWUPS) {
     throw new Error('[supabase] SUPABASE_TABLE_FOLLOWUPS ausente — nao da para listar follow-ups');
   }
-  const filtros: Record<string, string> = {};
-  if (opts.idSupabase) filtros[SUPABASE_COL_ID] = `eq.${opts.idSupabase}`;
-  else if (opts.cpf) filtros[SUPABASE_COL_CPF] = `eq.${opts.cpf}`;
-  else if (opts.telefone) filtros[SUPABASE_COL_TELEFONE] = `eq.${opts.telefone}`;
-  else {
-    throw new Error('[supabase] listarFollowUps chamado sem idSupabase/cpf/telefone');
-  }
+  const filtros = montarFiltroFollowUps(opts, SUPABASE_COL_FOLLOWUP_REF);
   return listarTabela(SUPABASE_TABLE_FOLLOWUPS, { filtros });
 }

@@ -233,3 +233,21 @@ export const SUPABASE_COL_ID = process.env.SUPABASE_COL_ID || 'id';
 export const SUPABASE_COL_CPF = process.env.SUPABASE_COL_CPF || 'cpf';
 export const SUPABASE_COL_TELEFONE = process.env.SUPABASE_COL_TELEFONE || 'telefone';
 export const SUPABASE_COL_NOME = process.env.SUPABASE_COL_NOME || 'nome';
+
+// Coluna FK da tabela de follow-ups (SUPABASE_TABLE_FOLLOWUPS) que referencia o
+// militante dono do follow-up — DISTINTA das colunas de identidade da tabela de
+// MILITANTES (SUPABASE_COL_ID/CPF/TELEFONE acima). Default vazio de propósito
+// (gap CR-02, 04-VERIFICATION.md): sem esta env, `listarFollowUps` NÃO tenta
+// filtrar pelas colunas de militante (isso já causou contaminação cruzada de
+// PII — LGPD) — em vez disso lança degradação explícita. Rode
+// scripts/descobrir-supabase-ghl.mjs para descobrir as colunas candidatas.
+export const SUPABASE_COL_FOLLOWUP_REF = process.env.SUPABASE_COL_FOLLOWUP_REF || '';
+
+if (!SUPABASE_COL_FOLLOWUP_REF) {
+  console.warn(
+    '[config] SUPABASE_COL_FOLLOWUP_REF vazio: a seção 5 do dossiê (follow-ups) não consegue ' +
+      'filtrar pela FK do militante e fica DEGRADADA de propósito — nunca traz follow-up de ' +
+      'outra pessoa (LGPD). Rode scripts/descobrir-supabase-ghl.mjs para descobrir a coluna FK ' +
+      'real da tabela de follow-ups e configure no .env.',
+  );
+}
