@@ -46,7 +46,7 @@ import {
   deveCriar,
 } from '../src/mastra/lote.ts';
 import { montarPromptDossie } from '../src/mastra/dossie.ts';
-import { buscarMilitante, listarFollowUps } from '../src/mastra/supabase.ts';
+import { buscarMilitante, listarFollowUps, listarServicosPrestados } from '../src/mastra/supabase.ts';
 import { buscarContactIdPorTelefone, buscarConversasWhatsApp, buscarOportunidades } from '../src/mastra/ghl.ts';
 import { assigneeDoOperador } from '../src/mastra/operadores.ts';
 import { LOTE_LIMITE_TENTATIVAS, LOTE_TAMANHO_DEFAULT, SUPABASE_COL_ID } from '../src/mastra/config.ts';
@@ -112,6 +112,7 @@ function secoesDegradadas(fontes) {
   if (fonteVaziaOuAusente(fontes.ghlOportunidades)) rotulos.push('oportunidades GHL');
   if (fonteVaziaOuAusente(fontes.ghlConversas)) rotulos.push('conversas GHL');
   if (fonteVaziaOuAusente(fontes.supabaseFollowUps)) rotulos.push('follow-ups Supabase');
+  if (fonteVaziaOuAusente(fontes.servicosPrestados)) rotulos.push('serviços prestados');
   if (fonteVaziaOuAusente(fontes.observacaoConsolidada) && fonteVaziaOuAusente(fontes.ultimoResultado)) {
     rotulos.push('histórico RomeroCall');
   }
@@ -190,12 +191,30 @@ async function montarDossieDoLead(lead, taskLead, identificador) {
     console.warn(`  [aviso] follow-ups Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // Serviços prestados (seção 5, quick 260811-l7k): lê TODAS as tabelas
+  // romero_db_* (SUPABASE_TABLES_SERVICOS) por telefone (variantes BR) +
+  // refMilitante (mesmo id de identidade já usado pelos follow-ups acima —
+  // sem introduzir nova chave). Degradação por tabela já vem embutida em
+  // tabelasComErro; on-throw (config ausente, WR-03) a fonte inteira degrada
+  // sem abortar o dossiê deste lead (D-P4-06).
+  let servicosPrestados = null;
+  let tabelasComErro = null;
+  try {
+    const resultadoServicos = await listarServicosPrestados({ telefone: lead.telefone, idContato: refMilitante });
+    servicosPrestados = resultadoServicos.servicos;
+    tabelasComErro = resultadoServicos.tabelasComErro.length > 0 ? resultadoServicos.tabelasComErro : null;
+  } catch (e) {
+    console.warn(`  [aviso] serviços prestados Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const fontes = {
     ghlContato,
     ghlConversas,
     ghlOportunidades,
     supabaseMilitante,
     supabaseFollowUps,
+    servicosPrestados,
+    tabelasComErro,
     observacaoConsolidada: observacaoConsolidada || null,
     ultimoResultado: ultimoResultado || null,
   };

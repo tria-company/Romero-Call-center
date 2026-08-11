@@ -13,7 +13,7 @@
 //
 // Uso: node --experimental-strip-types scripts/dossie.smoke.mjs
 
-import { montarPromptDossie } from '../src/mastra/dossie.ts';
+import { montarPromptDossie, variantesTelefoneBr } from '../src/mastra/dossie.ts';
 
 const falhas = [];
 
@@ -39,7 +39,7 @@ function testarSeisSecoesComTodasAsFontes() {
   checar(prompt.includes('Síntese'), 'prompt deveria citar a seção 2 (Síntese)');
   checar(prompt.includes('Última interação'), 'prompt deveria citar a seção 3 (Última interação)');
   checar(prompt.includes('Histórico de chamados'), 'prompt deveria citar a seção 4 (Histórico de chamados)');
-  checar(prompt.includes('Follow-ups pendentes'), 'prompt deveria citar a seção 5 (Follow-ups pendentes)');
+  checar(prompt.includes('Follow-ups e serviços prestados'), 'prompt deveria citar a seção 5 (Follow-ups e serviços prestados)');
   checar(prompt.includes('Gancho'), 'prompt deveria citar a seção 6 (Gancho / próxima ação)');
 }
 
@@ -83,12 +83,85 @@ function testarSystemAntiInjecaoENaoInventar() {
   checar(/nunca invente|não invente/i.test(system), 'system deveria proibir explicitamente inventar conteúdo (D-P4-06)');
 }
 
+// ===== (e) variantesTelefoneBr — normalização de telefone BR (quick 260811-l7k) =====
+
+function testarVariantesTelefoneBr11Digitos() {
+  const variantes = variantesTelefoneBr('11988887777');
+  checar(variantes.includes('11988887777'), 'variantes (11 díg) deveria incluir a forma só-dígitos original');
+  checar(variantes.includes('5511988887777'), 'variantes (11 díg) deveria incluir a forma com prefixo 55');
+}
+
+function testarVariantesTelefoneBr13DigitosComMais() {
+  const variantes = variantesTelefoneBr('+5511988887777');
+  checar(variantes.includes('5511988887777'), "variantes ('+', 13 díg) deveria incluir a forma com prefixo 55");
+  checar(variantes.includes('11988887777'), "variantes ('+', 13 díg) deveria incluir a forma sem prefixo 55");
+}
+
+function testarVariantesTelefoneBr15Digitos() {
+  const entrada = '123456789012345';
+  const variantes = variantesTelefoneBr(entrada);
+  checar(variantes.includes(entrada), 'variantes (15 díg) deveria incluir ao menos a forma só-dígitos original');
+  checar(variantes.some((v) => v !== entrada), 'variantes (15 díg) deveria incluir ao menos a forma com/sem prefixo 55');
+}
+
+function testarVariantesTelefoneBrDedupeSemRepetidas() {
+  const variantes = variantesTelefoneBr('5511988887777');
+  const unicas = new Set(variantes);
+  checar(unicas.size === variantes.length, 'variantesTelefoneBr NÃO deveria conter variantes repetidas (dedupe)');
+}
+
+function testarVariantesTelefoneBrEntradaVazia() {
+  checar(variantesTelefoneBr('').length === 0, 'variantesTelefoneBr de entrada vazia deveria devolver []');
+  checar(variantesTelefoneBr('---').length === 0, 'variantesTelefoneBr de entrada só-símbolos deveria devolver []');
+}
+
+// ===== (f) seção 5 — serviços prestados (romero_db_*, quick 260811-l7k) =====
+
+const SERVICO_FIXTURE = {
+  tabela: 'romero_db_castracao',
+  servico: 'Castração felina',
+  status: 'concluído',
+  fase: 'finalizada',
+  criadoEm: '2026-01-01',
+  atualizadoEm: '2026-01-02',
+  observacao: '',
+  feedback: '',
+};
+
+function testarSecaoServicosPrestadosPresente() {
+  const fontes = { ...FONTES_COMPLETAS, servicosPrestados: [SERVICO_FIXTURE], tabelasComErro: null };
+  const { prompt } = montarPromptDossie(fontes);
+  checar(prompt.includes('Follow-ups e serviços prestados'), 'prompt com serviços presentes deveria titular a seção 5 como "Follow-ups e serviços prestados"');
+  checar(prompt.includes('Castração felina'), 'prompt com serviços presentes deveria conter o valor de serviço da fixture');
+}
+
+function testarSecaoServicosPrestadosVaziaNaoInventa() {
+  const fontes = { ...FONTES_COMPLETAS, servicosPrestados: null, tabelasComErro: null };
+  const { prompt } = montarPromptDossie(fontes);
+  checar(prompt.includes('sem dados de serviços prestados'), 'prompt sem serviços deveria injetar marcador de degradação da seção 5');
+  checar(!prompt.includes('Castração felina'), 'prompt sem serviços NÃO deveria conter valor de serviço de outra fixture');
+}
+
+function testarTabelasComErroAparecemNoPrompt() {
+  const fontes = { ...FONTES_COMPLETAS, servicosPrestados: [SERVICO_FIXTURE], tabelasComErro: [{ tabela: 'romero_db_resgate', erro: 'HTTP 500' }] };
+  const { prompt } = montarPromptDossie(fontes);
+  checar(prompt.includes('romero_db_resgate'), 'prompt com tabelasComErro deveria citar explicitamente o nome da tabela que falhou (degradação por tabela)');
+}
+
 testarSeisSecoesComTodasAsFontes();
 testarDegradacaoQuandoFollowUpsAusente();
 testarDegradacaoQuandoContatoAusente();
 testarHistoricoRomeroCallAparece();
 testarSemHistoricoRomeroCallNaoInventa();
 testarSystemAntiInjecaoENaoInventar();
+testarVariantesTelefoneBr11Digitos();
+testarVariantesTelefoneBr13DigitosComMais();
+testarVariantesTelefoneBr15Digitos();
+testarVariantesTelefoneBrDedupeSemRepetidas();
+testarVariantesTelefoneBrEntradaVazia();
+testarSecaoServicosPrestadosPresente();
+testarSecaoServicosPrestadosVaziaNaoInventa();
+testarTabelasComErroAparecemNoPrompt();
 
 if (falhas.length > 0) {
   console.error('=== SMOKE FAIL ===');
