@@ -105,6 +105,14 @@ function paraString(valor) {
   return valor === null || valor === undefined ? '' : String(valor);
 }
 
+/** Mascara o telefone (LGPD, T-04-03-I) -- só os últimos 4 dígitos aparecem (mesmo padrão de gerar-lote.mjs). */
+function mascararTelefone(telefone) {
+  const digitos = String(telefone || '').replace(/\D/g, '');
+  if (digitos.length === 0) return '(sem telefone)';
+  if (digitos.length <= 4) return `****${digitos}`;
+  return `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}`;
+}
+
 /** Extrai um `LeadExistente` (shape de dossie.ts) de uma TaskClickUp da Lista 01. */
 function paraLeadExistente(task) {
   const campos = {};
@@ -144,6 +152,42 @@ function normalizarRegistro(registro) {
     }
   }
   return { idSupabase, cpf, telefone, nome, patchCandidato };
+}
+
+/**
+ * Monta o payload de `criarTask` (clickup.ts) pra um lead NOVO (sem match no
+ * dedupe): `name`/custom_fields por field-id de `CAMPOS_LEADS`, com os
+ * defaults que tornam o lead elegível ao lote do dia HOJE (Claude's
+ * Discretion, coerente com `selecionarLoteElegivel`/`elegivel` em lote.ts):
+ * PROXIMO_CONTATO = hoje (epoch ms, mesmo shape de `consolidarLead`) => o
+ * lead entra no lote de hoje; SCORE = 0 (neutro, sem sinal ainda);
+ * QTD_TENTATIVAS/QTD_ATENDIMENTOS/QTD_NAO_ATENDIMENTOS = 0 (nunca contatado).
+ * ORIGEM usa a coluna do registro quando presente, senão "supabase"
+ * (rastreabilidade — este lead nasceu desta ingestão).
+ */
+function montarPayloadNovoLead(chave, hojeEpoch) {
+  const nome = chave.nome || '(sem nome)';
+  const customFields = [
+    { id: CAMPOS_LEADS.ID_SUPABASE, value: chave.idSupabase },
+    { id: CAMPOS_LEADS.CPF, value: chave.cpf },
+    { id: CAMPOS_LEADS.TELEFONE, value: chave.telefone },
+    { id: CAMPOS_LEADS.NOME, value: nome },
+    { id: CAMPOS_LEADS.PROXIMO_CONTATO, value: hojeEpoch },
+    { id: CAMPOS_LEADS.SCORE, value: 0 },
+    { id: CAMPOS_LEADS.QTD_TENTATIVAS, value: 0 },
+    { id: CAMPOS_LEADS.QTD_ATENDIMENTOS, value: 0 },
+    { id: CAMPOS_LEADS.QTD_NAO_ATENDIMENTOS, value: 0 },
+  ];
+  const jaTemOrigem = Object.prototype.hasOwnProperty.call(chave.patchCandidato, CAMPOS_LEADS.ORIGEM);
+  for (const [fieldId, valor] of Object.entries(chave.patchCandidato)) {
+    // ID_SUPABASE/CPF/TELEFONE/NOME já foram adicionados acima (com defaults
+    // próprios) -- só os demais campos de perfil/endereço entram aqui.
+    if ([CAMPOS_LEADS.ID_SUPABASE, CAMPOS_LEADS.CPF, CAMPOS_LEADS.TELEFONE, CAMPOS_LEADS.NOME].includes(fieldId)) continue;
+    customFields.push({ id: fieldId, value: valor });
+  }
+  if (!jaTemOrigem) customFields.push({ id: CAMPOS_LEADS.ORIGEM, value: 'supabase' });
+
+  return { name: nome, custom_fields: customFields };
 }
 
 async function main() {
@@ -202,8 +246,56 @@ async function main() {
     process.exit(0);
   }
 
-  console.log('\n(escrita real ainda não implementada nesta fatia -- nada foi escrito.)');
-  process.exit(0);
+  // ===== Escrita real (fora de --dry-run): materializa cada registro =====
+  const hojeEpoch = Date.now();
+  let criados = 0;
+  let atualizados = 0;
+  let semAlteracao = 0;
+  let falhas = 0;
+
+  console.log(`\nMaterializando ${classificados.length} registro(s) no ClickUp...`);
+  for (const { chave, resultado } of classificados) {
+    const identificador = `${chave.nome || '(sem nome)'} (${mascararTelefone(chave.telefone)})`;
+    try {
+      if (resultado.match === null) {
+        // Registro NOVO -- cria lead elegível ao lote de hoje (D-P4-07).
+        const payload = montarPayloadNovoLead(chave, hojeEpoch);
+        const novaTask = await criarTask(CLICKUP_LIST_LEADS, payload);
+        if (!novaTask?.id) {
+          throw new Error('criarTask retornou sem id');
+        }
+        console.log(`  [novo] ${identificador} -> lead ${novaTask.id}`);
+        criados += 1;
+        continue;
+      }
+
+      // Registro CASADO (D-P4-08) -- só preenche campo vazio + ID_SUPABASE (D-P4-09).
+      const patch = mesclarCamposVazios(resultado.match, chave.patchCandidato, CAMPOS_LEADS.ID_SUPABASE);
+      if (Object.keys(patch).length === 0) {
+        console.log(`  [casado/${resultado.nivel}, sem alteração] ${identificador} -> lead ${resultado.match.taskId}`);
+        semAlteracao += 1;
+        continue;
+      }
+      for (const [fieldId, valor] of Object.entries(patch)) {
+        await setCustomField(resultado.match.taskId, fieldId, valor);
+      }
+      console.log(
+        `  [casado/${resultado.nivel}, ${Object.keys(patch).length} campo(s) preenchido(s)] ${identificador} -> lead ${resultado.match.taskId}`,
+      );
+      atualizados += 1;
+    } catch (e) {
+      // Falha num registro conta e segue -- nunca aborta a ingestão inteira
+      // (mesmo padrão de gerar-lote.mjs, D-P4-06). Erro de infra/HTTP das
+      // funções clickup/supabase LANÇA (WR-03) e é capturado aqui, por item.
+      falhas += 1;
+      console.error(`  [erro] falha ao ingerir ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  console.log(
+    `\n=== Resumo: ${criados} criado(s), ${atualizados} atualizado(s), ${semAlteracao} sem alteração, ${falhas} falha(s). ===`,
+  );
+  process.exit(falhas > 0 ? 1 : 0);
 }
 
 main().catch((e) => {
