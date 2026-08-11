@@ -99,6 +99,34 @@ ficam degradadas — D-P4-06).
    completo, `assignees` = memberId do operador, custom fields `ID_LEAD` e
    `TELEFONE` (e `LEAD_REL` quando o vínculo é aceito pela API).
 
+## Dossiê avulso (fora do lote)
+
+Fora da rotina diária, para (re)montar o Dossiê 360° de leads da Lista 01 sem
+mexer no lote (sem seleção/priorização, sem criar Ligação na Lista 02), use o
+runner:
+
+```bash
+node --env-file=.env --experimental-strip-types scripts/montar-dossies.mjs [--dry-run] [--tamanho N] [--lead <taskId>] [--forcar]
+```
+
+O que faz: reúne as mesmas fontes do lote (GHL conversas/oportunidades,
+Supabase militante/follow-ups, histórico RomeroCall) e monta o Dossiê 360°
+(6 seções, `montarPromptDossie`), gravando na **descrição** da task do lead
+(Lista 01) — mesma coleta/degradação de `gerar-lote.mjs`.
+
+O que NÃO faz: NÃO cria Ligação, NÃO toca a Lista 02, NÃO aplica
+elegibilidade/priorização de lote.
+
+- `--dry-run` — monta com o LLM real e imprime o preview (tamanho + seções
+  degradadas), sem escrever no ClickUp.
+- `--tamanho N` — limita quantos leads processar; sem a flag, processa todos
+  os que passarem no filtro (sem priorização — corte por ordem da lista).
+- `--lead <taskId>` — processa só aquela task, ignorando `--tamanho`.
+- `--forcar` — remonta mesmo quem já tem dossiê.
+- **Default (sem `--forcar`):** só processa leads cuja descrição ainda não
+  contém o marcador do dossiê (título da seção 1, "Perfil e classificação") —
+  `--forcar` remonta mesmo assim.
+
 ## Idempotência (D-P2-03)
 
 Rodar a skill **2x no mesmo dia não duplica tasks**: o critério de dedupe é
@@ -140,6 +168,7 @@ arquivo/log.
 ## Arquivos relacionados
 
 - `scripts/gerar-lote.mjs` — runner do lote (seleção → dossiê → script → Ligação).
+- `scripts/montar-dossies.mjs` — runner do dossiê avulso (Fase 1 Contexto): monta/regrava o Dossiê 360° de leads da Lista 01 sob demanda, sem seleção de lote nem Ligação.
 - `scripts/gerar-lote.smoke.mjs` / `scripts/lote-selecao.smoke.mjs` / `scripts/script-dossie.smoke.mjs` — smokes determinísticos (sem rede) dos helpers puros e do script nascendo do Gancho.
 - `scripts/ingerir-supabase.mjs` — runner de ingestão/dedupe Supabase → Lista 01 (PASSO 0, DOSS-02).
 - `scripts/descobrir-supabase-ghl.mjs` — runner de descoberta read-only (esquema Supabase real + probe de escopo GHL) — rodar antes de fixar `SUPABASE_TABLE_*`/`SUPABASE_COL_*` no `.env`.
