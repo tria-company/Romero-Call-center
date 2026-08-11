@@ -9,7 +9,13 @@
 //
 // Uso: node --experimental-strip-types scripts/analise-payload.smoke.mjs
 
-import { derivarAtendeu, derivarMotivoFalha, derivarDuracao } from '../src/mastra/analise.ts';
+import {
+  derivarAtendeu,
+  derivarMotivoFalha,
+  derivarDuracao,
+  ehStatusFalhaTerminal,
+  deveProcessarFalhaTerminal,
+} from '../src/mastra/analise.ts';
 
 const falhas = [];
 
@@ -105,11 +111,62 @@ function testarStatusDesconhecidoComGravacao() {
   );
 }
 
+// (f) CR-01 — predicado explícito de falha terminal (ehStatusFalhaTerminal):
+// status de transição (RINGING/CALLING), desconhecido ou ausente NUNCA é
+// falha terminal, mesmo com duration=0; só STATUS_NAO_ATENDIDA conhecido é.
+function testarStatusTerminalDeFalha() {
+  checar(
+    ehStatusFalhaTerminal({ status: 'NOT_ANSWERED', duration: 0 }) === true,
+    'NOT_ANSWERED deveria ser falha terminal',
+  );
+  checar(ehStatusFalhaTerminal({ status: 'UNANSWERED' }) === true, 'UNANSWERED deveria ser falha terminal');
+  checar(ehStatusFalhaTerminal({ status: 'REJECTED' }) === true, 'REJECTED deveria ser falha terminal');
+  checar(ehStatusFalhaTerminal({ status: 'MISSED' }) === true, 'MISSED deveria ser falha terminal');
+  checar(
+    ehStatusFalhaTerminal({ status: 'RINGING', duration: 0 }) === false,
+    'RINGING (transição) NÃO deveria ser falha terminal',
+  );
+  checar(
+    ehStatusFalhaTerminal({ status: 'CALLING', duration: 0 }) === false,
+    'CALLING (transição) NÃO deveria ser falha terminal',
+  );
+  checar(
+    ehStatusFalhaTerminal({ status: 'ALGO_NOVO' }) === false,
+    'status desconhecido NÃO deveria ser falha terminal',
+  );
+  checar(ehStatusFalhaTerminal({}) === false, 'status ausente NÃO deveria ser falha terminal');
+  checar(ehStatusFalhaTerminal({ status: 'ACTIVE' }) === false, 'ACTIVE (atendida) NÃO deveria ser falha terminal');
+  checar(
+    ehStatusFalhaTerminal({ status: 'ANSWERED' }) === false,
+    'ANSWERED (atendida) NÃO deveria ser falha terminal',
+  );
+}
+
+// (g) CR-02 — decisão pura de dedup (deveProcessarFalhaTerminal): primeira
+// vez processa, segunda vez para o mesmo callId é no-op; sem callId sempre
+// processa (a limpeza de taskAtivaPorTelefone no caller cobre o retry).
+function testarDedupFalhaTerminal() {
+  checar(
+    deveProcessarFalhaTerminal('c1', new Set()) === true,
+    'primeira vez (Set vazio) deveria processar',
+  );
+  checar(
+    deveProcessarFalhaTerminal('c1', new Set(['c1'])) === false,
+    'segundo evento terminal para o mesmo callId deveria ser no-op (CR-02)',
+  );
+  checar(
+    deveProcessarFalhaTerminal('', new Set(['c1'])) === true,
+    'callId vazio deveria sempre processar (sem chave de dedup)',
+  );
+}
+
 testarAtendidoComGravacao();
 testarNaoAtendidoSemGravacao();
 testarRecusada();
 testarSemDuration();
 testarStatusDesconhecidoComGravacao();
+testarStatusTerminalDeFalha();
+testarDedupFalhaTerminal();
 
 if (falhas.length > 0) {
   console.error('=== SMOKE FAIL ===');

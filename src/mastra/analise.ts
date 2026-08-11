@@ -86,6 +86,35 @@ export function derivarMotivoFalha(payload: PayloadCallWavoip): string {
   return `não atendida (status=${status})`;
 }
 
+/**
+ * Predicado explícito de falha terminal do branch CALL (CR-01, gap-closure
+ * 03-06): retorna `true` SOMENTE quando o `status` normalizado do payload
+ * está em `STATUS_NAO_ATENDIDA` (vocabulário assumido — D-P3-05). Diferente
+ * de `derivarAtendeu`, este predicado NUNCA dispara por fallback de
+ * `duration`/`teveGravacao` — status ausente, intermediário (ex.: RINGING,
+ * CALLING) ou desconhecido retornam `false`. Existe para o gate de
+ * "não-atendida" do webhook (index.ts) nunca fechar/consolidar a Ligação
+ * enquanto a chamada ainda está tocando (transição), só para falha terminal
+ * confirmada. Mantém o vocabulário provisório isolado em `analise.ts`.
+ */
+export function ehStatusFalhaTerminal(payload: PayloadCallWavoip): boolean {
+  return STATUS_NAO_ATENDIDA.has(statusNormalizado(payload));
+}
+
+/**
+ * Decisão pura de dedup do caminho de falha do branch CALL (CR-02,
+ * gap-closure 03-06) — espelha o padrão de `recordsProcessados` usado no
+ * caminho RECORD. Retorna `true` quando o evento deve ser processado: sem
+ * `callId` não há chave de dedup, então processa (a limpeza de
+ * `taskAtivaPorTelefone` no caller cobre o retry sequencial); com `callId`,
+ * só processa se ainda não visto — um segundo evento CALL terminal para a
+ * mesma chamada (retry/reentrega do webhook) vira no-op. A MUTAÇÃO do Set
+ * (`.add`) fica no caller (index.ts); esta função só DECIDE.
+ */
+export function deveProcessarFalhaTerminal(callId: string, jaProcessadas: Set<string>): boolean {
+  return !callId ? true : !jaProcessadas.has(callId);
+}
+
 // ===== Agente Análise — prompt/parse/regra de revisão/extração de retorno (OPER-03/04, Fase 03 Plano 03) =====
 //
 // Regras de negócio (D-P3-09/10/11/15, ver 03-CONTEXT.md):
