@@ -76,6 +76,28 @@ export const CAMPOS_LIGACOES = {
   ADERENCIA_SCRIPT: 'cb84cac6-4b30-488d-a4a8-1ecce9508a79', // "Aderência ao script" (number) — D-06 revisado
 } as const;
 
+// Opcoes (UUID) dos 3 custom fields drop_down da Lista 02 LIGACOES. A API v2
+// do ClickUp exige o UUID da opcao pra campos drop_down (nao aceita
+// boolean/nome) — setCustomField usa este mapa pra traduzir na escrita. IDs
+// fixos verificados via GET /list/1000320000002834/field (D-07 — nunca
+// resolver por nome em runtime; mesmo racional do mapeamento
+// markdown_description em criarTask/atualizarTask: centralizar a traducao no
+// choke point pra nao espalhar pelos callers).
+export const OPCOES_LIGACOES = {
+  [CAMPOS_LIGACOES.ATENDEU]: {
+    sim: '84ee8d4b-a924-4ed2-bcf5-fb4dc7f82ce5',
+    nao: 'b7dd48cc-c950-495a-b8ff-b7f0501ad7f0',
+  },
+  [CAMPOS_LIGACOES.NECESSITA_REVISAO]: {
+    sim: '5765cd98-4c34-441a-92a6-5f0f6bdec8a0',
+    nao: '0ff8679f-b60f-42bb-8749-967370149d2e',
+  },
+  [CAMPOS_LIGACOES.RETORNO_NECESSARIO]: {
+    sim: '5b24f7a6-b442-49fe-9768-2fcaa38746cf',
+    nao: '61c32634-9a29-46f3-b5be-add30388113c',
+  },
+} as const;
+
 export interface CustomFieldClickUp {
   id: string;
   name?: string;
@@ -281,12 +303,17 @@ export async function setCustomField(taskId: string, fieldId: string, value: unk
   if (!fieldId) {
     throw new Error(`[clickup] setCustomField chamado sem fieldId para a task ${taskId}`);
   }
+  // drop_down exige o UUID da opcao, nao boolean — traduz aqui (choke point)
+  // quando o fieldId e um dos 3 drop_down da Lista 02 e o value e boolean;
+  // qualquer outro caso passa `value` intacto.
+  const opcoes = (OPCOES_LIGACOES as Record<string, { sim: string; nao: string }>)[fieldId];
+  const valorFinal = opcoes && typeof value === 'boolean' ? (value ? opcoes.sim : opcoes.nao) : value;
   let res: Response;
   try {
     res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}/field/${fieldId}`, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ value }),
+      body: JSON.stringify({ value: valorFinal }),
     });
   } catch (e) {
     throw new Error(
