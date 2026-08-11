@@ -22,6 +22,13 @@ import { buscarConversasWhatsApp, buscarOportunidades, buscarQualificados } from
 const PISTAS_MILITANTES = ['militante', 'lead', 'contato', 'pessoa', 'cliente'];
 const PISTAS_FOLLOWUPS = ['follow', 'triagem', 'acompanhamento', 'retorno'];
 
+// Pistas pra SUPABASE_COL_FOLLOWUP_REF (gap CR-02, 04-VERIFICATION.md) — a FK
+// da tabela de follow-ups que aponta pro militante dono do follow-up. So uma
+// SUGESTAO (a decisao final e humana); NUNCA e a coluna `id` isolada (essa e a
+// PK do proprio follow-up, e o filtro errado que causou a contaminacao cruzada
+// de PII original).
+const PISTAS_FOLLOWUP_REF = ['militante', 'lead', 'pessoa', 'contato', 'ref', 'fk'];
+
 function sugerirTabela(tabelas, pistas) {
   const lower = tabelas.map((t) => t.tabela.toLowerCase());
   for (const pista of pistas) {
@@ -29,6 +36,26 @@ function sugerirTabela(tabelas, pistas) {
     if (idx !== -1) return tabelas[idx];
   }
   return null;
+}
+
+/**
+ * Sugere colunas candidatas a FK do militante na tabela de follow-ups (CR-02):
+ * bate com pistas de nome (militante/lead/pessoa/contato/ref/fk), termina em
+ * `_id` sem ser exatamente `id`, ou bate com o nome da tabela de militantes
+ * sugerida (ex: "militante" -> "militante_id"). NUNCA sugere `id` sozinho —
+ * essa e a PK do proprio follow-up, nao a FK do militante. So imprime NOMES de
+ * coluna (LGPD — a base tem CPF), nunca conteudo de linha.
+ */
+function sugerirColunasFollowupRef(colunasFollowups, nomeTabelaMilitantes) {
+  const candidatas = new Set();
+  for (const col of colunasFollowups) {
+    const lower = col.toLowerCase();
+    if (lower === 'id') continue; // PK do proprio follow-up — nunca a FK do militante.
+    if (PISTAS_FOLLOWUP_REF.some((pista) => lower.includes(pista))) candidatas.add(col);
+    else if (/_id$/.test(lower)) candidatas.add(col);
+    else if (nomeTabelaMilitantes && lower.includes(nomeTabelaMilitantes.toLowerCase())) candidatas.add(col);
+  }
+  return [...candidatas];
 }
 
 function lerArgv(nome) {
@@ -68,6 +95,23 @@ async function descobrirSupabase() {
   if (sugestaoFollowUps) {
     console.log(`  SUPABASE_TABLE_FOLLOWUPS=${sugestaoFollowUps.tabela}`);
     console.log(`    colunas candidatas: ${sugestaoFollowUps.colunas.join(', ')}`);
+
+    // CR-02 (04-VERIFICATION.md): sugere a FK do militante nessa tabela — NUNCA
+    // `id` sozinho (PK do proprio follow-up). So nomes de coluna (LGPD).
+    const nomeTabelaMilitantes = sugestaoMilitantes?.tabela;
+    const candidatasFollowupRef = sugerirColunasFollowupRef(sugestaoFollowUps.colunas, nomeTabelaMilitantes);
+    if (candidatasFollowupRef.length > 0) {
+      console.log(`  SUPABASE_COL_FOLLOWUP_REF candidatas: ${candidatasFollowupRef.join(', ')}`);
+      console.log(
+        '    confirme no checkpoint qual delas e a FK real do militante (NUNCA "id" — essa e a PK do ' +
+          'proprio follow-up, o filtro errado que causava contaminacao cruzada de PII).',
+      );
+    } else {
+      console.log(
+        `  SUPABASE_COL_FOLLOWUP_REF: nenhuma candidata obvia por heuristica. Colunas da tabela pra ` +
+          `inspecao manual: ${sugestaoFollowUps.colunas.join(', ')} (confirmar no checkpoint).`,
+      );
+    }
   } else {
     console.log('  SUPABASE_TABLE_FOLLOWUPS: nenhuma tabela óbvia encontrada por heurística — confirmar manualmente.');
   }

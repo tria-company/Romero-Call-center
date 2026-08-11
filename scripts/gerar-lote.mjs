@@ -49,7 +49,7 @@ import { montarPromptDossie } from '../src/mastra/dossie.ts';
 import { buscarMilitante, listarFollowUps } from '../src/mastra/supabase.ts';
 import { buscarContactIdPorTelefone, buscarConversasWhatsApp, buscarOportunidades } from '../src/mastra/ghl.ts';
 import { assigneeDoOperador } from '../src/mastra/operadores.ts';
-import { LOTE_LIMITE_TENTATIVAS, LOTE_TAMANHO_DEFAULT } from '../src/mastra/config.ts';
+import { LOTE_LIMITE_TENTATIVAS, LOTE_TAMANHO_DEFAULT, SUPABASE_COL_ID } from '../src/mastra/config.ts';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -172,9 +172,20 @@ async function montarDossieDoLead(lead, taskLead, identificador) {
     console.warn(`  [aviso] militante Supabase indisponível para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // refMilitante (CR-02, 04-VERIFICATION.md): a FK correta pra filtrar a seção 5
+  // (follow-ups) é o id DO MILITANTE — nunca id/cpf/telefone do lead misturados.
+  // Fonte primária: a linha real retornada por buscarMilitante (SUPABASE_COL_ID);
+  // fallback: o ID_SUPABASE já lido da task do lead (todo lead ingerido tem um).
+  // Sem nenhum dos dois, listarFollowUps LANÇA "referência do militante ausente"
+  // — o try/catch abaixo converte isso em seção 5 degradada (D-P4-06), NUNCA em
+  // dado de outra pessoa.
+  const refMilitante = supabaseMilitante?.[SUPABASE_COL_ID]
+    ? String(supabaseMilitante[SUPABASE_COL_ID])
+    : idSupabase || undefined;
+
   let supabaseFollowUps = null;
   try {
-    supabaseFollowUps = await listarFollowUps(chaveSupabase);
+    supabaseFollowUps = await listarFollowUps({ refMilitante });
   } catch (e) {
     console.warn(`  [aviso] follow-ups Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
   }
