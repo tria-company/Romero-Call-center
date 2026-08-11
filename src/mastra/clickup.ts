@@ -533,7 +533,7 @@ export async function gravarMetadadosLigacao(taskId: string, patch: PatchMetadad
     await setCustomField(taskId, CAMPOS_LIGACOES.FIM, patch.fim);
   }
   if (patch.duracao !== undefined) {
-    await setCustomField(taskId, CAMPOS_LIGACOES.DURACAO, patch.duracao);
+    await setCustomField(taskId, CAMPOS_LIGACOES.DURACAO, String(patch.duracao));
   }
   if (patch.urlGravacao !== undefined) {
     await setCustomField(taskId, CAMPOS_LIGACOES.URL_GRAVACAO, patch.urlGravacao);
