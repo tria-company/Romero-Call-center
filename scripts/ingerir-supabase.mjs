@@ -24,7 +24,7 @@ import {
   CAMPOS_LEADS,
 } from '../src/mastra/clickup.ts';
 import { listarTabela } from '../src/mastra/supabase.ts';
-import { resolverDedupe, mesclarCamposVazios } from '../src/mastra/dossie.ts';
+import { planejarIngestao } from '../src/mastra/dossie.ts';
 import {
   SUPABASE_URL,
   SUPABASE_SERVICE_KEY,
@@ -221,24 +221,26 @@ async function main() {
   const leadsExistentes = tasksLeads.map(paraLeadExistente);
   console.log(`  ${leadsExistentes.length} lead(s) lido(s) da Lista 01 (contagem apenas, sem PII).`);
 
-  const classificados = registros.map((registro) => {
-    const chave = normalizarRegistro(registro);
-    const resultado = resolverDedupe(chave, leadsExistentes);
-    return { chave, resultado };
-  });
+  // Dedupe incremental (fecha CR-03, 04-VERIFICATION.md/04-REVIEW.md): resolve
+  // o plano UMA vez, registro a registro, contra uma coleção viva que cresce
+  // a cada 'criar'/atualiza a cada 'mesclar' -- dois registros da mesma
+  // pessoa nesta leitura (mesmo CPF/telefone, ids diferentes) nunca viram 2
+  // leads novos; o 2º sempre casa o lead recém-criado pelo 1º.
+  const registrosNormalizados = registros.map(normalizarRegistro);
+  const plano = planejarIngestao(registrosNormalizados, leadsExistentes, CAMPOS_LEADS.ID_SUPABASE);
 
-  const novos = classificados.filter((c) => c.resultado.match === null);
-  const casadosPorNivel = {
-    id_supabase: classificados.filter((c) => c.resultado.nivel === 'id_supabase').length,
-    cpf: classificados.filter((c) => c.resultado.nivel === 'cpf').length,
-    telefone: classificados.filter((c) => c.resultado.nivel === 'telefone').length,
-  };
-  const totalCasados = casadosPorNivel.id_supabase + casadosPorNivel.cpf + casadosPorNivel.telefone;
+  const acoesCriar = plano.filter((a) => a.acao === 'criar');
+  const acoesMesclar = plano.filter((a) => a.acao === 'mesclar');
+  const acoesSemAlteracao = plano.filter((a) => a.acao === 'sem-alteracao');
+  const casadosPorNivel = { id_supabase: 0, cpf: 0, telefone: 0 };
+  for (const acao of [...acoesMesclar, ...acoesSemAlteracao]) {
+    if (acao.nivel) casadosPorNivel[acao.nivel] += 1;
+  }
 
   console.log(
-    `\n=== Preview do dedupe: ${novos.length} seria(m) criado(s) como lead novo, ` +
-      `${totalCasados} casaria(m) com lead existente ` +
-      `(id_supabase: ${casadosPorNivel.id_supabase}, cpf: ${casadosPorNivel.cpf}, telefone: ${casadosPorNivel.telefone}). ===`,
+    `\n=== Preview do dedupe incremental: ${acoesCriar.length} seria(m) criado(s) como lead novo, ` +
+      `${acoesMesclar.length} seria(m) atualizado(s), ${acoesSemAlteracao.length} sem alteração ` +
+      `(casados por nível -- id_supabase: ${casadosPorNivel.id_supabase}, cpf: ${casadosPorNivel.cpf}, telefone: ${casadosPorNivel.telefone}). ===`,
   );
 
   if (DRY_RUN) {
@@ -246,41 +248,49 @@ async function main() {
     process.exit(0);
   }
 
-  // ===== Escrita real (fora de --dry-run): materializa cada registro =====
+  // ===== Escrita real (fora de --dry-run): materializa o plano NA ORDEM =====
   const hojeEpoch = Date.now();
+  const mapaRefNovo = new Map(); // refNovo ('novo#<indice>') -> taskId real, preenchido a cada 'criar'.
   let criados = 0;
   let atualizados = 0;
   let semAlteracao = 0;
   let falhas = 0;
 
-  console.log(`\nMaterializando ${classificados.length} registro(s) no ClickUp...`);
-  for (const { chave, resultado } of classificados) {
-    const identificador = `${chave.nome || '(sem nome)'} (${mascararTelefone(chave.telefone)})`;
+  console.log(`\nMaterializando ${plano.length} registro(s) no ClickUp...`);
+  for (const acao of plano) {
+    const registro = registrosNormalizados[acao.indice];
+    const identificador = `${registro.nome || '(sem nome)'} (${mascararTelefone(registro.telefone)})`;
     try {
-      if (resultado.match === null) {
+      if (acao.acao === 'criar') {
         // Registro NOVO -- cria lead elegível ao lote de hoje (D-P4-07).
-        const payload = montarPayloadNovoLead(chave, hojeEpoch);
+        const payload = montarPayloadNovoLead(registro, hojeEpoch);
         const novaTask = await criarTask(CLICKUP_LIST_LEADS, payload);
         if (!novaTask?.id) {
           throw new Error('criarTask retornou sem id');
         }
+        mapaRefNovo.set(acao.refNovo, novaTask.id);
         console.log(`  [novo] ${identificador} -> lead ${novaTask.id}`);
         criados += 1;
         continue;
       }
 
-      // Registro CASADO (D-P4-08) -- só preenche campo vazio + ID_SUPABASE (D-P4-09).
-      const patch = mesclarCamposVazios(resultado.match, chave.patchCandidato, CAMPOS_LEADS.ID_SUPABASE);
-      if (Object.keys(patch).length === 0) {
-        console.log(`  [casado/${resultado.nivel}, sem alteração] ${identificador} -> lead ${resultado.match.taskId}`);
+      const alvoTaskId = acao.alvoTaskId ?? mapaRefNovo.get(acao.alvoRefNovo);
+      if (!alvoTaskId) {
+        throw new Error(`alvo do plano não resolvido (alvoRefNovo=${acao.alvoRefNovo} sem taskId real correspondente)`);
+      }
+
+      if (acao.acao === 'sem-alteracao') {
+        console.log(`  [casado/${acao.nivel}, sem alteração] ${identificador} -> lead ${alvoTaskId}`);
         semAlteracao += 1;
         continue;
       }
-      for (const [fieldId, valor] of Object.entries(patch)) {
-        await setCustomField(resultado.match.taskId, fieldId, valor);
+
+      // acao.acao === 'mesclar' -- Registro CASADO (D-P4-08), só preenche campo vazio + ID_SUPABASE (D-P4-09).
+      for (const [fieldId, valor] of Object.entries(acao.patch)) {
+        await setCustomField(alvoTaskId, fieldId, valor);
       }
       console.log(
-        `  [casado/${resultado.nivel}, ${Object.keys(patch).length} campo(s) preenchido(s)] ${identificador} -> lead ${resultado.match.taskId}`,
+        `  [casado/${acao.nivel}, ${Object.keys(acao.patch).length} campo(s) preenchido(s)] ${identificador} -> lead ${alvoTaskId}`,
       );
       atualizados += 1;
     } catch (e) {
