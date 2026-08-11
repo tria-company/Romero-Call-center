@@ -220,10 +220,27 @@ export function montarPromptScript(lead: LeadLote, dossieMarkdown?: string): { s
 }
 
 /**
+ * Chave de dedupe/vínculo da Ligação SEMPRE não-vazia (fecha CR-01,
+ * 04-VERIFICATION.md/04-REVIEW.md): leads nascidos da ingestão Supabase
+ * (Fase 04 Plano 03/06) nunca têm `ID_LEAD_GHL`, então `lead.idLead` chega
+ * `''` em `parseLeadDaTask`. Usar `''` como chave faria toda Ligação de
+ * lead Supabase "casar" com qualquer outra (starvation cruzada) ou nunca
+ * casar quando o ClickUp omite valor vazio (duplicação na 2ª rodada,
+ * viola D-P2-03). Fallback: `lead.taskId` (o id da própria task na Lista
+ * 01) — mesmo racional do fallback já usado em `criarLigacaoAvulsa`
+ * (clickup.ts, `ID_LEAD_GHL?.value ?? leadMatch.id`), generalizado aqui
+ * para o pipeline de lote inteiro. Pura e determinística.
+ */
+export function chaveDedupeLigacao(lead: LeadLote): string {
+  return lead.idLead || lead.taskId;
+}
+
+/**
  * Monta o payload de `criarTask` (clickup.ts) para a Ligação de um lead
  * (D-P2-06): name identificando o lead, script na descrição, assignee do
  * operador e vínculo (ID_LEAD/TELEFONE) por field-id injetado (D-07). Puro —
- * não importa clickup.ts.
+ * não importa clickup.ts. `ID_LEAD` usa `chaveDedupeLigacao` (fecha CR-01) em
+ * vez de `lead.idLead` diretamente, para nunca gravar vínculo vazio.
  */
 export function montarTaskLigacao(
   lead: LeadLote,
@@ -236,7 +253,7 @@ export function montarTaskLigacao(
     description: script,
     assignees: [Number(assigneeId)],
     custom_fields: [
-      { id: campos.ID_LEAD, value: lead.idLead },
+      { id: campos.ID_LEAD, value: chaveDedupeLigacao(lead) },
       { id: campos.TELEFONE, value: lead.telefone },
     ],
   };
@@ -246,13 +263,16 @@ export function montarTaskLigacao(
  * Dedupe idempotente (D-P2-03): `false` se alguma Ligação da lista
  * `ligacoesAbertas` (já filtrada para "abertas" pelo caller, via
  * `listarTasks(..., { includeClosed: false })`) já referencia o lead — match
- * por `idLeadFieldId` (field-id de `ID_LEAD` na Lista 02) === `lead.idLead`.
- * `true` = pode criar. Puro e determinística.
+ * por `idLeadFieldId` (field-id de `ID_LEAD` na Lista 02) ===
+ * `chaveDedupeLigacao(lead)` (fecha CR-01 — nunca compara contra `''`, então
+ * um lead Supabase nunca starva nem duplica). `true` = pode criar. Puro e
+ * determinística.
  */
 export function deveCriar(lead: LeadLote, ligacoesAbertas: TaskLike[], idLeadFieldId: string): boolean {
+  const chave = chaveDedupeLigacao(lead);
   const jaTemLigacaoAberta = ligacoesAbertas.some((task) => {
     const campo = task.custom_fields?.find((c) => c.id === idLeadFieldId);
-    return campo?.value !== undefined && campo?.value !== null && String(campo.value) === lead.idLead;
+    return campo?.value !== undefined && campo?.value !== null && String(campo.value) === chave;
   });
   return !jaTemLigacaoAberta;
 }

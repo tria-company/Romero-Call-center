@@ -13,7 +13,7 @@
 //
 // Uso: node --experimental-strip-types scripts/gerar-lote.smoke.mjs
 
-import { montarPromptScript, montarTaskLigacao, deveCriar } from '../src/mastra/lote.ts';
+import { montarPromptScript, montarTaskLigacao, deveCriar, chaveDedupeLigacao } from '../src/mastra/lote.ts';
 
 const falhas = [];
 
@@ -112,9 +112,91 @@ function testarDeveCriar() {
   );
 }
 
+// ===== chaveDedupeLigacao / dedupe do lead Supabase (idLead vazio) — fecha CR-01 =====
+// (04-06-PLAN.md Task 1: Test A-E)
+
+function testarMontarTaskLigacaoLeadSupabase() {
+  // Test A: lead Supabase (idLead vazio) -> ID_LEAD grava o taskId (fallback), nunca vazio.
+  const leadSupabase = leadFixture({ taskId: 'lista01-A', idLead: '' });
+  const payload = montarTaskLigacao(leadSupabase, 'roteiro...', '88123456', CAMPOS_LIGACOES_FIXTURE);
+  const campoIdLead = payload.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES_FIXTURE.ID_LEAD);
+  checar(
+    campoIdLead?.value === 'lista01-A',
+    `montarTaskLigacao (lead Supabase): ID_LEAD deveria usar o taskId como fallback ('lista01-A'), recebido ${JSON.stringify(campoIdLead)}`,
+  );
+  checar(campoIdLead?.value !== '', 'montarTaskLigacao (lead Supabase): ID_LEAD NUNCA deveria ficar vazio');
+}
+
+function testarMontarTaskLigacaoLeadGhlRetrocompativel() {
+  // Test B: lead GHL (idLead presente) -> ID_LEAD continua usando o idLead (retrocompatível).
+  const leadGhl = leadFixture({ taskId: 'lista01-C', idLead: 'ghl-1' });
+  const payload = montarTaskLigacao(leadGhl, 'roteiro...', '88123456', CAMPOS_LIGACOES_FIXTURE);
+  const campoIdLead = payload.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES_FIXTURE.ID_LEAD);
+  checar(
+    campoIdLead?.value === 'ghl-1',
+    `montarTaskLigacao (lead GHL): ID_LEAD deveria continuar usando idLead ('ghl-1'), recebido ${JSON.stringify(campoIdLead)}`,
+  );
+}
+
+function testarDeveCriarIdempotenteLeadSupabaseRerun() {
+  // Test C: lead Supabase com Ligação aberta já vinculada ao próprio taskId -> pula (idempotente na 2a rodada).
+  const leadSupabase = leadFixture({ taskId: 'lista01-A', idLead: '' });
+  const ligacaoAberta = {
+    id: 'ligacao-1',
+    custom_fields: [{ id: CAMPOS_LIGACOES_FIXTURE.ID_LEAD, value: 'lista01-A' }],
+  };
+  checar(
+    deveCriar(leadSupabase, [ligacaoAberta], CAMPOS_LIGACOES_FIXTURE.ID_LEAD) === false,
+    'deveCriar (lead Supabase, rerun): deveria retornar false quando já há Ligação aberta vinculada ao taskId do lead',
+  );
+}
+
+function testarDeveCriarSemStarvationCruzada() {
+  // Test D: lead Supabase B não deveria ser bloqueado por Ligação aberta de outro lead Supabase (A) -- sem starvation cruzada.
+  const leadSupabaseB = leadFixture({ taskId: 'lista01-B', idLead: '' });
+  const ligacaoAbertaDeA = {
+    id: 'ligacao-A',
+    custom_fields: [{ id: CAMPOS_LIGACOES_FIXTURE.ID_LEAD, value: 'lista01-A' }],
+  };
+  checar(
+    deveCriar(leadSupabaseB, [ligacaoAbertaDeA], CAMPOS_LIGACOES_FIXTURE.ID_LEAD) === true,
+    'deveCriar (lead Supabase B): NÃO deveria starvar por causa da Ligação aberta de outro lead Supabase (A) -- chave é o próprio taskId de B',
+  );
+}
+
+function testarDeveCriarLigacaoComValueVazioNuncaCasa() {
+  // Test E: Ligação aberta com ID_LEAD value:'' nunca deveria casar com um lead Supabase (chave do lead é o taskId, nunca '').
+  const leadSupabase = leadFixture({ taskId: 'lista01-D', idLead: '' });
+  const ligacaoComValueVazio = {
+    id: 'ligacao-vazia',
+    custom_fields: [{ id: CAMPOS_LIGACOES_FIXTURE.ID_LEAD, value: '' }],
+  };
+  checar(
+    deveCriar(leadSupabase, [ligacaoComValueVazio], CAMPOS_LIGACOES_FIXTURE.ID_LEAD) === true,
+    "deveCriar: uma Ligação com ID_LEAD value:'' nunca deveria casar com um lead Supabase (a chave do lead é o taskId, não '')",
+  );
+}
+
+function testarChaveDedupeLigacaoExportada() {
+  checar(
+    chaveDedupeLigacao(leadFixture({ taskId: 'lista01-A', idLead: '' })) === 'lista01-A',
+    'chaveDedupeLigacao: deveria retornar o taskId quando idLead está vazio',
+  );
+  checar(
+    chaveDedupeLigacao(leadFixture({ taskId: 'lista01-A', idLead: 'ghl-9' })) === 'ghl-9',
+    'chaveDedupeLigacao: deveria retornar idLead quando presente (retrocompatível)',
+  );
+}
+
 testarMontarPromptScript();
 testarMontarTaskLigacao();
 testarDeveCriar();
+testarMontarTaskLigacaoLeadSupabase();
+testarMontarTaskLigacaoLeadGhlRetrocompativel();
+testarDeveCriarIdempotenteLeadSupabaseRerun();
+testarDeveCriarSemStarvationCruzada();
+testarDeveCriarLigacaoComValueVazioNuncaCasa();
+testarChaveDedupeLigacaoExportada();
 
 if (falhas.length > 0) {
   console.error('=== SMOKE FAIL ===');
