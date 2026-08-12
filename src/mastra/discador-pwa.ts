@@ -152,6 +152,7 @@ export const DISCADOR_APP_JS = `(function(){
   var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
   var fila=null, filaIdx=0;
   var timerInt=null, timerStart=0;
+  var wakeLock=null, emChamada=false;
   function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
@@ -295,17 +296,35 @@ export const DISCADOR_APP_JS = `(function(){
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
     setCallStatus('Encerrada');endCallUI();
   }
-  function openCall(lead,status){wantHangup=false;var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
+  // Chamadas de 30-90 min: manter a tela acordada (no celular, apagar a tela
+  // suspende o WebRTC e derruba o audio). Wake Lock e best-effort e cai sozinho
+  // quando a aba esconde — por isso re-adquirimos no visibilitychange.
+  function pedirWakeLock(){
+    try{
+      if(!navigator.wakeLock||!navigator.wakeLock.request){return;}
+      navigator.wakeLock.request('screen').then(function(w){
+        wakeLock=w;try{w.addEventListener('release',function(){wakeLock=null;});}catch(e){}
+      }).catch(function(){});
+    }catch(e){}
+  }
+  function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
+  function openCall(lead,status){wantHangup=false;emChamada=true;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
-  function endCallUI(){if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;setTimeout(function(){$('call-overlay').style.display='none';},1400);}
+  function endCallUI(){emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;setTimeout(function(){$('call-overlay').style.display='none';},1400);}
   window.addEventListener('DOMContentLoaded',function(){
     $('login-btn').onclick=doLogin;
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
-    $('logout-btn').onclick=function(){setToken('');show('login');};
+    $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}setToken('');show('login');};
     $('reload-btn').onclick=carregarFila;
     $('lig-proxima').onclick=avancarFila;
     $('hangup-btn').onclick=hangup;
+    // Chamadas longas: evitar perder a ligacao por refresh/fechar/logout sem querer
+    // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
+    window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});
+    document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&emChamada&&!wakeLock){pedirWakeLock();}});
+    window.addEventListener('offline',function(){if(emChamada){setCallStatus('Sem internet — a ligação pode cair');}});
+    window.addEventListener('online',function(){if(emChamada){setCallStatus('Conexão restabelecida');}});
     if(getToken()){startFila();}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/discador/sw.js').catch(function(){});}
   });
