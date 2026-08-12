@@ -1,42 +1,46 @@
-# SDR Auton — mapa
+# Discador Wavoip — mapa
 
-Agente de WhatsApp (Camila + Qualificador) que qualifica alunos da base USI via BANT×SPIN e
-agenda calls comerciais com um closer humano, para a AUTON Health. Stack: **Mastra + GoHighLevel
-(GHL) + Supabase + Azure OpenAI**. Em portugues do Brasil.
+PWA de discagem para closers: lista os leads **QUALIFICADOS** do pipeline COMERCIAL USI
+(GoHighLevel) e liga via **SDK Wavoip** (WebRTC) no navegador. A ligação acontece 100% no
+cliente — não há telefonia no backend. Stack: **Mastra** (servidor HTTP/rotas, na VPS) +
+**web/** (frontend estático, deploy separado no Vercel) + **GHL** (lista de leads) +
+**Wavoip**. Em português do Brasil.
 
-## Estado do PRD
-
-PRD e **incremental e dinamico** (briefing → PRD → UX → arquitetura → historias → QA). Cada fase vive em um arquivo de [docs/](docs/) com cabecalho `Status: [draft|approved]` + data. Comece sempre olhando [docs/CONTEXT.md](docs/CONTEXT.md).
+**Arquitetura (desde a separação front/back):** o frontend (`web/`) é hospedado no Vercel;
+o backend (Mastra) fica na VPS só com API + webhook. `web/vercel.json` faz *rewrite* de
+`/api/*` pro backend — sem CORS, autenticação por Bearer token inalterada. O backend
+continua servindo a mesma UI em `/discador/*` (rotas antigas) como rollback, a partir do
+mesmo código-fonte em `discador-pwa.ts` — **os dois precisam ser mantidos em sincronia
+manualmente** até as rotas antigas serem removidas.
 
 ## Routing table
 
-| Tarefa | Vai para | Le primeiro |
-|---|---|---|
-| Editar briefing / PRD / UX / arquitetura / historias | [docs/](docs/) | [docs/CONTEXT.md](docs/CONTEXT.md) |
-| Editar a persona/system prompt da Camila | [docs/persona-camila.md](docs/persona-camila.md) (md fonte) → [src/mastra/agents/camila.ts](src/mastra/agents/camila.ts) (runtime) | [src/mastra/CONTEXT.md](src/mastra/CONTEXT.md) |
-| Editar a avaliacao BANT do Qualificador | [src/mastra/agents/qualificador.ts](src/mastra/agents/qualificador.ts) + [src/mastra/bant.ts](src/mastra/bant.ts) | [src/mastra/CONTEXT.md](src/mastra/CONTEXT.md) |
-| Mexer em uma tool GHL (ficha, campo, pipeline, calendario, task, nota, historico, mensagem, escalacao) | [src/mastra/tools/](src/mastra/tools/) | [src/mastra/CONTEXT.md](src/mastra/CONTEXT.md) |
-| Integracao WhatsApp (GHL) / persistencia / memoria | [src/mastra/](src/mastra/) (`ghl.ts`, `supabase.ts`, `memoria.ts`, `buffer.ts`, `bloqueio.ts`, `processors.ts`, `sessao.ts`) | [src/mastra/CONTEXT.md](src/mastra/CONTEXT.md) |
-| Schema do banco / migrations | [docs/sql/auton_sdr/](docs/sql/auton_sdr/) | [docs/03_arquitetura.md](docs/03_arquitetura.md) |
-| Variaveis de ambiente | [.env.example](.env.example) | — |
+| Tarefa | Vai para |
+|---|---|
+| Frontend do PWA — deploy Vercel (fonte real, produção) | [web/](web/) (`index.html`, `app.js`, `sw.js`, `manifest.webmanifest`) |
+| Frontend do PWA — servido pela VPS (rollback, mesma UI) | [src/mastra/discador-pwa.ts](src/mastra/discador-pwa.ts) |
+| Rewrite `/api/*` → backend (evita CORS) | [web/vercel.json](web/vercel.json) |
+| Rotas do servidor (PWA estático legado + API do discador) | [src/mastra/index.ts](src/mastra/index.ts) |
+| Login do closer / token de sessão | [src/mastra/discador-auth.ts](src/mastra/discador-auth.ts) |
+| Lista de leads qualificados (leitura no GHL) | [src/mastra/ghl.ts](src/mastra/ghl.ts) (`buscarQualificados`) |
+| Config (GHL + token Wavoip) | [src/mastra/config.ts](src/mastra/config.ts) |
+| Variáveis de ambiente | `.env` |
 
-## Convencoes de nome
+## Convenções
 
-- Arquivos: `kebab-case.ts` / `kebab-case.md`.
-- Docs do PRD: prefixo numerico de fase — `00_briefing.md`, `01_prd.md`, `02_ux-spec.md`, `03_arquitetura.md`, `04_po-checklist.md`, `05_historias.md`, `06_qa-checklist.md`.
-- Tabelas Supabase do projeto: prefixo `auton_sdr_` (ex: `auton_sdr_customers`).
-- Variaveis em codigo: portugues quando refletem dominio (`telefone`, `qualificador`, `bant`); ingles para padroes de framework (`agent`, `tools`, `memory`).
+- Arquivos: `kebab-case.ts`.
+- Variáveis em código: português quando refletem domínio (`telefone`, `qualificado`); inglês para padrões de framework (`server`, `handler`).
+- O token do device Wavoip (`WAVOIP_DEVICE_TOKEN`) é exposto client-side por design — o SDK do navegador precisa dele.
 
 ## Boundaries
 
-- **Nunca** inventar preco, prazo, bonus, desconto, cura ou opiniao clinica.
-- **Nunca** registrar agentes/tools fora do `src/mastra/index.ts`.
-- **Sempre** rodar `npm run build` antes de commitar para verificar compilacao.
+- **Sempre** rodar `npm run build` antes de commitar para verificar compilação.
+- O login seed é `admin/admin` — trocar via `DISCADOR_USERS`/`DISCADOR_SESSION_SECRET` em produção.
 
 ## Comandos
 
 ```shell
-npm run dev      # Mastra Studio em localhost:4111
-npm run build    # build de producao
-npm run start    # roda o servidor de producao
+npm run dev      # servidor em localhost:4111 (/discador)
+npm run build    # build de produção
+npm run start    # roda o servidor de produção
 ```

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Discador USI</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="icon" href="/icon.svg">
+<style>
+  :root{--bg:#0b1220;--card:#131c2e;--card2:#1a2438;--txt:#e7ecf5;--mut:#8fa0bd;--teal:#0f766e;--teal2:#12a594;--red:#dc2626;--line:#233149}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+  .wrap{max-width:640px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column}
+  header{position:sticky;top:0;background:rgba(11,18,32,.92);backdrop-filter:blur(8px);padding:calc(14px + env(safe-area-inset-top)) 16px 10px 16px;border-bottom:1px solid var(--line);z-index:5}
+  header .row{display:flex;align-items:center;gap:10px}
+  header h1{font-size:18px;margin:0;flex:1;font-weight:700}
+  .pill{font-size:12px;color:var(--mut)}
+  input,button{font-size:16px;font-family:inherit}
+  main{flex:1;padding:12px 16px calc(24px + env(safe-area-inset-bottom))}
+  .muted{color:var(--mut);text-align:center;padding:14px;font-size:14px}
+  .ghost{background:none;border:0;color:var(--mut);padding:8px}
+  /* card da proxima ligacao (uma-por-vez — D-P2-08) */
+  .card-ligacao{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .lig-head{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .lig-avatar{width:52px;height:52px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--teal2);flex:0 0 auto;text-transform:uppercase;font-size:18px}
+  .lig-info{flex:1;min-width:0}
+  .lig-nome{font-size:19px;font-weight:700;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lig-tel{color:var(--mut);margin-top:2px}
+  .lig-script-wrap{margin-bottom:16px}
+  .lig-script-label{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px}
+  .lig-script{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--teal2);border-radius:10px;padding:12px 14px;font-size:14px;line-height:1.5;white-space:pre-wrap}
+  .loadmore{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+  .call-lg{margin-top:0;padding:16px;font-size:17px}
+  /* login */
+  #login-view{flex:1;display:flex;flex-direction:column;justify-content:center;padding:28px;gap:14px;max-width:420px;margin:0 auto;width:100%}
+  #login-view .logo{width:64px;height:64px;margin:0 auto 6px;border-radius:18px;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:30px}
+  #login-view h2{text-align:center;margin:0 0 4px}
+  #login-view .sub{text-align:center;color:var(--mut);margin:0 0 12px;font-size:14px}
+  .field{padding:14px 16px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--txt);width:100%}
+  .primary{background:var(--teal);color:#fff;border:0;border-radius:12px;padding:14px;font-weight:700;width:100%}
+  .err{color:#fca5a5;text-align:center;font-size:14px;min-height:18px}
+  /* call overlay — estilo WhatsApp: avatar no meio, controles ancorados embaixo */
+  #call-overlay{position:fixed;inset:0;background:linear-gradient(180deg,#102437,#0b1220);display:none;flex-direction:column;align-items:center;justify-content:space-between;z-index:20;padding:calc(52px + env(safe-area-inset-top)) 24px calc(40px + env(safe-area-inset-bottom))}
+  .call-top{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+  #call-avatar{width:120px;height:120px;border-radius:50%;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:46px;font-weight:700;color:#fff;margin-bottom:20px;box-shadow:0 10px 34px rgba(0,0,0,.4);text-transform:uppercase}
+  #call-nome{font-size:26px;font-weight:700;text-transform:capitalize}
+  #call-tel{color:var(--mut);margin-top:2px}
+  #call-status{margin-top:16px;font-size:15px;color:var(--teal2);letter-spacing:.5px}
+  #call-timer{font-size:20px;font-variant-numeric:tabular-nums;margin-top:4px;color:var(--mut)}
+  .call-controls{display:flex;align-items:center;justify-content:center;gap:48px}
+  .ctrl{display:flex;flex-direction:column;align-items:center;gap:8px;background:none;border:0;color:var(--mut);font-size:13px;font-weight:600}
+  .ctrl .ic{width:66px;height:66px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s}
+  .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="login-view" style="display:none">
+    <div class="logo">&#128222;</div>
+    <h2>Discador USI</h2>
+    <p class="sub">Fila de ligações do dia — RomeroCall</p>
+    <input id="u" class="field" placeholder="Usuário" autocapitalize="none" autocomplete="username">
+    <input id="p" class="field" type="password" placeholder="Senha" autocomplete="current-password">
+    <div id="login-err" class="err"></div>
+    <button id="login-btn" class="primary">Entrar</button>
+  </div>
+
+  <div id="fila-view" style="display:none">
+    <header>
+      <div class="row">
+        <h1>Próxima ligação</h1>
+        <span id="fila-contador" class="pill"></span>
+        <button id="reload-btn" class="ghost">&#8635;</button>
+        <button id="logout-btn" class="ghost">Sair</button>
+      </div>
+    </header>
+    <main>
+      <div id="fila-status" class="muted" style="display:none"></div>
+      <div id="fila-card" class="card-ligacao" style="display:none">
+        <div class="lig-head">
+          <div id="lig-avatar" class="lig-avatar"></div>
+          <div class="lig-info">
+            <div id="lig-nome" class="lig-nome"></div>
+            <div id="lig-tel" class="lig-tel"></div>
+          </div>
+        </div>
+        <div class="lig-script-wrap">
+          <div class="lig-script-label">Script</div>
+          <div id="lig-script" class="lig-script"></div>
+        </div>
+        <button id="lig-ligar" class="primary call-lg">&#128222; Ligar</button>
+        <button id="lig-proxima" class="loadmore">Concluir / Próxima</button>
+      </div>
+    </main>
+  </div>
+
+  <div id="call-overlay">
+    <div class="call-top">
+      <div id="call-avatar"></div>
+      <div id="call-nome"></div>
+      <div id="call-tel"></div>
+      <div id="call-status"></div>
+      <div id="call-timer"></div>
+    </div>
+    <div class="call-controls">
+      <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">&#128222;</span></button>
+    </div>
+  </div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
