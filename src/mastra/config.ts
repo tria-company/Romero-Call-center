@@ -331,3 +331,31 @@ if (!REDIS_URL) {
       'compartilhado (necessário para múltiplas réplicas/worker).',
   );
 }
+
+// ===== Escala — fila assíncrona de processamento (Fase 6, escala-150-atendentes) =====
+//
+// Parâmetros da fila BullMQ (src/mastra/fila.ts), que tira o processamento pesado
+// (transcrição/análise/consolidação) do caminho síncrono do webhook Wavoip. Todas
+// têm default sensato — mesmo espírito de LOTE_TAMANHO_DEFAULT/OPER_STATUS_FECHADO,
+// sem console.warn quando há default. Sem REDIS_URL, fila.ts degrada para modo
+// inline (comportamento atual de 1 instância) — estas envs só têm efeito em modo bullmq.
+
+// Teto de tentativas por job antes de cair na DLQ (set `failed` do BullMQ) — FILA-03.
+export const FILA_ATTEMPTS = Number(process.env.FILA_ATTEMPTS) || 5;
+
+// Delay base (ms) do backoff exponencial entre tentativas — FILA-03.
+export const FILA_BACKOFF_MS = Number(process.env.FILA_BACKOFF_MS) || 5000;
+
+// Jobs simultâneos por worker. Teto modesto de propósito: cada job de RECORD pode
+// segurar o Deepgram por até 600s (áudio longo) — concorrência alta demais esgota
+// o worker sob rajada (defesa T-06-01-DOS).
+export const FILA_CONCURRENCY = Number(process.env.FILA_CONCURRENCY) || 4;
+
+// Nome da fila BullMQ (Redis key namespace).
+export const FILA_NOME = process.env.FILA_NOME || 'processamento-ligacao';
+
+// URL de webhook para alerta de DLQ (POST best-effort quando um job esgota as
+// tentativas — FILA-04). Vazio é modo válido: o alerta fica só no log
+// (`[ALERTA][DLQ]`), sem console.warn (mesmo espírito de ALERT_WEBHOOK_URL vazio
+// não ser um erro de configuração, e sim um degrau de observabilidade opcional).
+export const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || '';
