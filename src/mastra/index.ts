@@ -3,14 +3,9 @@ import { PinoLogger } from '@mastra/loggers';
 
 // Config: token do device Wavoip (SDK do navegador) + credenciais GHL +
 // token do webhook Wavoip (transcricao das calls).
-// OPER_RETORNO_NAO_ATENDEU_DIAS/OPER_RETORNO_DEFAULT_DIAS: regra fixa de
-// PROXIMO_CONTATO quando a ligacao nao trouxe DATA_RETORNO explicito
-// (D-P3-14, Agente Contexto — Fase 03 Plano 04).
 import {
   WAVOIP_DEVICE_TOKEN,
   WAVOIP_WEBHOOK_TOKEN,
-  OPER_RETORNO_NAO_ATENDEU_DIAS,
-  OPER_RETORNO_DEFAULT_DIAS,
 } from './config';
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
@@ -23,84 +18,57 @@ import { buscarQualificados } from './ghl';
 // Fila de Ligacoes (Lista 02 ClickUp) do operador logado + detalhe/script de
 // uma Ligacao (LOTE-04/05, Fase 02 Plano 03 — substitui buscarQualificados).
 // iniciarLigacao grava INICIO+OPERADOR e move a task pra "em processamento"
-// ao tocar Ligar (OPER-01/02, D-P3-01/02/07, Fase 03 Plano 01). Os helpers de
-// escrita da Ligacao (transcricao/metadados/avulsa) reapontam o webhook RECORD
-// do GHL pro ClickUp (OPER-01/02, D-P3-03/04/05, Fase 03 Plano 02).
-// lerTask + setCustomField + CAMPOS_LIGACOES sao usados pelo passo do Agente
-// Analise (D-P3-08/09/10/11, Fase 03 Plano 03) pra ler o script (descricao da
-// task) e gravar ADERENCIA_SCRIPT/NECESSITA_REVISAO/RETORNO_NECESSARIO/
-// DATA_RETORNO/ANALISE_IA/OBSERVACOES_EXTRAIDAS por field-id (D-07).
-// resolverLeadDaLigacao + consolidarLead + fecharLigacao + CAMPOS_LEADS
-// fecham o loop (OPER-05, D-P3-06/12/13/14, Fase 03 Plano 04): resolvem o
-// lead da Ligacao, escrevem a consolidacao na Lista 01 e fecham a task.
+// ao tocar Ligar (OPER-01/02, D-P3-01/02/07, Fase 03 Plano 01).
+// lerStatusVotoLead/salvarVotoLead atendem a tela de voto pos-ligacao (Lista
+// 01 LEADS). O resto do acesso ao ClickUp usado pelo webhook (transcricao/
+// metadados/avulsa/Agente Analise/Agente Contexto) migrou pra processador.ts
+// (Fase 06 Plano 02/03) — nao roda mais no caminho da requisicao.
 import {
   buscarFilaLigacoes,
   lerLigacao,
   iniciarLigacao,
-  gravarMetadadosLigacao,
-  buscarLigacaoAbertaPorTelefone,
-  lerTask,
-  CAMPOS_LEADS,
-  resolverLeadDaLigacao,
   lerStatusVotoLead,
   salvarVotoLead,
-  consolidarLead,
-  fecharLigacao,
 } from './clickup';
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador } from './operadores';
 
-// Derivacoes puras de MOTIVO_FALHA/DURACAO a partir do payload Wavoip
-// (OPER-02, D-P3-05, Fase 03 Plano 02) — modulo puro, so calculo, sem I/O.
-// ehStatusFalhaTerminal e o gate CR-01 do branch CALL. O Agente Analise
-// (montarPromptAnalise/parseResultadoAnalise/necessitaRevisao/extrairRetorno)
+// ehStatusFalhaTerminal e o gate CR-01 do branch CALL (so falha terminal
+// CONFIRMADA enfileira/processa a nao-atendida). O resto do Agente Analise
 // migrou pra processador.ts (Fase 06 Plano 02/03) — nao roda mais no
 // caminho da requisicao.
-import {
-  derivarMotivoFalha,
-  derivarDuracao,
-  ehStatusFalhaTerminal,
-} from './analise';
-
-// montarPromptContexto/proximoContato/derivarContadores sao o Agente
-// Contexto (OPER-05, D-P3-12/13/14, Fase 03 Plano 04) — modulo puro que
-// monta o prompt de consolidacao do lead e calcula PROXIMO_CONTATO +
-// contadores; tambem nunca chama o LLM diretamente.
-import { montarPromptContexto, proximoContato, derivarContadores } from './contexto';
-
-// chamarLLM(prompt, system) — chamada do provider de IA ativo (D-08), usada
-// pelos passos do Agente Analise (Fase 03 Plano 03) e do Agente Contexto
-// (Fase 03 Plano 04).
-import { chamarLLM } from './llm';
+import { ehStatusFalhaTerminal } from './analise';
 
 // Assets estaticos do PWA discador (HTML/JS/manifest/SW/icon).
 import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISCADOR_ICON_SVG } from './discador-pwa';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
 import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
-// Estado do webhook (Fase 5 — escala): correlacao call->telefone, task ativa
-// por telefone e dedup de RECORD/falha terminal agora moram na camada
-// Redis-ou-memoria (estado-webhook.ts) — alternavel por REDIS_URL sem
-// reescrever o handler abaixo.
+// Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
+// lida no request) mora na camada Redis-ou-memoria (estado-webhook.ts) —
+// alternavel por REDIS_URL sem reescrever o handler abaixo. Resolucao de
+// task ativa e dedup de RECORD/falha terminal migraram pra processador.ts
+// (Fase 06 Plano 02/03).
 import {
   guardarCorrelacao,
   lerCorrelacao,
   guardarTaskAtiva,
-  lerTaskAtiva,
-  limparTaskAtiva,
-  marcarCallFalhaProcessada,
 } from './estado-webhook.ts';
-// Fila assincrona de processamento (Fase 06 Plano 01/03): o branch RECORD
-// enfileira o trabalho pesado (transcricao/analise/consolidacao) fora do
-// caminho da requisicao; sem Redis (modoFila()==='inline') OU se o enqueue
-// falhar em runtime, degrada pro processamento INLINE via processador.ts —
-// nunca perde a ligacao (FILA-02).
-import { enfileirarRecord } from './fila.ts';
-import type { DadosJobRecord } from './fila.ts';
-import { processarRecordJob } from './processador.ts';
+// Fila assincrona de processamento (Fase 06 Plano 01/03): os branches RECORD
+// e CALL-terminal enfileiram o trabalho pesado (transcricao/analise/
+// consolidacao/resolucao de task) fora do caminho da requisicao; sem Redis
+// (modoFila()==='inline') OU se o enqueue falhar em runtime, degradam pro
+// processamento INLINE via processador.ts — nunca perde a ligacao (FILA-02).
+import { enfileirarRecord, enfileirarFalhaTerminal, modoFila } from './fila.ts';
+import type { DadosJobRecord, DadosJobFalhaTerminal } from './fila.ts';
+import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts';
 
-/** Extrai o telefone (so digitos) do evento CALL conforme a direcao. */
-function telefoneDoEventoCall(payload: Record<string, any>): string {
+/**
+ * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
+ * porque o CLI de reprocesso (Fase 06 Plano 05, `scripts/reprocessar-eventos.mjs`)
+ * precisa derivar o telefone do payload cru de um evento CALL terminal.
+ */
+export function telefoneDoEventoCall(payload: Record<string, any>): string {
   const direction = String(payload.direction || '').toUpperCase();
   const raw = direction === 'INCOMING'
     ? String(payload.caller || '')
@@ -108,158 +76,13 @@ function telefoneDoEventoCall(payload: Record<string, any>): string {
   return raw.replace(/[^\d]/g, '');
 }
 
-// ===== Agente Contexto — consolidacao do lead + fechamento da Ligacao =====
-// (OPER-05, D-P3-06/12/13/14/15, Fase 03 Plano 04 — fecha o loop diario)
-
-/** Le os valores atuais do lead (Lista 01) que `derivarContadores`/`consolidarLead` precisam. Defaults seguros quando o campo ainda nao tem valor (primeira ligacao do lead). */
-function valoresAtuaisDoLead(lead: Awaited<ReturnType<typeof lerTask>>): {
-  observacaoAtual: string;
-  tentativasAtuais: number;
-  atendimentosAtuais: number;
-  naoAtendimentosAtuais: number;
-} {
-  const campo = (id: string) => lead?.custom_fields?.find((c) => c.id === id)?.value;
-  const numero = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-  return {
-    observacaoAtual: String(campo(CAMPOS_LEADS.OBSERVACAO_CONSOLIDADA) ?? ''),
-    tentativasAtuais: numero(campo(CAMPOS_LEADS.QTD_TENTATIVAS)),
-    atendimentosAtuais: numero(campo(CAMPOS_LEADS.QTD_ATENDIMENTOS)),
-    naoAtendimentosAtuais: numero(campo(CAMPOS_LEADS.QTD_NAO_ATENDIMENTOS)),
-  };
-}
-
-/**
- * Consolida o resultado da ligacao no lead (Lista 01) e fecha a task de
- * Ligacao (Lista 02) — usado nos DOIS caminhos do webhook (atendida, apos o
- * Agente Analise; nao-atendida, sem transcricao/LLM de analise). Resolve o
- * lead via `resolverLeadDaLigacao` (LEAD_REL, fallback telefone); le os
- * valores atuais do lead; chama o Agente Contexto (`montarPromptContexto` +
- * `chamarLLM`) pra reescrever o resumo vivo (D-P3-13) — falha do LLM loga e
- * MANTEM a observacao anterior (nao trava a consolidacao dos contadores/
- * proximo contato); calcula `proximoContato` (D-P3-14) e `derivarContadores`;
- * grava tudo via `consolidarLead`. Fecha a Ligacao (`fecharLigacao`, D-P3-06)
- * SEMPRE ao final, mesmo se a consolidacao do lead falhar (a task nao pode
- * ficar aberta pra sempre so por causa de uma falha isolada de escrita no
- * lead — cada passo loga-e-segue, WR-03/D-P3-08). Nenhuma PII em log — so
- * ids/flags.
- */
-async function consolidarEFecharLigacao(
-  taskLigacaoId: string,
-  opts: {
-    atendeu: boolean;
-    resumoAnalise: string;
-    aderencia: number | null;
-    retorno: { necessario: boolean; data: Date | null };
-  },
-): Promise<void> {
-  try {
-    const leadTaskId = await resolverLeadDaLigacao(taskLigacaoId);
-    if (!leadTaskId) {
-      console.warn(`[wavoip] consolidacao: lead nao resolvido a partir da Ligacao ${taskLigacaoId} — pulando consolidarLead`);
-    } else {
-      const lead = await lerTask(leadTaskId);
-      const atuais = valoresAtuaisDoLead(lead);
-      const hoje = new Date();
-
-      // D-P3-13: reescreve o resumo vivo. Falha do LLM (indisponibilidade/
-      // erro de parse-livre, este prompt nao pede JSON) loga e mantem a
-      // observacao anterior — os contadores/proximo contato ainda sao
-      // gravados abaixo, a cadeia nao trava (mesmo racional do Agente Analise).
-      let observacaoConsolidada = atuais.observacaoAtual;
-      try {
-        const { system, prompt } = montarPromptContexto({
-          observacaoAtual: atuais.observacaoAtual,
-          atendeu: opts.atendeu,
-          resumoAnalise: opts.resumoAnalise,
-          aderencia: opts.aderencia,
-          retorno: opts.retorno,
-        });
-        const textoLLM = await chamarLLM(prompt, system);
-        if (textoLLM) observacaoConsolidada = textoLLM.trim();
-      } catch (e) {
-        console.error('[wavoip] falha no Agente Contexto (LLM) — mantendo observacao anterior:', e);
-      }
-
-      const proximoContatoData = proximoContato({
-        dataRetorno: opts.retorno.data,
-        atendeu: opts.atendeu,
-        hoje,
-        diasNaoAtendeu: OPER_RETORNO_NAO_ATENDEU_DIAS,
-        diasDefault: OPER_RETORNO_DEFAULT_DIAS,
-      });
-      const contadores = derivarContadores({
-        atendeu: opts.atendeu,
-        tentativasAtuais: atuais.tentativasAtuais,
-        atendimentosAtuais: atuais.atendimentosAtuais,
-        naoAtendimentosAtuais: atuais.naoAtendimentosAtuais,
-        hoje,
-      });
-
-      await consolidarLead(leadTaskId, {
-        observacaoConsolidada,
-        proximoContato: proximoContatoData.getTime(),
-        contadores,
-      });
-    }
-  } catch (e) {
-    console.error('[wavoip] falha ao consolidar o lead — a Ligacao ainda sera fechada:', e);
-  }
-
-  // D-P3-06: a task fecha sozinha no pos-processamento, mesmo se a
-  // consolidacao do lead falhou acima — "Proxima" no discador so avanca a UI.
-  try {
-    await fecharLigacao(taskLigacaoId);
-  } catch (e) {
-    console.error('[wavoip] falha ao fechar a Ligacao:', e);
-  }
-}
-
-/**
- * Processa o caminho terminal NAO-ATENDIDO do branch CALL do webhook Wavoip
- * (CR-01/CR-02, D-P3-05/06/12/14): grava os metadados de falha, consolida o
- * lead (sem Agente Analise — nao ha gravacao pra avaliar) e fecha a Ligacao.
- * Chamado tanto pelo ramo map-hit quanto pelo ramo fallback-hit (busca
- * persistida no ClickUp) do branch CALL — mesma sequencia de efeitos nos
- * dois ramos. O dedup (`marcarCallFalhaProcessada`) e responsabilidade do
- * chamador, avaliado ANTES desta funcao (marca atomica — Fase 5).
- */
-async function processarFalhaTerminal(
-  taskId: string,
-  telefone: string,
-  whatsappCallId: string,
-  payload: Record<string, any>,
-): Promise<void> {
-  try {
-    await gravarMetadadosLigacao(taskId, {
-      atendeu: false,
-      motivoFalha: derivarMotivoFalha(payload),
-      fim: Date.now(),
-      duracao: derivarDuracao(payload),
-    });
-  } catch (e) {
-    // Loga-e-segue (a cadeia do webhook nao pode travar por uma
-    // escrita isolada) — o helper subjacente JA lancou (WR-03),
-    // este catch so evita que o 200 do CALL vire 500.
-    console.error('[wavoip] falha ao gravar metadados de nao-atendida:', e);
-  }
-
-  // ---- Agente Contexto (OPER-05, D-P3-06/12/14) — caminho NAO-ATENDIDO ----
-  // Sem gravacao/transcricao, PULA o Agente Analise (aderencia)
-  // — nao ha o que avaliar. Consolida direto com atendeu:false
-  // (observacao objetiva; proximoContato = D+OPER_RETORNO_NAO_ATENDEU_DIAS,
-  // D-P3-14) e fecha a Ligacao (D-P3-06).
-  await consolidarEFecharLigacao(taskId, {
-    atendeu: false,
-    resumoAnalise: `Não atendida em ${new Date().toISOString().slice(0, 10)}.`,
-    aderencia: null,
-    retorno: { necessario: false, data: null },
-  });
-
-  // CR-02: limpa a entrada telefone->task apos consolidar/
-  // fechar — uma ligacao futura ao mesmo telefone nunca
-  // re-consolida sobre esta task ja fechada.
-  await limparTaskAtiva(telefone);
-}
+// Visibilidade operacional (boot): qual modo a fila assincrona esta usando —
+// 'bullmq' quando REDIS_URL esta configurado (worker separado consome os
+// jobs, Fase 06 Plano 04), 'inline' quando nao ha Redis (o webhook processa
+// a request sincrona, loop de 1 instancia intacto).
+console.log(
+  '[webhook] processamento ' + (modoFila() === 'bullmq' ? 'assíncrono (fila BullMQ)' : 'inline (1 instância)'),
+);
 
 /**
  * Servidor do Discador Wavoip. Serve o PWA (frontend) e a API minima que ele
@@ -560,7 +383,7 @@ export const mastra = new Mastra({
               }
             }
 
-            // ---------------- CALL: guarda a correlacao call_id -> telefone ----------------
+            // ---------------- CALL: guarda a correlacao call_id -> telefone; enfileira (ou processa inline) a falha terminal ----------------
             if (evento === 'CALL') {
               const telefone = telefoneDoEventoCall(payload);
               if (whatsappCallId && telefone) {
@@ -571,40 +394,34 @@ export const mastra = new Mastra({
               // conhecido, via ehStatusFalhaTerminal) — status de transicao
               // (RINGING/CALLING), desconhecido ou ausente NUNCA gravam
               // ATENDEU=false/consolidam/fecham a Ligacao enquanto a chamada
-              // ainda esta tocando. D-P3-01: resolve a task via 1) map
-              // in-memory (task reportada em /api/discador/ligando) OU,
-              // quando o map nao tem entrada (restart/hot-reload entre o
-              // /ligando e este evento CALL), 2) fallback persistido — a
-              // Ligacao aberta com o mesmo TELEFONE ja gravada no ClickUp
-              // por `iniciarLigacao` (mesmo racional do branch RECORD).
-              if (telefone && ehStatusFalhaTerminal(payload)) {
-                const taskIdAtiva = await lerTaskAtiva(telefone);
-                if (taskIdAtiva) {
-                  if (await marcarCallFalhaProcessada(whatsappCallId)) {
-                    await processarFalhaTerminal(taskIdAtiva, telefone, whatsappCallId, payload);
-                  }
-                } else {
-                  let taskIdFallback: string | null = null;
+              // ainda esta tocando. A resolucao da task (map in-memory ->
+              // fallback ClickUp) e o dedup (SETNX) agora moram DENTRO de
+              // processarFalhaTerminalJob (processador.ts, Fase 06 Plano 02)
+              // — chamavel tanto pelo worker quanto inline aqui.
+              const falhaTerminal = Boolean(telefone) && ehStatusFalhaTerminal(payload);
+              if (falhaTerminal) {
+                const dados: DadosJobFalhaTerminal = { whatsappCallId, telefone, payload, eventoDuravelId };
+                const { enfileirado } = await enfileirarFalhaTerminal(dados);
+                if (!enfileirado) {
+                  // Inline/fallback — mesma tolerancia de hoje: a
+                  // nao-atendida e best-effort, log-e-segue (nunca 502; o
+                  // processador ja loga-e-segue cada passo internamente).
                   try {
-                    taskIdFallback = await buscarLigacaoAbertaPorTelefone(telefone);
+                    await processarFalhaTerminalJob(dados);
                   } catch (e) {
-                    // Loga-e-segue (WR-03: o helper subjacente ja lancou em
-                    // erro de infra) — o webhook nunca vira 500 por uma
-                    // leitura isolada.
-                    console.error('[wavoip] falha ao buscar Ligacao aberta por telefone (branch CALL):', e);
-                  }
-                  if (taskIdFallback) {
-                    if (await marcarCallFalhaProcessada(whatsappCallId)) {
-                      await processarFalhaTerminal(taskIdFallback, telefone, whatsappCallId, payload);
-                    }
-                  } else {
-                    const mascarado = telefone.length > 4 ? `${'*'.repeat(telefone.length - 4)}${telefone.slice(-4)}` : telefone;
-                    console.warn(`[wavoip] CALL nao-atendida sem Ligacao aberta correlacionavel (telefone=${mascarado})`);
+                    console.error('[wavoip] falha ao processar falha terminal inline:', e);
                   }
                 }
+                // enfileirado=true: o job fecha o desfecho ('processado')
+                // quando terminar — NAO marca aqui, o request ja respondeu.
+                // enfileirado=false: processarFalhaTerminalJob ja marcou
+                // 'processado' (ou fechou 'erro') internamente.
+              } else {
+                // Sem falha terminal — so a correlacao foi gravada acima
+                // (trabalho barato). Fecha o desfecho durave no request.
+                try { await marcarEventoWebhook(eventoDuravelId, 'processado'); }
+                catch (e) { console.error('[wavoip] falha ao marcar evento CALL processado:', e); }
               }
-              try { await marcarEventoWebhook(eventoDuravelId, 'processado'); }
-              catch (e) { console.error('[wavoip] falha ao marcar evento CALL processado:', e); }
               return c.json({ status: 'ok', correlacionado: Boolean(whatsappCallId && telefone) });
             }
 
