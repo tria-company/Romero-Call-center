@@ -71,6 +71,26 @@ export function conexaoFila(): object | null {
 }
 
 /**
+ * Opcoes de conexao IORedis do PRODUCER (a Queue) — DELIBERADAMENTE distintas
+ * das do Worker (CR-01). O producer PRECISA falhar rapido quando o Redis cai
+ * em runtime: `enableOfflineQueue: false` faz o `add()` REJEITAR de imediato
+ * (em vez de bufferizar o comando e deixar a Promise pendente pra sempre) —
+ * so assim o try/catch de `enfileirar*` dispara o fail-open p/ inline (FILA-02
+ * <200ms + "nunca 500, sempre degrada"). `maxRetriesPerRequest: null` (exigido
+ * SO pelos blocking commands do Worker) faria o oposto aqui. Mesmo padrao de
+ * `garantirCliente()` em estado-webhook.ts:96-104. Retorna null em modo inline.
+ */
+export function conexaoFilaProducer(): object | null {
+  if (MODO !== 'bullmq') return null;
+  return {
+    url: REDIS_URL,
+    maxRetriesPerRequest: 2,
+    enableOfflineQueue: false,
+    connectTimeout: 5000,
+  };
+}
+
+/**
  * Opcoes de job aplicadas em todo `queue.add` — retry com backoff
  * exponencial (FILA-03) e retencao dos jobs. `removeOnFail: false` MANTEM
  * os jobs falhos no set `failed` do BullMQ — esse set E a DLQ inspecionavel
@@ -95,7 +115,10 @@ let filaBullMq: Queue | null = null;
 
 function garantirFila(): Queue {
   if (!filaBullMq) {
-    filaBullMq = new Queue(NOME_FILA, { connection: conexaoFila() as any });
+    // CR-01: o PRODUCER usa a conexao fail-fast (enableOfflineQueue:false), NAO
+    // a do Worker (maxRetriesPerRequest:null) — senao o add() bufferiza/pendura
+    // em vez de rejeitar e o fail-open p/ inline abaixo nunca dispara.
+    filaBullMq = new Queue(NOME_FILA, { connection: conexaoFilaProducer() as any });
     // So para nao derrubar o processo com unhandled error — mensagem curta,
     // NUNCA a REDIS_URL nem dado do job (pode conter PII).
     filaBullMq.on('error', (e) => {
