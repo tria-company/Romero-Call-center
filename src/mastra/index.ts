@@ -2,15 +2,13 @@ import { Mastra } from '@mastra/core/mastra';
 import { PinoLogger } from '@mastra/loggers';
 
 // Config: token do device Wavoip (SDK do navegador) + credenciais GHL +
-// token do webhook Wavoip (transcricao das calls) + limiar de aderencia do
-// Agente Analise (D-P3-10, Fase 03 Plano 03).
+// token do webhook Wavoip (transcricao das calls).
 // OPER_RETORNO_NAO_ATENDEU_DIAS/OPER_RETORNO_DEFAULT_DIAS: regra fixa de
 // PROXIMO_CONTATO quando a ligacao nao trouxe DATA_RETORNO explicito
 // (D-P3-14, Agente Contexto — Fase 03 Plano 04).
 import {
   WAVOIP_DEVICE_TOKEN,
   WAVOIP_WEBHOOK_TOKEN,
-  ANALISE_ADERENCIA_MINIMA,
   OPER_RETORNO_NAO_ATENDEU_DIAS,
   OPER_RETORNO_DEFAULT_DIAS,
 } from './config';
@@ -39,13 +37,9 @@ import {
   buscarFilaLigacoes,
   lerLigacao,
   iniciarLigacao,
-  gravarTranscricao,
   gravarMetadadosLigacao,
   buscarLigacaoAbertaPorTelefone,
-  criarLigacaoAvulsa,
   lerTask,
-  setCustomField,
-  CAMPOS_LIGACOES,
   CAMPOS_LEADS,
   resolverLeadDaLigacao,
   lerStatusVotoLead,
@@ -57,23 +51,16 @@ import {
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador } from './operadores';
 
-// Transcricao da gravacao da call via Deepgram (entrada por URL).
-import { transcreverCallUrl } from './deepgram';
-
-// Derivacoes puras de ATENDEU/MOTIVO_FALHA/DURACAO a partir do payload Wavoip
+// Derivacoes puras de MOTIVO_FALHA/DURACAO a partir do payload Wavoip
 // (OPER-02, D-P3-05, Fase 03 Plano 02) — modulo puro, so calculo, sem I/O.
-// montarPromptAnalise/parseResultadoAnalise/necessitaRevisao/extrairRetorno
-// sao o Agente Analise (OPER-03/04, D-P3-09/10/11/15, Fase 03 Plano 03) —
-// tambem modulo puro, so monta prompt/parseia/decide, nunca chama o LLM.
+// ehStatusFalhaTerminal e o gate CR-01 do branch CALL. O Agente Analise
+// (montarPromptAnalise/parseResultadoAnalise/necessitaRevisao/extrairRetorno)
+// migrou pra processador.ts (Fase 06 Plano 02/03) — nao roda mais no
+// caminho da requisicao.
 import {
-  derivarAtendeu,
   derivarMotivoFalha,
   derivarDuracao,
   ehStatusFalhaTerminal,
-  montarPromptAnalise,
-  parseResultadoAnalise,
-  necessitaRevisao,
-  extrairRetorno,
 } from './analise';
 
 // montarPromptContexto/proximoContato/derivarContadores sao o Agente
@@ -101,10 +88,16 @@ import {
   guardarTaskAtiva,
   lerTaskAtiva,
   limparTaskAtiva,
-  marcarRecordProcessado,
-  liberarRecordProcessado,
   marcarCallFalhaProcessada,
 } from './estado-webhook.ts';
+// Fila assincrona de processamento (Fase 06 Plano 01/03): o branch RECORD
+// enfileira o trabalho pesado (transcricao/analise/consolidacao) fora do
+// caminho da requisicao; sem Redis (modoFila()==='inline') OU se o enqueue
+// falhar em runtime, degrada pro processamento INLINE via processador.ts —
+// nunca perde a ligacao (FILA-02).
+import { enfileirarRecord } from './fila.ts';
+import type { DadosJobRecord } from './fila.ts';
+import { processarRecordJob } from './processador.ts';
 
 /** Extrai o telefone (so digitos) do evento CALL conforme a direcao. */
 function telefoneDoEventoCall(payload: Record<string, any>): string {
@@ -615,7 +608,7 @@ export const mastra = new Mastra({
               return c.json({ status: 'ok', correlacionado: Boolean(whatsappCallId && telefone) });
             }
 
-            // ---------------- RECORD: transcreve + grava na Ligacao (ClickUp) ----------------
+            // ---------------- RECORD: enfileira (ou processa inline) a transcricao ----------------
             if (evento === 'RECORD') {
               // O RECORD real da Wavoip carrega o status em `status` (=RECORDING/
               // READY); a doc dizia `record_status`. Le os dois por seguranca.
@@ -641,144 +634,35 @@ export const mastra = new Mastra({
                 return c.json({ status: 'sem correlacao' });
               }
 
-              // Dedup: retry do webhook nao re-transcreve a mesma gravacao.
-              if (!(await marcarRecordProcessado(whatsappCallId))) {
-                return c.json({ status: 'duplicado' });
+              // FILA-02: a partir daqui o trabalho pesado (transcricao Deepgram +
+              // Agente Analise + Agente Contexto + consolidacao) NAO roda mais no
+              // caminho da requisicao — processador.ts (Fase 06 Plano 02) e o
+              // UNICO lugar dessa logica (dedup SETNX incluso). Enfileira (fila
+              // BullMQ, Fase 06 Plano 01) e responde 200 imediatamente; sem fila
+              // OU se o enqueue falhar em runtime, processa INLINE aqui mesmo,
+              // chamando a MESMA funcao que o worker chamaria — degradacao
+              // graciosa, comportamento identico ao de hoje sem Redis.
+              const dados: DadosJobRecord = { whatsappCallId, telefone, recordUrl, payload, eventoDuravelId };
+              const { enfileirado } = await enfileirarRecord(dados);
+              if (enfileirado) {
+                return c.json({ status: 'enfileirado' });
               }
 
-              const transcricao = await transcreverCallUrl(recordUrl);
-              if (!transcricao) {
-                // Libera o dedup pra permitir um retry futuro transcrever.
-                await liberarRecordProcessado(whatsappCallId);
-                // WR-01: nunca telefone cru em log — so o whatsapp_call_id.
-                console.warn(`[wavoip] transcricao falhou (call=${whatsappCallId})`);
-                return c.json({ status: 'transcricao falhou' }, 502);
-              }
-
-              // D-P3-01: resolve a task da Ligacao — 1) map in-memory (task
-              // reportada em /api/discador/ligando), 2) fallback persistido no
-              // ClickUp (Ligacao aberta com o mesmo TELEFONE), 3) D-P3-03: nao
-              // casou nenhuma -> cria uma Ligacao avulsa (nenhuma ligacao real
-              // fica sem registro).
-              let taskId = await lerTaskAtiva(telefone);
-              if (!taskId) {
-                try {
-                  taskId = await buscarLigacaoAbertaPorTelefone(telefone);
-                } catch (e) {
-                  console.error('[wavoip] falha ao buscar Ligacao aberta por telefone:', e);
-                }
-              }
-              if (!taskId) {
-                try {
-                  const avulsa = await criarLigacaoAvulsa(telefone);
-                  taskId = avulsa.id;
-                } catch (e) {
-                  // Criar a avulsa e o unico jeito de nao perder o registro
-                  // desta gravacao (D-P3-03) — se ISSO falhar, propaga (502)
-                  // pro Wavoip poder retentar o webhook.
-                  await liberarRecordProcessado(whatsappCallId);
-                  console.error('[wavoip] falha ao criar Ligacao avulsa:', e);
-                  return c.json({ status: 'erro ao registrar ligacao' }, 502);
-                }
-              }
-
-              // D-P3-04: grava a transcricao (field TRANSCRICAO + comentario),
-              // substituindo a nota no GHL. Loga-e-segue (nao trava a cadeia
-              // por uma falha de escrita isolada) — o helper LANCA em falha de
-              // infra (WR-03), este catch so evita 500 no webhook.
               try {
-                await gravarTranscricao(taskId, transcricao);
+                await processarRecordJob(dados);
+                return c.json({ status: 'ok' });
               } catch (e) {
-                console.error('[wavoip] falha ao gravar transcricao na Ligacao:', e);
+                // Falha retentavel (transcricao/avulsa) — processarRecordJob
+                // LANCA em vez de retornar 502 diretamente (semantica pensada
+                // pro BullMQ retentar, Fase 06 Plano 02); aqui, em modo inline,
+                // traduzimos de volta pro 502-para-Wavoip-retentar de sempre.
+                // WR-01: so o whatsapp_call_id em log — nunca telefone/payload.
+                const msg = e instanceof Error ? e.message : String(e);
+                console.error(`[wavoip] falha ao processar RECORD inline (call=${whatsappCallId}):`, msg);
+                try { await marcarEventoWebhook(eventoDuravelId, 'erro', msg); }
+                catch (e2) { console.error('[wavoip] falha ao marcar evento RECORD com erro:', e2); }
+                return c.json({ status: 'erro' }, 502);
               }
-
-              // D-P3-05, OPER-02: metadados 100% automaticos — ATENDEU=true
-              // porque houve gravacao (teveGravacao=true).
-              try {
-                await gravarMetadadosLigacao(taskId, {
-                  atendeu: derivarAtendeu(payload, true),
-                  fim: Date.now(),
-                  duracao: derivarDuracao(payload),
-                  urlGravacao: recordUrl,
-                });
-              } catch (e) {
-                console.error('[wavoip] falha ao gravar metadados na Ligacao:', e);
-              }
-
-              // ---- Agente Analise (OPER-03/04, D-P3-08/09/10/11/15) ----
-              // Encadeado automaticamente logo apos a transcricao+metadados.
-              // Falha de LLM/parse NAO trava a cadeia (D-P3-08): marca
-              // NECESSITA_REVISAO=true e segue. Nada de transcricao/PII em
-              // log — so ids/flags/status, mesmo padrao do resto do webhook.
-              // `resultadoAnalise`/`retornoAnalise` ficam fora do try (hoisted)
-              // pro passo do Agente Contexto (abaixo) poder consolidar o lead
-              // mesmo quando a Analise falhou (valores ficam `null`).
-              let resultadoAnalise: ReturnType<typeof parseResultadoAnalise> | null = null;
-              let retornoAnalise: ReturnType<typeof extrairRetorno> | null = null;
-              try {
-                const task = await lerTask(taskId);
-                const script = task?.description ?? task?.text_content ?? '';
-                const { system, prompt } = montarPromptAnalise({ script, transcricao });
-                const textoLLM = await chamarLLM(prompt, system);
-                const resultado = parseResultadoAnalise(textoLLM);
-                const revisao = necessitaRevisao({
-                  aderencia: resultado.aderencia,
-                  limiar: ANALISE_ADERENCIA_MINIMA,
-                  sinaisAlerta: resultado.sinaisAlerta,
-                  falhaTecnica: resultado.falhaTecnica,
-                });
-                const retorno = extrairRetorno(resultado, { hoje: new Date(), defaultDias: 2 });
-                resultadoAnalise = resultado;
-                retornoAnalise = retorno;
-
-                await setCustomField(taskId, CAMPOS_LIGACOES.ADERENCIA_SCRIPT, resultado.aderencia);
-                await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, revisao);
-                await setCustomField(taskId, CAMPOS_LIGACOES.RETORNO_NECESSARIO, retorno.necessario);
-                await setCustomField(
-                  taskId,
-                  CAMPOS_LIGACOES.DATA_RETORNO,
-                  retorno.data ? retorno.data.getTime() : null,
-                );
-                await setCustomField(taskId, CAMPOS_LIGACOES.ANALISE_IA, resultado.resumoAnalise);
-                await setCustomField(taskId, CAMPOS_LIGACOES.OBSERVACOES_EXTRAIDAS, resultado.observacoesExtraidas);
-              } catch (e) {
-                // D-P3-08: LLM fora do ar (ou parse/escrita falhou) — marca
-                // revisao e segue, nunca trava a cadeia do webhook. O helper
-                // de ClickUp subjacente ainda lanca em falha de infra (WR-03);
-                // aqui so distinguimos "precisa de revisao humana" de um erro
-                // que derrubaria o 200 do webhook.
-                console.error('[wavoip] falha no Agente Analise, marcando NECESSITA_REVISAO:', e);
-                try {
-                  await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
-                } catch (e2) {
-                  console.error('[wavoip] falha ao marcar NECESSITA_REVISAO apos erro do Agente Analise:', e2);
-                }
-              }
-
-              // ---- Agente Contexto (OPER-05, D-P3-06/12/13/14/15) — caminho ATENDIDO ----
-              // Consolida o lead com o resultado da Analise (quando disponivel)
-              // e fecha a Ligacao (D-P3-06). D-P3-15: sinais de alerta (opt-out
-              // inclusive) entram no resumo consolidado — NUNCA removem o lead
-              // nem o tornam inelegivel automaticamente, so a decisao humana
-              // (via NECESSITA_REVISAO, ja gravado acima) faz isso.
-              const sinaisTexto = resultadoAnalise?.sinaisAlerta?.length
-                ? ` Sinais de alerta: ${resultadoAnalise.sinaisAlerta.join('; ')}.`
-                : '';
-              await consolidarEFecharLigacao(taskId, {
-                atendeu: true,
-                resumoAnalise: (resultadoAnalise?.resumoAnalise ?? '') + sinaisTexto,
-                aderencia: resultadoAnalise?.aderencia ?? null,
-                retorno: retornoAnalise ?? { necessario: false, data: null },
-              });
-
-              // CR-02: limpa a entrada telefone->task apos consolidar/fechar —
-              // uma ligacao futura ao mesmo telefone nunca re-consolida sobre
-              // esta task ja fechada.
-              await limparTaskAtiva(telefone);
-
-              try { await marcarEventoWebhook(eventoDuravelId, 'processado'); }
-              catch (e) { console.error('[wavoip] falha ao marcar evento RECORD processado:', e); }
-              return c.json({ status: 'ok' });
             }
 
             // DEVICE e outros eventos: nao aplicaveis.
