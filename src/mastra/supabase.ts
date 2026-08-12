@@ -141,6 +141,58 @@ export async function marcarEventoWebhook(
   }
 }
 
+export interface EventoParaReprocesso {
+  id: string;
+  tipo: string;
+  whatsapp_call_id: string | null;
+  status: string;
+  payload: any;
+}
+
+/**
+ * Lê `webhook_eventos` pelos status pendentes/erro (FILA-06) — a fonte do CLI
+ * de reprocesso (`scripts/reprocessar-eventos.mjs`, Fase 06 Plano 05). Segue o
+ * MESMO molde de degradação de `registrarEventoWebhook`/`marcarEventoWebhook`:
+ * sem Supabase configurado retorna `[]` (durabilidade indisponível — no-op,
+ * NÃO lança). Com Supabase configurado, usa o índice
+ * `idx_webhook_eventos_status (status, recebido_em)`; falha de rede/HTTP
+ * LANÇA (WR-03, como as demais leituras deste módulo). Só loga contagem/ids —
+ * nunca payload/telefone (LGPD).
+ */
+export async function listarEventosParaReprocesso(
+  opts: { status?: string[]; limite?: number } = {},
+): Promise<EventoParaReprocesso[]> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return [];
+  const statusFiltro = opts.status && opts.status.length > 0 ? opts.status : ['recebido', 'erro'];
+  const limite = opts.limite ?? 100;
+  const params = new URLSearchParams({
+    select: 'id,tipo,whatsapp_call_id,status,payload',
+    status: `in.(${statusFiltro.join(',')})`,
+    order: 'recebido_em.asc',
+    limit: String(limite),
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_WEBHOOK_EVENTOS}?${params.toString()}`,
+      { headers: headers() },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar eventos para reprocesso: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `[supabase] HTTP ${res.status} ao listar eventos para reprocesso em ${SUPABASE_TABLE_WEBHOOK_EVENTOS}`,
+    );
+  }
+  const data = await res.json();
+  const linhas: EventoParaReprocesso[] = Array.isArray(data) ? data : [];
+  console.log(`[supabase] listarEventosParaReprocesso: ${linhas.length} evento(s) status=[${statusFiltro.join(',')}]`);
+  return linhas;
+}
+
 export interface TabelaDescoberta {
   tabela: string;
   colunas: string[];
