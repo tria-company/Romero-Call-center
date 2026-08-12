@@ -11,9 +11,16 @@ node scripts/estado-webhook.smoke.mjs
 ```
 
 Cada smoke imprime asserções e sai !=0 se algo falha. Cobrem, entre outros: `estado-webhook`
-(camada Redis-ou-memória), `analise-*` (payload/script/status), `dossie`, `fila`, `gerar-lote`,
-`lote-selecao`, `supabase*`, `deepgram-411-fallback`, `contexto`, `rotular-papeis`,
+(camada Redis-ou-memória), `analise-*` (payload/script/status), `dossie`, `fila` (mapeamento da
+fila de Ligações — Lista 02, `mapearFilaLigacao`), `fila-assincrona` (camada Redis-ou-inline da
+fila BullMQ de processamento — degradação graciosa + asserção de latência <200ms, FILA-02),
+`gerar-lote`, `lote-selecao`, `supabase*`, `deepgram-411-fallback`, `contexto`, `rotular-papeis`,
 `llm-endpoint-azure`, `smoke-fundacao`.
+
+**Nota de nomenclatura:** `fila.smoke.mjs` (fila de Ligações no ClickUp) e
+`fila-assincrona.smoke.mjs` (fila BullMQ de processamento assíncrono) testam conceitos
+DISTINTOS que só compartilham a palavra "fila" — não são o mesmo módulo nem substituem um
+ao outro.
 
 ## Sem sufixo `smoke` — utilitários operacionais
 
