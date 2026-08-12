@@ -86,8 +86,6 @@ export const DISCADOR_HTML = `<!doctype html>
   .call-controls{display:flex;align-items:center;justify-content:center;gap:48px}
   .ctrl{display:flex;flex-direction:column;align-items:center;gap:8px;background:none;border:0;color:var(--mut);font-size:13px;font-weight:600}
   .ctrl .ic{width:66px;height:66px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s}
-  #vv-btn.on{color:#fff}
-  #vv-btn.on .ic{background:#fff;color:#0b1220;border-color:#fff}
   .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg)}
 </style>
 </head>
@@ -141,7 +139,6 @@ export const DISCADOR_HTML = `<!doctype html>
       <div id="call-timer"></div>
     </div>
     <div class="call-controls">
-      <button id="vv-btn" class="ctrl" aria-label="Viva-voz"><span class="ic">\u{1F509}</span><span>Viva-voz</span></button>
       <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">\u{1F4DE}</span></button>
     </div>
   </div>
@@ -155,46 +152,7 @@ export const DISCADOR_APP_JS = `(function(){
   var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
   var fila=null, filaIdx=0;
   var timerInt=null, timerStart=0;
-  var vvOn=false, vvCtx=null, vvSrc=null;
   function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
-  // Roteia o audio remoto da chamada pro alto-falante. setSinkId funciona em
-  // Chrome desktop/Android (escolhe o device de saida); iOS Safari NAO suporta
-  // (fica no fallback de AudioContext abaixo). Os elementos <audio> sao criados
-  // pelo SDK do Wavoip ao conectar — pegamos todos e forcamos volume/saida.
-  function routeToSpeaker(on){
-    var els;try{els=document.querySelectorAll('audio,video');}catch(e){return;}
-    for(var i=0;i<els.length;i++){(function(a){
-      try{a.muted=false;if(a.volume!=null){a.volume=1;}}catch(e){}
-      if(typeof a.setSinkId!=='function'){return;}
-      if(on){
-        navigator.mediaDevices.enumerateDevices().then(function(ds){
-          var outs=ds.filter(function(d){return d.kind==='audiooutput';});
-          var spk=null;
-          for(var j=0;j<outs.length;j++){if(/speaker|alto.?falante/i.test(outs[j].label)){spk=outs[j];break;}}
-          if(!spk&&outs.length){spk=outs[outs.length-1];}
-          if(spk){a.setSinkId(spk.deviceId).catch(function(){});}
-        }).catch(function(){});
-      } else { try{a.setSinkId('default').catch(function(){});}catch(e){} }
-    })(els[i]);}
-  }
-  function setVivaVoz(on){
-    vvOn=on; var b=$('vv-btn'); if(b){b.classList.toggle('on',on);}
-    try{
-      if(on){
-        if(!vvCtx){vvCtx=new (window.AudioContext||window.webkitAudioContext)();}
-        if(vvCtx.state==='suspended'){vvCtx.resume();}
-        if(!vvSrc){
-          // buffer silencioso em loop: mantem uma sessao de audio de MIDIA ativa,
-          // o que no iOS tende a rotear a saida pro alto-falante (best-effort).
-          var buf=vvCtx.createBuffer(1,vvCtx.sampleRate,vvCtx.sampleRate);
-          vvSrc=vvCtx.createBufferSource();vvSrc.buffer=buf;vvSrc.loop=true;
-          vvSrc.connect(vvCtx.destination);vvSrc.start();
-        }
-      } else if(vvCtx){ try{vvCtx.suspend();}catch(e){} }
-    }catch(e){}
-    routeToSpeaker(on);
-  }
-  function toggleVivaVoz(){ setVivaVoz(!vvOn); }
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
   function setToken(t){if(t){localStorage.setItem(tokenKey,t);}else{localStorage.removeItem(tokenKey);}}
@@ -337,7 +295,7 @@ export const DISCADOR_APP_JS = `(function(){
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
     setCallStatus('Encerrada');endCallUI();
   }
-  function openCall(lead,status){wantHangup=false;var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';setVivaVoz(false);$('call-overlay').style.display='flex';}
+  function openCall(lead,status){wantHangup=false;var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
   function endCallUI(){if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;setTimeout(function(){$('call-overlay').style.display='none';},1400);}
@@ -348,7 +306,6 @@ export const DISCADOR_APP_JS = `(function(){
     $('reload-btn').onclick=carregarFila;
     $('lig-proxima').onclick=avancarFila;
     $('hangup-btn').onclick=hangup;
-    $('vv-btn').onclick=toggleVivaVoz;
     if(getToken()){startFila();}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/discador/sw.js').catch(function(){});}
   });
