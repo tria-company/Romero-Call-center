@@ -1,211 +1,197 @@
-// Rate limit + fila com prioridade in-memory na entrada do webhook de
-// mensagens (HARD-03). Modulo hand-rolled, SEM Redis/lib nova (zero
-// dependencia npm adicional) — token bucket simples + 2 filas (crise/normal)
-// no mesmo espirito de cache in-memory + setInterval de notificacoes.ts.
+// Camada Redis-ou-inline da fila assincrona de processamento (Fase 6,
+// escala-150-atendentes).
 //
-// INVARIANTE INVIOLAVEL DO PROJETO (CLAUDE.md: core value = agendar a call;
-// "se tudo mais falhar, o agendamento da call qualificada tem que
-// funcionar"): uma mensagem classificada como CRISE (sofrimento agudo, ou
-// lead ja em bloqueio duravel de crise) NUNCA e rate-limited, NUNCA e
-// enfileirada atras de trafego normal, e NUNCA e shedada/descartada. O
-// protocolo de crise tem prioridade maxima e caminho direto (fail-safe na
-// direcao do humano) — isso vale mesmo com o token bucket zerado ou a fila
-// de NORMAL cheia.
+// Abstrai o enfileiramento do trabalho pesado do webhook Wavoip (transcricao
+// Deepgram + analise IA + consolidacao do lead) atras de uma superficie
+// publica pequena. O backend e escolhido UMA vez no boot pelo valor de
+// REDIS_URL — mesmo espirito de estado-webhook.ts:
+//   - vazio    -> INLINE: enfileirar* e no-op ({ enfileirado: false }) e o
+//     chamador processa a request sincrona, exatamente como hoje (loop de
+//     1 instancia intacto — "construir codigo antes de provisionar").
+//   - preenchido -> BULLMQ: Queue Redis durvel, jobId = whatsappCallId
+//     (dedup de enqueue, FILA-05), retry com backoff exponencial (FILA-03),
+//     jobs falhos ficam no set `failed` do BullMQ como DLQ inspecionavel
+//     (FILA-04).
 //
-// O que este modulo NAO faz: nao substitui o buffer/debounce de 10s
-// existente (buffer.ts) — a admissao roda ANTES dele, na entrada do
-// webhook, como um controle de "posso aceitar esta mensagem agora?". A
-// mensagem admitida via fila (motivo='rate_limited_enfileirado') segue
-// normalmente pro caminho de processamento de sempre; a fila aqui so limita
-// QUANTAS mensagens NORMAL podem estar "em transito" simultaneamente sob
-// rate limit, devolvendo um sinal EXPLICITO de overload (nunca perda
-// silenciosa) quando essa capacidade estoura.
+// Convencao WR-03 adaptada (mesmo espirito de estado-webhook.ts): esta
+// camada NUNCA lanca para o chamador — Redis fora do ar em runtime degrada
+// (enfileirar -> { enfileirado: false }, fail-open p/ inline), nunca
+// derruba o webhook. Nunca loga telefone/CPF/payload nem a REDIS_URL — so
+// ids (whatsappCallId, eventoDuravelId) e a classe do erro.
 
-/** 0 = CRISE (prioridade maxima, inviolavel). 1 = NORMAL. */
-export type Prioridade = 0 | 1;
-export const PRIORIDADE_CRISE: Prioridade = 0;
-export const PRIORIDADE_NORMAL: Prioridade = 1;
+import { Queue } from 'bullmq';
+import {
+  REDIS_URL,
+  FILA_ATTEMPTS,
+  FILA_BACKOFF_MS,
+  FILA_NOME,
+  ALERT_WEBHOOK_URL,
+} from './config.ts';
 
-// Lexico de sofrimento agudo — deteccao PROPRIA deste modulo (nao reusa o
-// guardrail de injection; sao dominios diferentes). Fronteira de palavra
-// (\b) e frases completas evitam falso-positivo por substring solta (mesma
-// licao do LEXICO_PROIBIDO_REGEX da Fase 1 — WR-01, bant.ts).
-const LEXICO_CRISE_REGEX =
-  /\b(n[ãa]o\s+aguento\s+mais|quero\s+morrer|vou\s+me\s+matar|me\s+matar|vou\s+sumir\s+de\s+vez|sumir\s+de\s+vez|acabar\s+com\s+(a\s+)?minha\s+vida|tirar\s+(a\s+)?minha\s+vida|n[ãa]o\s+quero\s+mais\s+viver)\b/i;
+export interface DadosJobRecord {
+  whatsappCallId: string;
+  telefone: string; // capturado no enqueue — o job NAO re-le a correlacao (imune ao TTL)
+  recordUrl: string;
+  payload: Record<string, any>;
+  eventoDuravelId: string | null; // linha webhook_eventos, p/ o job fechar o desfecho
+}
 
-/**
- * Classifica a prioridade de uma mensagem. CRISE (0) quando: (a) o texto
- * casa o lexico de sofrimento agudo, OU (b) o predicado `leadEmCrise`
- * injetado (no wiring real, um wrapper da leitura duravel ja existente —
- * estaBloqueado/buscarConversaAguardandoHumano) indica que o numero ja esta
- * em bloqueio/pausa de crise. Recebe o predicado por injecao (nao importa
- * bloqueio.ts/supabase.ts direto) pra este modulo continuar puro e
- * smoke-avel sem I/O. Nunca lanca — qualquer erro no predicado injetado
- * degrada pra NORMAL (nao pra CRISE), mas o lexico local continua valendo
- * como rede de seguranca independente do predicado.
- */
-export function classificarPrioridade(
-  numero: string,
-  texto: string,
-  leadEmCrise?: (numero: string) => boolean,
-): Prioridade {
-  const textoSeguro = typeof texto === 'string' ? texto : '';
+export interface DadosJobFalhaTerminal {
+  whatsappCallId: string;
+  telefone: string;
+  payload: Record<string, any>;
+  eventoDuravelId: string | null;
+}
 
-  if (LEXICO_CRISE_REGEX.test(textoSeguro)) {
-    return PRIORIDADE_CRISE;
-  }
+export type NomeJob = 'record' | 'falha-terminal';
 
-  if (typeof leadEmCrise === 'function') {
-    try {
-      if (leadEmCrise(numero)) return PRIORIDADE_CRISE;
-    } catch (e) {
-      console.error('[fila] erro no predicado leadEmCrise, degradando pra NORMAL:', e);
-    }
-  }
+/** Nome da fila BullMQ (Redis key namespace) — padrao 'processamento-ligacao'. */
+export const NOME_FILA: string = FILA_NOME;
 
-  return PRIORIDADE_NORMAL;
+const MODO: 'bullmq' | 'inline' = REDIS_URL ? 'bullmq' : 'inline';
+
+/** 'bullmq' ou 'inline' — usado pelos planos 06-02..06-05 e pelo log de boot. */
+export function modoFila(): 'bullmq' | 'inline' {
+  return MODO;
 }
 
 /**
- * Fila com 2 niveis (CRISE e NORMAL). `proximo()` sempre drena TODOS os
- * itens CRISE antes de qualquer NORMAL, independente da ordem de chegada —
- * a mecanica que garante que crise nunca fica presa atras de flood normal.
+ * Opcoes de conexao IORedis derivadas de REDIS_URL, para uso pela Queue e
+ * pelo Worker (06-04). BullMQ EXIGE `maxRetriesPerRequest: null` na
+ * connection do Worker (blocking commands do BRPOPLPUSH/BLMOVE quebram com
+ * qualquer outro valor) — o 06-04 deve reusar exatamente este objeto ao
+ * instanciar o Worker. Retorna null em modo inline (sem Redis configurado).
  */
-export class FilaPrioridade<T = unknown> {
-  private filaCrise: T[] = [];
-  private filaNormal: T[] = [];
-
-  enfileirar(item: T, prioridade: Prioridade): void {
-    if (prioridade === PRIORIDADE_CRISE) {
-      this.filaCrise.push(item);
-    } else {
-      this.filaNormal.push(item);
-    }
-  }
-
-  /** Remove e devolve o proximo item (CRISE antes de NORMAL). undefined se vazia. */
-  proximo(): T | undefined {
-    if (this.filaCrise.length > 0) return this.filaCrise.shift();
-    return this.filaNormal.shift();
-  }
-
-  get tamanhoCrise(): number {
-    return this.filaCrise.length;
-  }
-
-  get tamanhoNormal(): number {
-    return this.filaNormal.length;
-  }
+export function conexaoFila(): object | null {
+  if (MODO !== 'bullmq') return null;
+  return {
+    url: REDIS_URL,
+    maxRetriesPerRequest: null,
+  };
 }
-
-// --- Rate limit (token bucket) + fila global de admissao ---
-//
-// Capacidade/janela configuraveis por env com default seguro (60 msg/min),
-// mesmo padrao de env-com-default de config.ts — SEM instanciar nada de
-// config.ts aqui (este modulo continua puro/sem side-effect de import).
-//
-// WR-04 (review Fase 5): validacao explicita dos tunables — `Number(x) ||
-// default` engolia silenciosamente um valor invalido/zero explicito. envNum
-// avisa (1x, no load) quando o env esta presente mas nao e um numero finito
-// positivo, em vez de substituir mudo pelo default.
-function envNum(nome: string, def: number): number {
-  const bruto = process.env[nome];
-  if (bruto === undefined || bruto === '') return def;
-  const n = Number(bruto);
-  if (!Number.isFinite(n) || n <= 0) {
-    console.warn(`[fila] env ${nome}="${bruto}" invalido (esperado numero finito > 0) — usando default ${def}`);
-    return def;
-  }
-  return n;
-}
-
-const RATE_LIMIT_CAPACIDADE = envNum('SDR_RATE_LIMIT_CAPACIDADE', 60);
-const RATE_LIMIT_JANELA_MS = envNum('SDR_RATE_LIMIT_JANELA_MS', 60_000); // 1 min
-// Capacidade da fila bounded de NORMAL — acima disso, shed explicito
-// (overload) em vez de crescer sem limite (T-05-01-03).
-//
-// WR-04: limites REALISTAS. A "fila" e um contador de admissoes-em-transito
-// drenado por timer (a mensagem admitida segue imediatamente pro buffer/
-// LLM), entao o teto real de vazao pro processamento antes do 1o shed e
-// aproximadamente: capacidade do bucket + cap_da_fila * (60s / drenagem).
-// Com os defaults antigos (200 / 15s) isso dava ~860 msg/min — o bucket nao
-// protegia nada downstream. Defaults novos: cap 50 + drenagem 30s =>
-// ~60 + 50*2 = ~160 msg/min no pior caso antes do shed explicito — coerente
-// com 1 container + bulkhead('llm')=10 (resiliencia.ts). Amarrar a drenagem
-// a conclusao REAL de processarMensagem nao e 1:1 aqui por design: o buffer
-// de 10s MESCLA varias admissoes num unico processamento (buffer.ts), entao
-// o timer continua sendo a aproximacao documentada — ajustar
-// SDR_FILA_DRENAGEM_MS se a latencia media observada de processamento mudar.
-const FILA_NORMAL_CAPACIDADE_MAX = envNum('SDR_FILA_NORMAL_CAPACIDADE_MAX', 50);
-// Tempo que uma entrada "enfileirada por rate limit" fica contando contra a
-// capacidade da fila antes de ser considerada drenada. A MENSAGEM em si
-// segue pro processamento normal imediatamente (nunca fica de fato parada
-// esperando aqui) — esta fila e so um contador de "quantas admissoes por
-// fila estao em transito agora", pra dar sinal de overload explicito sob
-// carga sustentada em vez de deixar crescer sem limite.
-const TEMPO_EM_FILA_MS = envNum('SDR_FILA_DRENAGEM_MS', 30_000);
-
-let tokensDisponiveis = RATE_LIMIT_CAPACIDADE;
-
-// Refill periodico do token bucket (mesmo estilo de setInterval de cleanup
-// de notificacoes.ts). WR-04: unref() — um import direto deste modulo (ex.:
-// smoke) nao pode manter o processo vivo so por causa do timer (mesmo
-// cuidado ja aplicado em cache-semantico.ts/resiliencia.ts).
-const refillTimer = setInterval(() => {
-  tokensDisponiveis = RATE_LIMIT_CAPACIDADE;
-}, RATE_LIMIT_JANELA_MS);
-if (typeof (refillTimer as unknown as { unref?: () => void }).unref === 'function') {
-  (refillTimer as unknown as { unref: () => void }).unref();
-}
-
-const filaGlobal = new FilaPrioridade<{ criadoEm: number }>();
-
-export type MotivoAdmissao = 'ok' | 'rate_limited_enfileirado' | 'overload';
 
 /**
- * Decide se uma mensagem de prioridade `prioridade` pode ser admitida agora.
- *
- * REGRAS INVIOLAVEIS:
- * - CRISE (0): SEMPRE `{ admitido: true }`, sem consumir token e sem checar
- *   capacidade da fila — fail-safe na direcao do humano, nunca bloqueado.
- * - NORMAL (1): consome 1 token do bucket se disponivel
- *   (`{ admitido: true, motivo: 'ok' }`); se sem token, tenta enfileirar
- *   (nao perde) ate `FILA_NORMAL_CAPACIDADE_MAX`
- *   (`{ admitido: true, motivo: 'rate_limited_enfileirado' }`); se a fila
- *   tambem estiver cheia, `{ admitido: false, motivo: 'overload' }` — shed
- *   EXPLICITO (o caller decide handoff/aviso ao suporte), nunca perda
- *   silenciosa.
+ * Opcoes de job aplicadas em todo `queue.add` — retry com backoff
+ * exponencial (FILA-03) e retencao dos jobs. `removeOnFail: false` MANTEM
+ * os jobs falhos no set `failed` do BullMQ — esse set E a DLQ inspecionavel
+ * (FILA-04), nunca descartada automaticamente.
  */
-export function admitir(prioridade: Prioridade): { admitido: boolean; motivo?: MotivoAdmissao } {
-  if (prioridade === PRIORIDADE_CRISE) {
-    return { admitido: true, motivo: 'ok' };
-  }
-
-  if (tokensDisponiveis > 0) {
-    tokensDisponiveis -= 1;
-    return { admitido: true, motivo: 'ok' };
-  }
-
-  if (filaGlobal.tamanhoNormal >= FILA_NORMAL_CAPACIDADE_MAX) {
-    return { admitido: false, motivo: 'overload' };
-  }
-
-  const item = { criadoEm: Date.now() };
-  filaGlobal.enfileirar(item, PRIORIDADE_NORMAL);
-  const drenagemTimer = setTimeout(() => {
-    // Libera a capacidade contada apos o tempo estimado de "transito" — a
-    // mensagem real ja seguiu pro processamento no momento da admissao.
-    filaGlobal.proximo();
-  }, TEMPO_EM_FILA_MS);
-  // WR-04: timers de drenagem tambem nao seguram o processo vivo.
-  if (typeof (drenagemTimer as unknown as { unref?: () => void }).unref === 'function') {
-    (drenagemTimer as unknown as { unref: () => void }).unref();
-  }
-
-  return { admitido: true, motivo: 'rate_limited_enfileirado' };
+export function opcoesJob(): object {
+  return {
+    attempts: FILA_ATTEMPTS,
+    backoff: { type: 'exponential', delay: FILA_BACKOFF_MS },
+    removeOnComplete: { count: 1000 },
+    removeOnFail: false,
+  };
 }
 
-/** So pra diagnostico/observabilidade (dashboard futuro) — nao usado no smoke. */
-export function estadoFila(): { tokensDisponiveis: number; tamanhoFilaNormal: number } {
-  return { tokensDisponiveis, tamanhoFilaNormal: filaGlobal.tamanhoNormal };
+// ===== Queue BullMQ — instanciacao lazy singleton (so em modo bullmq) =====
+//
+// NUNCA instanciar no top-level do modulo (quebraria o boot sem Redis) — so
+// na primeira chamada de enfileirar*, espelhando garantirCliente() de
+// estado-webhook.ts.
+
+let filaBullMq: Queue | null = null;
+
+function garantirFila(): Queue {
+  if (!filaBullMq) {
+    filaBullMq = new Queue(NOME_FILA, { connection: conexaoFila() as any });
+    // So para nao derrubar o processo com unhandled error — mensagem curta,
+    // NUNCA a REDIS_URL nem dado do job (pode conter PII).
+    filaBullMq.on('error', (e) => {
+      console.error('[fila] erro de conexao Redis (degradando):', e instanceof Error ? e.message : String(e));
+    });
+  }
+  return filaBullMq;
 }
+
+export async function enfileirarRecord(dados: DadosJobRecord): Promise<{ enfileirado: boolean }> {
+  if (MODO !== 'bullmq') return { enfileirado: false };
+  try {
+    // jobId = whatsappCallId: dedup de enqueue (FILA-05) — reenvio do mesmo
+    // call_id (retry do Wavoip, corrida de replicas) nao cria job duplicado.
+    await garantirFila().add('record', dados, { ...opcoesJob(), jobId: dados.whatsappCallId });
+    return { enfileirado: true };
+  } catch (e) {
+    // Fail-open p/ inline: Redis caiu em runtime, o chamador processa a
+    // request sincrona (mesma resiliencia do fail-open de estado-webhook).
+    console.error(
+      '[fila] falha ao enfileirar record (degradando p/ inline):',
+      e instanceof Error ? e.message : String(e),
+    );
+    return { enfileirado: false };
+  }
+}
+
+export async function enfileirarFalhaTerminal(
+  dados: DadosJobFalhaTerminal,
+): Promise<{ enfileirado: boolean }> {
+  if (MODO !== 'bullmq') return { enfileirado: false };
+  try {
+    await garantirFila().add('falha-terminal', dados, {
+      ...opcoesJob(),
+      jobId: dados.whatsappCallId + ':falha',
+    });
+    return { enfileirado: true };
+  } catch (e) {
+    console.error(
+      '[fila] falha ao enfileirar falha-terminal (degradando p/ inline):',
+      e instanceof Error ? e.message : String(e),
+    );
+    return { enfileirado: false };
+  }
+}
+
+/**
+ * Alerta de DLQ (FILA-04) — chamado pelo worker (06-04) quando um job
+ * esgota FILA_ATTEMPTS. SEMPRE loga uma linha estruturada `[ALERTA][DLQ]`
+ * (nunca telefone/CPF/payload — so ids e a classe do erro). Se
+ * ALERT_WEBHOOK_URL estiver setado, faz tambem um POST best-effort com o
+ * mesmo payload sem PII — nunca relanca (alerta e observabilidade, nunca
+ * derruba o worker).
+ */
+export async function alertarDLQ(info: {
+  job: NomeJob;
+  whatsappCallId: string;
+  eventoDuravelId: string | null;
+  erro: string;
+}): Promise<void> {
+  console.error(
+    `[ALERTA][DLQ] job=${info.job} whatsappCallId=${info.whatsappCallId} ` +
+      `eventoDuravelId=${info.eventoDuravelId ?? 'null'} erro=${info.erro}`,
+  );
+
+  if (!ALERT_WEBHOOK_URL) return;
+
+  try {
+    await fetch(ALERT_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        job: info.job,
+        whatsappCallId: info.whatsappCallId,
+        eventoDuravelId: info.eventoDuravelId,
+        erro: info.erro,
+      }),
+    });
+  } catch (e) {
+    console.error(
+      '[fila] falha ao enviar alerta de DLQ via webhook (degradando p/ so-log):',
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
+/** Graceful shutdown da Queue (Fase 6) — no-op em modo inline. */
+export async function fecharFila(): Promise<void> {
+  if (filaBullMq) {
+    await filaBullMq.close();
+    filaBullMq = null;
+  }
+}
+
+console.log(
+  MODO === 'bullmq'
+    ? '[fila] processamento em BullMQ (Redis)'
+    : '[fila] processamento inline (1 instancia)',
+);
