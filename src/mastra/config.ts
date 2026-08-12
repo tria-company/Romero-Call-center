@@ -88,7 +88,7 @@ export const LLM_PROVIDER = process.env.LLM_PROVIDER || 'openai';
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
 
-if (!OPENAI_API_KEY) {
+if (LLM_PROVIDER !== 'azure' && !OPENAI_API_KEY) {
   console.warn(
     '[config] OPENAI_API_KEY vazio: chamarLLM() nao consegue chamar a IA ' +
       '(nenhuma request e feita sem a chave — D-09). Coloque sua key no .env ' +
@@ -96,12 +96,23 @@ if (!OPENAI_API_KEY) {
   );
 }
 
-// Azure OpenAI (D-08b) — caminho futuro, so usado quando LLM_PROVIDER=azure.
-// Sem warn-if-empty: Azure nao e o caminho atual, so falha quando selecionado.
+// Azure OpenAI (D-08b) — caminho atual selecionavel via LLM_PROVIDER=azure.
+// Suporta os DOIS esquemas de endpoint Azure (ver src/mastra/llm.ts,
+// normalizarEndpointAzure/modeloLLM — WR-01): classico (*.openai.azure.com,
+// com api-version) e Azure AI Foundry (endpoint com /api/projects/, esquema
+// /openai/v1/..., sem api-version).
 export const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || '';
 export const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || '';
 export const AZURE_OPENAI_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-5.1';
 export const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || '';
+
+if (LLM_PROVIDER === 'azure' && (!AZURE_OPENAI_API_KEY || !AZURE_OPENAI_ENDPOINT)) {
+  console.warn(
+    '[config] AZURE_OPENAI_API_KEY / AZURE_OPENAI_ENDPOINT vazio: chamarLLM() nao ' +
+      'consegue chamar a IA no Azure (nenhuma request e feita sem as duas — D-09). ' +
+      'Coloque as keys no .env como AZURE_OPENAI_API_KEY / AZURE_OPENAI_ENDPOINT.',
+  );
+}
 
 // ===== ClickUp — store operacional (Listas 01 LEADS / 02 LIGACOES) =====
 //

@@ -18,11 +18,55 @@ import {
 } from './config.ts';
 
 /**
+ * Normaliza o endpoint Azure informado no .env para o formato que
+ * @ai-sdk/azure espera como baseURL, cobrindo os DOIS esquemas suportados
+ * (WR-01):
+ * - Classico (recurso `*.openai.azure.com`): so remove barra(s) final(is) —
+ *   NAO forca `/v1` (esse esquema usa /deployments/{id}?api-version=...).
+ * - Azure AI Foundry (projeto, endpoint contem `/api/projects/`) ou outro:
+ *   remove barra(s) final(is), remove sufixos acidentais que o usuario pode
+ *   colar do painel (`/responses`, `/chat/completions`) e garante o sufixo
+ *   `/v1` — esse esquema so aceita `/openai/v1/chat/completions`, sem
+ *   api-version (comprovado por curl real: `/deployments/...?api-version=...`
+ *   responde "API version not supported" no Foundry).
+ * Funcao pura: sem I/O, sem logs.
+ */
+export function normalizarEndpointAzure(endpoint: string): string {
+  const semBarraFinal = endpoint.replace(/\/+$/, '');
+
+  if (semBarraFinal.includes('.openai.azure.com')) {
+    return semBarraFinal;
+  }
+
+  const semSufixoAcidental = semBarraFinal.replace(/\/(responses|chat\/completions)$/, '');
+  return semSufixoAcidental.endsWith('/v1') ? semSufixoAcidental : `${semSufixoAcidental}/v1`;
+}
+
+/**
  * Retorna o LanguageModel a usar pelos agentes, selecionado por LLM_PROVIDER.
  * Um modelo unico para os 3 agentes (D-08) — nao diferenciar por agente aqui.
  */
 export function modeloLLM(): LanguageModel {
   if (LLM_PROVIDER === 'azure') {
+    // Dois esquemas Azure suportados (WR-01), distinguidos pelo endpoint:
+    // - Foundry (endpoint contem '/api/projects/'): baseURL termina em
+    //   /openai/v1, useDeploymentBasedUrls=false -> URL final e
+    //   ${baseURL}${path} SEM api-version (@ai-sdk/azure@4.0.37, index.js
+    //   linhas 96-105: !useAzureOpenAIEndpoint -> sem api-version).
+    // - Classico (recurso *.openai.azure.com): useDeploymentBasedUrls=true ->
+    //   /deployments/{deploymentId}?api-version=... (comportamento original,
+    //   preservado EXATAMENTE).
+    const ehFoundry = AZURE_OPENAI_ENDPOINT.includes('/api/projects/');
+
+    if (ehFoundry) {
+      const azure = createAzure({
+        apiKey: AZURE_OPENAI_API_KEY,
+        baseURL: normalizarEndpointAzure(AZURE_OPENAI_ENDPOINT),
+        useDeploymentBasedUrls: false,
+      });
+      return azure(AZURE_OPENAI_DEPLOYMENT);
+    }
+
     const azure = createAzure({
       apiKey: AZURE_OPENAI_API_KEY,
       baseURL: AZURE_OPENAI_ENDPOINT || undefined,
