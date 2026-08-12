@@ -28,10 +28,11 @@ import { DEEPGRAM_API_KEY, DEEPGRAM_MODEL, DEEPGRAM_LANGUAGE } from './config.ts
 import { fetchTimeout } from './http.ts';
 
 const DEEPGRAM_URL = 'https://api.deepgram.com/v1/listen';
-// Transcricao de uma call inteira pode levar dezenas de segundos — timeout
-// generoso (bem acima do fetch default de 15s). Tambem usado no download do
-// fallback binario (audio de uma call inteira).
-const TIMEOUT_TRANSCRICAO_MS = 120_000;
+// Transcricao de uma call inteira pode levar minutos — uma call de 60-90 min
+// passa facil dos 120s antigos, o que fazia a transcricao falhar e a analise
+// se perder. Timeout generoso (bem acima do fetch default de 15s). Tambem usado
+// no download do fallback binario (audio de uma call inteira).
+const TIMEOUT_TRANSCRICAO_MS = 600_000;
 
 /** Monta os query params do /v1/listen — os MESMOS para url-mode e binario. */
 export function montarParamsListen(): URLSearchParams {
