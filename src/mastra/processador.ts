@@ -24,24 +24,39 @@
 // LGPD/WR-01: nenhuma transcricao/telefone/CPF em log — so ids/flags/status;
 // telefone so aparece MASCARADO quando necessario (mesmo padrao do webhook).
 
-import type { DadosJobFalhaTerminal } from './fila.ts';
+import type { DadosJobRecord, DadosJobFalhaTerminal } from './fila.ts';
 
 import {
+  ANALISE_ADERENCIA_MINIMA,
   OPER_RETORNO_NAO_ATENDEU_DIAS,
   OPER_RETORNO_DEFAULT_DIAS,
 } from './config.ts';
 
 import {
+  gravarTranscricao,
   gravarMetadadosLigacao,
   buscarLigacaoAbertaPorTelefone,
+  criarLigacaoAvulsa,
   lerTask,
+  setCustomField,
+  CAMPOS_LIGACOES,
   CAMPOS_LEADS,
   resolverLeadDaLigacao,
   consolidarLead,
   fecharLigacao,
 } from './clickup.ts';
 
-import { derivarMotivoFalha, derivarDuracao } from './analise.ts';
+import { transcreverCallUrl } from './deepgram.ts';
+
+import {
+  derivarAtendeu,
+  derivarMotivoFalha,
+  derivarDuracao,
+  montarPromptAnalise,
+  parseResultadoAnalise,
+  necessitaRevisao,
+  extrairRetorno,
+} from './analise.ts';
 
 import { montarPromptContexto, proximoContato, derivarContadores } from './contexto.ts';
 
@@ -52,6 +67,8 @@ import { marcarEventoWebhook } from './supabase.ts';
 import {
   lerTaskAtiva,
   limparTaskAtiva,
+  marcarRecordProcessado,
+  liberarRecordProcessado,
   marcarCallFalhaProcessada,
 } from './estado-webhook.ts';
 
@@ -236,5 +253,166 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
     await marcarEventoWebhook(dados.eventoDuravelId, 'processado');
   } catch (e) {
     console.error('[processador] falha ao marcar evento falha-terminal processado:', e);
+  }
+}
+
+// ===== processarRecordJob — transcricao + Agente Analise + Agente Contexto =====
+// (OPER-01..05, D-P3-01..15, FILA-02/FILA-05)
+
+/**
+ * Processa o RECORD (gravacao pronta) de uma call Wavoip: deduplica (SETNX,
+ * FILA-05), transcreve (Deepgram), resolve/cria a task da Ligacao, grava
+ * transcricao + metadados, roda o Agente Analise (aderencia ao script) e o
+ * Agente Contexto (consolidacao do lead + fechamento da Ligacao). Chamavel
+ * tanto pelo worker (06-04) quanto inline pelo webhook (06-03).
+ *
+ * Diferenca de fronteira request->job (unica mudanca de semantica vs. o
+ * inline de ontem): usa `dados.telefone` (capturado no enqueue, imune ao TTL
+ * da correlacao) em vez de re-ler `lerCorrelacao(callId)`; nao revalida
+ * record_status/recordUrl/callId (o webhook ja validou antes de enfileirar).
+ * Falhas RETENTAVEIS (transcricao null, avulsa nao criada) LANCAM — em modo
+ * fila o BullMQ retenta (FILA-03), em modo inline o webhook (06-03) traduz o
+ * throw em 502 (mesmo efeito do 502 de hoje: Wavoip retenta).
+ */
+export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
+  const { whatsappCallId: callId, telefone, recordUrl, payload } = dados;
+
+  // FILA-05: dedup atomico no INICIO — retry do webhook/BullMQ nao
+  // re-transcreve a mesma gravacao.
+  if (!(await marcarRecordProcessado(callId))) return;
+
+  const transcricao = await transcreverCallUrl(recordUrl);
+  if (!transcricao) {
+    // Libera o dedup pra permitir um retry futuro transcrever.
+    await liberarRecordProcessado(callId);
+    // WR-01: nunca telefone cru em log — so o whatsapp_call_id.
+    console.warn(`[processador] transcricao falhou (call=${callId})`);
+    throw new Error(`transcricao falhou call=${callId}`);
+  }
+
+  // D-P3-01: resolve a task da Ligacao — 1) map in-memory (task reportada em
+  // /api/discador/ligando), 2) fallback persistido no ClickUp (Ligacao
+  // aberta com o mesmo TELEFONE), 3) D-P3-03: nao casou nenhuma -> cria uma
+  // Ligacao avulsa (nenhuma ligacao real fica sem registro).
+  let taskId = await lerTaskAtiva(telefone);
+  if (!taskId) {
+    try {
+      taskId = await buscarLigacaoAbertaPorTelefone(telefone);
+    } catch (e) {
+      console.error('[processador] falha ao buscar Ligacao aberta por telefone:', e);
+    }
+  }
+  if (!taskId) {
+    try {
+      const avulsa = await criarLigacaoAvulsa(telefone);
+      taskId = avulsa.id;
+    } catch (e) {
+      // Criar a avulsa e o unico jeito de nao perder o registro desta
+      // gravacao (D-P3-03) — se ISSO falhar, lanca (retentavel, mesmo efeito
+      // do 502 de hoje).
+      await liberarRecordProcessado(callId);
+      console.error('[processador] falha ao criar Ligacao avulsa:', e);
+      throw e instanceof Error ? e : new Error(String(e));
+    }
+  }
+
+  // D-P3-04: grava a transcricao (field TRANSCRICAO + comentario),
+  // substituindo a nota no GHL. Loga-e-segue (nao trava a cadeia por uma
+  // falha de escrita isolada) — o helper LANCA em falha de infra (WR-03),
+  // este catch so evita propagar.
+  try {
+    await gravarTranscricao(taskId, transcricao);
+  } catch (e) {
+    console.error('[processador] falha ao gravar transcricao na Ligacao:', e);
+  }
+
+  // D-P3-05, OPER-02: metadados 100% automaticos — ATENDEU=true porque
+  // houve gravacao (teveGravacao=true).
+  try {
+    await gravarMetadadosLigacao(taskId, {
+      atendeu: derivarAtendeu(payload, true),
+      fim: Date.now(),
+      duracao: derivarDuracao(payload),
+      urlGravacao: recordUrl,
+    });
+  } catch (e) {
+    console.error('[processador] falha ao gravar metadados na Ligacao:', e);
+  }
+
+  // ---- Agente Analise (OPER-03/04, D-P3-08/09/10/11/15) ----
+  // Encadeado automaticamente logo apos a transcricao+metadados. Falha de
+  // LLM/parse NAO trava a cadeia (D-P3-08): marca NECESSITA_REVISAO=true e
+  // segue. Nada de transcricao/PII em log — so ids/flags/status.
+  // `resultadoAnalise`/`retornoAnalise` ficam fora do try (hoisted) pro
+  // passo do Agente Contexto (abaixo) poder consolidar o lead mesmo quando a
+  // Analise falhou (valores ficam `null`).
+  let resultadoAnalise: ReturnType<typeof parseResultadoAnalise> | null = null;
+  let retornoAnalise: ReturnType<typeof extrairRetorno> | null = null;
+  try {
+    const task = await lerTask(taskId);
+    const script = task?.description ?? task?.text_content ?? '';
+    const { system, prompt } = montarPromptAnalise({ script, transcricao });
+    const textoLLM = await chamarLLM(prompt, system);
+    const resultado = parseResultadoAnalise(textoLLM);
+    const revisao = necessitaRevisao({
+      aderencia: resultado.aderencia,
+      limiar: ANALISE_ADERENCIA_MINIMA,
+      sinaisAlerta: resultado.sinaisAlerta,
+      falhaTecnica: resultado.falhaTecnica,
+    });
+    const retorno = extrairRetorno(resultado, { hoje: new Date(), defaultDias: 2 });
+    resultadoAnalise = resultado;
+    retornoAnalise = retorno;
+
+    await setCustomField(taskId, CAMPOS_LIGACOES.ADERENCIA_SCRIPT, resultado.aderencia);
+    await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, revisao);
+    await setCustomField(taskId, CAMPOS_LIGACOES.RETORNO_NECESSARIO, retorno.necessario);
+    await setCustomField(
+      taskId,
+      CAMPOS_LIGACOES.DATA_RETORNO,
+      retorno.data ? retorno.data.getTime() : null,
+    );
+    await setCustomField(taskId, CAMPOS_LIGACOES.ANALISE_IA, resultado.resumoAnalise);
+    await setCustomField(taskId, CAMPOS_LIGACOES.OBSERVACOES_EXTRAIDAS, resultado.observacoesExtraidas);
+  } catch (e) {
+    // D-P3-08: LLM fora do ar (ou parse/escrita falhou) — marca revisao e
+    // segue, nunca trava a cadeia do processador. O helper de ClickUp
+    // subjacente ainda lanca em falha de infra (WR-03); aqui so
+    // distinguimos "precisa de revisao humana" de um erro que travaria o
+    // job inteiro.
+    console.error('[processador] falha no Agente Analise, marcando NECESSITA_REVISAO:', e);
+    try {
+      await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
+    } catch (e2) {
+      console.error('[processador] falha ao marcar NECESSITA_REVISAO apos erro do Agente Analise:', e2);
+    }
+  }
+
+  // ---- Agente Contexto (OPER-05, D-P3-06/12/13/14/15) — caminho ATENDIDO ----
+  // Consolida o lead com o resultado da Analise (quando disponivel) e fecha
+  // a Ligacao (D-P3-06). D-P3-15: sinais de alerta (opt-out inclusive)
+  // entram no resumo consolidado — NUNCA removem o lead nem o tornam
+  // inelegivel automaticamente, so a decisao humana (via NECESSITA_REVISAO,
+  // ja gravado acima) faz isso.
+  const sinaisTexto = resultadoAnalise?.sinaisAlerta?.length
+    ? ` Sinais de alerta: ${resultadoAnalise.sinaisAlerta.join('; ')}.`
+    : '';
+  await consolidarEFecharLigacao(taskId, {
+    atendeu: true,
+    resumoAnalise: (resultadoAnalise?.resumoAnalise ?? '') + sinaisTexto,
+    aderencia: resultadoAnalise?.aderencia ?? null,
+    retorno: retornoAnalise ?? { necessario: false, data: null },
+  });
+
+  // CR-02: limpa a entrada telefone->task apos consolidar/fechar — uma
+  // ligacao futura ao mesmo telefone nunca re-consolida sobre esta task ja
+  // fechada.
+  await limparTaskAtiva(telefone);
+
+  // Fecha o desfecho duravel do evento cru (Fase 2 — durabilidade).
+  try {
+    await marcarEventoWebhook(dados.eventoDuravelId, 'processado');
+  } catch (e) {
+    console.error('[processador] falha ao marcar evento record processado:', e);
   }
 }
