@@ -3,7 +3,7 @@
 // app.js e escrito SEM template literals / ${...} de proposito, pra poder viver
 // dentro destas template strings sem escape.
 
-export const DISCADOR_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0f766e"/><path d="M356 300c-14-3-25-8-35-13-8-4-17-2-23 4l-16 16c-40-22-73-55-95-95l16-16c6-6 8-15 4-23-5-10-10-21-13-35-2-11-12-19-23-19h-36c-13 0-24 11-22 25 7 55 31 106 70 145s90 63 145 70c14 2 25-9 25-22v-36c0-11-8-21-19-23z" fill="#fff"/></svg>`;
+export const DISCADOR_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#29c5f6"/><stop offset="1" stop-color="#007bff"/></linearGradient></defs><rect width="512" height="512" rx="112" fill="url(#g)"/><path d="M356 300c-14-3-25-8-35-13-8-4-17-2-23 4l-16 16c-40-22-73-55-95-95l16-16c6-6 8-15 4-23-5-10-10-21-13-35-2-11-12-19-23-19h-36c-13 0-24 11-22 25 7 55 31 106 70 145s90 63 145 70c14 2 25-9 25-22v-36c0-11-8-21-19-23z" fill="#fff"/></svg>`;
 
 export const DISCADOR_MANIFEST = JSON.stringify({
   name: 'Discador USI',
@@ -13,17 +13,17 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   scope: '/discador',
   display: 'standalone',
   orientation: 'portrait',
-  background_color: '#0b1220',
-  theme_color: '#0f766e',
+  background_color: '#050a14',
+  theme_color: '#007bff',
   icons: [
     { src: '/discador/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
   ],
 });
 
-// CACHE bump (discador-v7 -> discador-v8): invalida o app.js antigo (sem o
-// report de "task ativa" ao Ligar) nos dispositivos já instalados como PWA
-// (Fase 03 Plano 01, D-P3-01).
-export const DISCADOR_SW_JS = `const CACHE='discador-v8';
+// CACHE bump (discador-v8 -> discador-v10): invalida o shell antigo nos
+// dispositivos já instalados como PWA após o reskin Liquid Glass (quick
+// 260812-o4u). Mantém em sincronia com web/sw.js.
+export const DISCADOR_SW_JS = `const CACHE='discador-v10';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -34,7 +34,7 @@ export const DISCADOR_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f766e">
+<meta name="theme-color" content="#007bff">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -43,50 +43,64 @@ export const DISCADOR_HTML = `<!doctype html>
 <link rel="apple-touch-icon" href="/discador/icon.svg">
 <link rel="icon" href="/discador/icon.svg">
 <style>
-  :root{--bg:#0b1220;--card:#131c2e;--card2:#1a2438;--txt:#e7ecf5;--mut:#8fa0bd;--teal:#0f766e;--teal2:#12a594;--red:#dc2626;--line:#233149}
+  :root{
+    --bg:#050a14;--txt:#eaf2ff;--mut:#93a6c8;
+    --blue:#007bff;--cyan:#29c5f6;--indigo:#3a4b9f;--red:#dc2626;
+    --line:rgba(255,255,255,.08);--glass:rgba(255,255,255,.045);--glass2:rgba(255,255,255,.07);
+    --hair-top:rgba(255,255,255,.14);--hair-side:rgba(255,255,255,.06);
+    --accent:linear-gradient(135deg,var(--cyan),var(--blue))
+  }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+  html,body{height:100%}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;color:var(--txt);background:var(--bg);-webkit-font-smoothing:antialiased}
+  body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(680px 460px at 12% -8%,rgba(0,123,255,.20),transparent 60%),radial-gradient(560px 460px at 108% 12%,rgba(41,197,246,.14),transparent 55%),radial-gradient(680px 560px at 40% 116%,rgba(58,75,159,.18),transparent 60%)}
   .wrap{max-width:640px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column}
-  header{position:sticky;top:0;background:rgba(11,18,32,.92);backdrop-filter:blur(8px);padding:calc(14px + env(safe-area-inset-top)) 16px 10px 16px;border-bottom:1px solid var(--line);z-index:5}
+  header{position:sticky;top:0;z-index:5;padding:calc(14px + env(safe-area-inset-top)) 16px 12px 16px;background:rgba(5,10,20,.55);-webkit-backdrop-filter:blur(14px) saturate(160%);backdrop-filter:blur(14px) saturate(160%);border-bottom:1px solid var(--line)}
   header .row{display:flex;align-items:center;gap:10px}
-  header h1{font-size:18px;margin:0;flex:1;font-weight:700}
-  .pill{font-size:12px;color:var(--mut)}
+  header h1{font-size:18px;margin:0;flex:1;font-weight:700;letter-spacing:-.01em}
+  .pill{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--glass)}
   input,button{font-size:16px;font-family:inherit}
-  main{flex:1;padding:12px 16px calc(24px + env(safe-area-inset-bottom))}
-  .muted{color:var(--mut);text-align:center;padding:14px;font-size:14px}
-  .ghost{background:none;border:0;color:var(--mut);padding:8px}
+  main{flex:1;padding:14px 16px calc(24px + env(safe-area-inset-bottom))}
+  .muted{color:var(--mut);text-align:center;padding:16px;font-size:14px}
+  .ghost{background:none;border:0;color:var(--mut);padding:8px;border-radius:10px}
+  .ghost:active{background:var(--glass)}
   /* card da proxima ligacao (uma-por-vez — D-P2-08) */
-  .card-ligacao{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
-  .lig-head{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-  .lig-avatar{width:52px;height:52px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--teal2);flex:0 0 auto;text-transform:uppercase;font-size:18px}
+  .card-ligacao{position:relative;border-radius:18px;padding:18px;background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);border-top:1px solid var(--hair-top);border-left:1px solid var(--hair-side);border-right:1px solid var(--hair-side);border-bottom:1px solid rgba(255,255,255,.05);box-shadow:0 8px 32px rgba(2,6,16,.5)}
+  .lig-head{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+  .lig-avatar{width:54px;height:54px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;flex:0 0 auto;text-transform:uppercase;font-size:18px;box-shadow:0 6px 18px rgba(0,123,255,.35)}
   .lig-info{flex:1;min-width:0}
-  .lig-nome{font-size:19px;font-weight:700;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lig-nome{font-size:19px;font-weight:700;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.01em}
   .lig-tel{color:var(--mut);margin-top:2px}
   .lig-script-wrap{margin-bottom:16px}
-  .lig-script-label{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px}
-  .lig-script{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--teal2);border-radius:10px;padding:12px 14px;font-size:14px;line-height:1.5;white-space:pre-wrap}
-  .loadmore{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+  .lig-script-label{font-size:10px;color:var(--cyan);text-transform:uppercase;letter-spacing:.16em;margin-bottom:8px}
+  .lig-script{background:rgba(255,255,255,.03);border:1px solid var(--line);border-left:3px solid var(--cyan);border-radius:12px;padding:12px 14px;font-size:14px;line-height:1.55;white-space:pre-wrap}
+  .loadmore{width:100%;background:var(--glass2);color:var(--txt);border:1px solid var(--line);border-radius:12px;padding:13px;margin-top:10px;font-weight:600}
+  .loadmore:active{background:rgba(255,255,255,.10)}
   .call-lg{margin-top:0;padding:16px;font-size:17px}
   /* login */
   #login-view{flex:1;display:flex;flex-direction:column;justify-content:center;padding:28px;gap:14px;max-width:420px;margin:0 auto;width:100%}
-  #login-view .logo{width:64px;height:64px;margin:0 auto 6px;border-radius:18px;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:30px}
-  #login-view h2{text-align:center;margin:0 0 4px}
+  #login-view .logo{width:66px;height:66px;margin:0 auto 8px;border-radius:20px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:30px;box-shadow:0 10px 30px rgba(0,123,255,.4)}
+  #login-view h2{text-align:center;margin:0 0 4px;font-weight:700;letter-spacing:-.02em}
   #login-view .sub{text-align:center;color:var(--mut);margin:0 0 12px;font-size:14px}
-  .field{padding:14px 16px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--txt);width:100%}
-  .primary{background:var(--teal);color:#fff;border:0;border-radius:12px;padding:14px;font-weight:700;width:100%}
+  .field{padding:14px 16px;border-radius:14px;border:1px solid var(--line);background:var(--glass);color:var(--txt);width:100%;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+  .field::placeholder{color:#6f83a6}
+  .field:focus{outline:none;border-color:rgba(41,197,246,.6);box-shadow:0 0 0 3px rgba(41,197,246,.18)}
+  .primary{background:var(--accent);color:#fff;border:0;border-radius:14px;padding:14px;font-weight:700;width:100%;box-shadow:0 8px 22px rgba(0,123,255,.38);letter-spacing:.01em}
+  .primary:active{transform:translateY(1px);box-shadow:0 4px 14px rgba(0,123,255,.32)}
   .err{color:#fca5a5;text-align:center;font-size:14px;min-height:18px}
-  /* call overlay — estilo WhatsApp: avatar no meio, controles ancorados embaixo */
-  #call-overlay{position:fixed;inset:0;background:linear-gradient(180deg,#102437,#0b1220);display:none;flex-direction:column;align-items:center;justify-content:space-between;z-index:20;padding:calc(52px + env(safe-area-inset-top)) 24px calc(40px + env(safe-area-inset-bottom))}
+  /* call overlay — leve durante chamadas longas (avatar no meio, controles embaixo) */
+  #call-overlay{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:space-between;z-index:20;padding:calc(52px + env(safe-area-inset-top)) 24px calc(40px + env(safe-area-inset-bottom));background:radial-gradient(600px 500px at 50% 12%,rgba(0,123,255,.22),transparent 60%),radial-gradient(520px 460px at 50% 108%,rgba(41,197,246,.12),transparent 60%),linear-gradient(180deg,#081426,#050a14)}
   .call-top{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
-  #call-avatar{width:120px;height:120px;border-radius:50%;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:46px;font-weight:700;color:#fff;margin-bottom:20px;box-shadow:0 10px 34px rgba(0,0,0,.4);text-transform:uppercase}
-  #call-nome{font-size:26px;font-weight:700;text-transform:capitalize}
+  #call-avatar{width:124px;height:124px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:46px;font-weight:700;color:#fff;margin-bottom:22px;box-shadow:0 14px 40px rgba(0,123,255,.4);text-transform:uppercase}
+  #call-nome{font-size:26px;font-weight:700;text-transform:capitalize;letter-spacing:-.01em}
   #call-tel{color:var(--mut);margin-top:2px}
-  #call-status{margin-top:16px;font-size:15px;color:var(--teal2);letter-spacing:.5px}
-  #call-timer{font-size:20px;font-variant-numeric:tabular-nums;margin-top:4px;color:var(--mut)}
+  #call-status{margin-top:16px;font-size:14px;color:var(--cyan);letter-spacing:.14em;text-transform:uppercase}
+  #call-timer{font-size:20px;font-variant-numeric:tabular-nums;margin-top:6px;color:var(--mut)}
   .call-controls{display:flex;align-items:center;justify-content:center;gap:48px}
   .ctrl{display:flex;flex-direction:column;align-items:center;gap:8px;background:none;border:0;color:var(--mut);font-size:13px;font-weight:600}
-  .ctrl .ic{width:66px;height:66px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s}
-  .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg)}
+  .ctrl .ic{width:68px;height:68px;border-radius:50%;background:var(--glass2);border:1px solid var(--line);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s,transform .15s}
+  .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg);box-shadow:0 10px 26px rgba(220,38,38,.45)}
+  .ctrl.hangup:active .ic{transform:rotate(135deg) scale(.94)}
 </style>
 </head>
 <body>
