@@ -301,3 +301,14 @@ export const SUPABASE_TABLES_SERVICOS: string[] = process.env.SUPABASE_TABLES_SE
       .map((v) => v.trim())
       .filter((v) => v.length > 0)
   : SUPABASE_TABLES_SERVICOS_DEFAULT;
+
+// ===== Escala — durabilidade do webhook Wavoip (Fase 2, escala-150-atendentes) =====
+//
+// Tabela no Supabase onde CADA evento do webhook Wavoip é persistido CRU e ANTES
+// de processar — a rede de segurança do "não perder nenhuma ligação": se a
+// transcrição/LLM/escrita falhar ou o processo cair no meio, o evento fica
+// gravado aqui e é reprocessável. Default sensato ('webhook_eventos'), então sem
+// console.warn (mesmo espírito de OPER_STATUS_FECHADO). Se o Supabase não estiver
+// configurado, a durabilidade degrada para o comportamento atual (processamento
+// inline, sem rede de segurança) — NUNCA quebra o webhook.
+export const SUPABASE_TABLE_WEBHOOK_EVENTOS = process.env.SUPABASE_TABLE_WEBHOOK_EVENTOS || 'webhook_eventos';

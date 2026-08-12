@@ -88,6 +88,8 @@ import { chamarLLM } from './llm';
 
 // Assets estaticos do PWA discador (HTML/JS/manifest/SW/icon).
 import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISCADOR_ICON_SVG } from './discador-pwa';
+// Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
+import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
 
 // ===== Estado in-memory do webhook Wavoip (transcricao das calls) =====
 //
@@ -514,6 +516,8 @@ export const mastra = new Mastra({
         path: '/api/webhook/wavoip',
         method: 'POST',
         handler: async (c) => {
+          // Fora do try pra o catch tambem poder fechar o desfecho ('erro').
+          let eventoDuravelId: string | null = null;
           try {
             // Auth fail-closed ANTES de qualquer parse/efeito. Token vazio desabilita.
             const token = c.req.query('token') || c.req.header('x-webhook-token') || '';
@@ -529,6 +533,19 @@ export const mastra = new Mastra({
             // Log do shape (sem telefone). Pula DEVICE (heartbeat frequente).
             if (evento !== 'DEVICE') {
               console.log(`[wavoip] evento type=${evento} status=${payload.status || ''} dir=${payload.direction || ''} dur=${payload.duration ?? ''} record_status=${payload.record_status || ''} keys=[${Object.keys(payload).join(',')}]`);
+            }
+
+            // Durabilidade (Fase 2): persiste o evento CRU antes de qualquer
+            // processamento — se transcricao/LLM/escrita falhar ou o processo
+            // cair no meio, o evento fica gravado e e reprocessavel. Best-effort:
+            // loga-e-segue (nunca vira 500) e degrada a no-op sem Supabase. Pula
+            // DEVICE (heartbeat frequente).
+            if (evento !== 'DEVICE') {
+              try {
+                eventoDuravelId = await registrarEventoWebhook(evento, payload, whatsappCallId);
+              } catch (e) {
+                console.error('[wavoip] falha ao persistir evento bruto (durabilidade) — seguindo inline:', e);
+              }
             }
 
             // ---------------- CALL: guarda a correlacao call_id -> telefone ----------------
@@ -574,6 +591,8 @@ export const mastra = new Mastra({
                   }
                 }
               }
+              try { await marcarEventoWebhook(eventoDuravelId, 'processado'); }
+              catch (e) { console.error('[wavoip] falha ao marcar evento CALL processado:', e); }
               return c.json({ status: 'ok', correlacionado: Boolean(whatsappCallId && telefone) });
             }
 
@@ -743,6 +762,8 @@ export const mastra = new Mastra({
               // esta task ja fechada.
               taskAtivaPorTelefone.delete(telefone);
 
+              try { await marcarEventoWebhook(eventoDuravelId, 'processado'); }
+              catch (e) { console.error('[wavoip] falha ao marcar evento RECORD processado:', e); }
               return c.json({ status: 'ok' });
             }
 
@@ -750,6 +771,8 @@ export const mastra = new Mastra({
             return c.json({ status: 'ignorado', evento });
           } catch (erro) {
             console.error('[wavoip] Erro no webhook:', erro);
+            try { await marcarEventoWebhook(eventoDuravelId, 'erro', String(erro)); }
+            catch (e2) { console.error('[wavoip] falha ao marcar evento com erro:', e2); }
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
           }
         },

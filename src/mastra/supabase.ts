@@ -24,6 +24,7 @@ import {
   SUPABASE_COL_TELEFONE,
   SUPABASE_COL_FOLLOWUP_REF,
   SUPABASE_TABLES_SERVICOS,
+  SUPABASE_TABLE_WEBHOOK_EVENTOS,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -48,6 +49,95 @@ function checarConfig(): void {
   }
   if (!SUPABASE_SERVICE_KEY) {
     throw new Error('[supabase] SUPABASE_SERVICE_KEY ausente — nao da para autenticar na base self-hosted');
+  }
+}
+
+// ===== Durabilidade do webhook Wavoip (Fase 2 — escala-150-atendentes) =====
+//
+// Persiste CADA evento do webhook CRU e ANTES do processamento (a rede de
+// segurança do "não perder nenhuma ligação"): se transcrição/LLM/escrita
+// falharem ou o processo cair no meio, o evento fica aqui e é reprocessável.
+//
+// DIVERGÊNCIA CONSCIENTE do padrão WR-03 deste módulo: quando o Supabase NÃO
+// está configurado, estas funções NÃO lançam — retornam null / no-op. Motivo:
+// durabilidade é infra OPCIONAL (o webhook precisa seguir funcionando inline
+// como hoje, sem Supabase). Já um erro de REDE/HTTP com o Supabase configurado
+// LANÇA (WR-03) — e o chamador (webhook) loga-e-segue, pra nunca virar 500 por
+// causa da gravação de auditoria.
+
+/**
+ * Grava um evento do webhook com status inicial `recebido`. Retorna o id da
+ * linha (para `marcarEventoWebhook` fechar o desfecho) ou null quando o
+ * Supabase não está configurado (durabilidade indisponível — degrada para o
+ * comportamento atual). `whatsapp_call_id` fica indexado para o reprocesso.
+ */
+export async function registrarEventoWebhook(
+  tipo: string,
+  payload: unknown,
+  whatsappCallId: string,
+): Promise<string | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const corpo = [{
+    tipo,
+    whatsapp_call_id: whatsappCallId || null,
+    status: 'recebido',
+    payload,
+  }];
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_WEBHOOK_EVENTOS}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'return=representation' },
+      body: JSON.stringify(corpo),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao registrar evento do webhook: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `[supabase] HTTP ${res.status} ao registrar evento do webhook em ${SUPABASE_TABLE_WEBHOOK_EVENTOS}`,
+    );
+  }
+  try {
+    const linhas = (await res.json()) as Array<{ id?: string }>;
+    return linhas?.[0]?.id ?? null;
+  } catch {
+    return null; // gravou mas não devolveu representação — sem id p/ atualizar depois (aceitável)
+  }
+}
+
+/**
+ * Fecha o desfecho de um evento já registrado (`processado` | `erro`). No-op se
+ * `id` for null (durabilidade estava indisponível no registro). LANÇA em erro de
+ * rede/HTTP (WR-03) — o chamador loga-e-segue. `detalhe` é truncado (nunca
+ * payload gigante/PII crua no campo de desfecho).
+ */
+export async function marcarEventoWebhook(
+  id: string | null,
+  status: 'processado' | 'erro',
+  detalhe?: string,
+): Promise<void> {
+  if (!id) return;
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  const corpo: Record<string, unknown> = { status, atualizado_em: new Date().toISOString() };
+  if (detalhe) corpo.detalhe = detalhe.slice(0, 500);
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_WEBHOOK_EVENTOS}?id=eq.${encodeURIComponent(id)}`,
+      { method: 'PATCH', headers: headers(), body: JSON.stringify(corpo) },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao atualizar evento do webhook: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `[supabase] HTTP ${res.status} ao atualizar evento ${id} em ${SUPABASE_TABLE_WEBHOOK_EVENTOS}`,
+    );
   }
 }
 
