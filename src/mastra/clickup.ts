@@ -542,8 +542,26 @@ export async function gravarMetadadosLigacao(taskId: string, patch: PatchMetadad
   if (patch.fim !== undefined) {
     await setCustomField(taskId, CAMPOS_LIGACOES.FIM, patch.fim);
   }
-  if (patch.duracao !== undefined) {
-    await setCustomField(taskId, CAMPOS_LIGACOES.DURACAO, String(patch.duracao));
+  // O payload CALL do Wavoip às vezes vem com duration=0/ausente (caso real:
+  // Ligação de teste wdt4k4efhk gravou "0" mesmo numa chamada de ~3min23s).
+  // Quando isso acontece mas o patch trouxe FIM, recalcula a duração de
+  // (FIM - INICIO)/1000 usando o INICIO já persistido por iniciarLigacao —
+  // sempre grava formatado em minutos (fix quick-260812-f77), nunca o número
+  // cru. Sem duração utilizável (sem fim, INICIO inválido, ou fim<=inicio),
+  // pula a escrita — mesmo comportamento de hoje.
+  let duracaoSegundos: number | null = null;
+  if (patch.duracao !== undefined && patch.duracao > 0) {
+    duracaoSegundos = patch.duracao;
+  } else if (patch.fim !== undefined) {
+    const task = await lerTask(taskId);
+    const inicioRaw = task?.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.INICIO)?.value;
+    const inicio = Number(inicioRaw);
+    if (Number.isFinite(inicio) && inicio > 0 && patch.fim > inicio) {
+      duracaoSegundos = (patch.fim - inicio) / 1000;
+    }
+  }
+  if (duracaoSegundos !== null && duracaoSegundos > 0) {
+    await setCustomField(taskId, CAMPOS_LIGACOES.DURACAO, formatarDuracaoMinutos(duracaoSegundos));
   }
   if (patch.urlGravacao !== undefined) {
     await setCustomField(taskId, CAMPOS_LIGACOES.URL_GRAVACAO, patch.urlGravacao);
@@ -574,6 +592,25 @@ export function normalizarTelefoneE164(raw: string): string | null {
   const comDDI = digitos.length === 10 || digitos.length === 11 ? `55${digitos}` : digitos;
   if (comDDI.length < 12 || comDDI.length > 15) return null;
   return `+${comDDI}`;
+}
+
+/**
+ * Formata uma duração em segundos como "Xmin Ys", pro campo DURACAO
+ * (short_text) da Lista 02 LIGACOES ficar legível — nunca mais um número cru
+ * tipo "0" ou "203.2" (fix quick-260812-f77). Função PURA (sem I/O, sem log —
+ * duração não é PII/dado sensível, LGPD). Arredonda o TOTAL de segundos pra
+ * inteiro PRIMEIRO (Math.round) e só depois deriva minutos/restante — evita o
+ * bug de "1min 60s" que apareceria arredondando os segundos residuais depois
+ * da divisão (ex.: 119.7s deve virar "2min 0s", não "1min 60s"). Entrada
+ * não-finita ou <= 0 é defensiva (o caller normalmente não chama com <=0) e
+ * retorna "0min 0s" em vez de lançar.
+ */
+export function formatarDuracaoMinutos(segundos: number): string {
+  if (!Number.isFinite(segundos) || segundos <= 0) return '0min 0s';
+  const totalSegundos = Math.round(segundos);
+  const minutos = Math.floor(totalSegundos / 60);
+  const restante = totalSegundos % 60;
+  return `${minutos}min ${restante}s`;
 }
 
 /**
