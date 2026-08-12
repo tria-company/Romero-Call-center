@@ -125,10 +125,19 @@ function guardarCorrelacao(callId: string, telefone: string): void {
 // (INICIO+OPERADOR+status), nao esta Map.
 const taskAtivaPorTelefone = new Map<string, { taskId: string; ts: number }>();
 
-/** Guarda telefone -> task ativa e faz a mesma limpeza preguicosa de `guardarCorrelacao`. */
+/**
+ * Guarda telefone -> task ativa e faz a mesma limpeza preguicosa de
+ * `guardarCorrelacao`. Normaliza a chave para so-digitos (mesmo formato
+ * produzido por `telefoneDoEventoCall`) — quem chama pode passar o telefone
+ * cru (ex.: E.164 com "+", como `/api/discador/ligando` faz hoje); sem essa
+ * normalizacao aqui, um `Map.get` por string exata com a chave so-digitos
+ * (usada em toda leitura: branch CALL, branch RECORD, e o `delete`
+ * pos-consolidacao) nunca casaria.
+ */
 function guardarTaskAtiva(telefone: string, taskId: string): void {
   const agora = Date.now();
-  taskAtivaPorTelefone.set(telefone, { taskId, ts: agora });
+  const chave = telefone.replace(/[^\d]/g, '');
+  taskAtivaPorTelefone.set(chave, { taskId, ts: agora });
   if (taskAtivaPorTelefone.size > 2000) {
     for (const [k, v] of taskAtivaPorTelefone) {
       if (agora - v.ts > CORRELACAO_TTL_MS) taskAtivaPorTelefone.delete(k);
@@ -249,6 +258,61 @@ async function consolidarEFecharLigacao(
   } catch (e) {
     console.error('[wavoip] falha ao fechar a Ligacao:', e);
   }
+}
+
+/**
+ * Processa o caminho terminal NAO-ATENDIDO do branch CALL do webhook Wavoip
+ * (CR-01/CR-02, D-P3-05/06/12/14): grava os metadados de falha, consolida o
+ * lead (sem Agente Analise — nao ha gravacao pra avaliar) e fecha a Ligacao.
+ * Chamado tanto pelo ramo map-hit quanto pelo ramo fallback-hit (busca
+ * persistida no ClickUp) do branch CALL — mesma sequencia de efeitos nos
+ * dois ramos. O dedup (`deveProcessarFalhaTerminal`) e responsabilidade do
+ * chamador, avaliado ANTES desta funcao.
+ */
+async function processarFalhaTerminal(
+  taskId: string,
+  telefone: string,
+  whatsappCallId: string,
+  payload: Record<string, any>,
+): Promise<void> {
+  // CR-02: marca dedup ANTES do trabalho async (mesma ordem de
+  // recordsProcessados.add no RECORD) — um segundo evento CALL terminal
+  // para a mesma chamada vira no-op.
+  callsFalhaProcessadas.add(whatsappCallId);
+  if (callsFalhaProcessadas.size > 5000) {
+    callsFalhaProcessadas.clear(); // backstop de memoria (dedup e best-effort)
+  }
+
+  try {
+    await gravarMetadadosLigacao(taskId, {
+      atendeu: false,
+      motivoFalha: derivarMotivoFalha(payload),
+      fim: Date.now(),
+      duracao: derivarDuracao(payload),
+    });
+  } catch (e) {
+    // Loga-e-segue (a cadeia do webhook nao pode travar por uma
+    // escrita isolada) — o helper subjacente JA lancou (WR-03),
+    // este catch so evita que o 200 do CALL vire 500.
+    console.error('[wavoip] falha ao gravar metadados de nao-atendida:', e);
+  }
+
+  // ---- Agente Contexto (OPER-05, D-P3-06/12/14) — caminho NAO-ATENDIDO ----
+  // Sem gravacao/transcricao, PULA o Agente Analise (aderencia)
+  // — nao ha o que avaliar. Consolida direto com atendeu:false
+  // (observacao objetiva; proximoContato = D+OPER_RETORNO_NAO_ATENDEU_DIAS,
+  // D-P3-14) e fecha a Ligacao (D-P3-06).
+  await consolidarEFecharLigacao(taskId, {
+    atendeu: false,
+    resumoAnalise: `Não atendida em ${new Date().toISOString().slice(0, 10)}.`,
+    aderencia: null,
+    retorno: { necessario: false, data: null },
+  });
+
+  // CR-02: limpa a entrada telefone->task apos consolidar/
+  // fechar — uma ligacao futura ao mesmo telefone nunca
+  // re-consolida sobre esta task ja fechada.
+  taskAtivaPorTelefone.delete(telefone);
 }
 
 /**
@@ -478,50 +542,36 @@ export const mastra = new Mastra({
               // conhecido, via ehStatusFalhaTerminal) — status de transicao
               // (RINGING/CALLING), desconhecido ou ausente NUNCA gravam
               // ATENDEU=false/consolidam/fecham a Ligacao enquanto a chamada
-              // ainda esta tocando. Nao ha task a fechar aqui se a correlacao
-              // ainda nao existe — essa Ligacao so ganha metadados quando a
-              // task ativa foi reportada em /api/discador/ligando.
+              // ainda esta tocando. D-P3-01: resolve a task via 1) map
+              // in-memory (task reportada em /api/discador/ligando) OU,
+              // quando o map nao tem entrada (restart/hot-reload entre o
+              // /ligando e este evento CALL), 2) fallback persistido — a
+              // Ligacao aberta com o mesmo TELEFONE ja gravada no ClickUp
+              // por `iniciarLigacao` (mesmo racional do branch RECORD).
               if (telefone && ehStatusFalhaTerminal(payload)) {
                 const taskAtiva = taskAtivaPorTelefone.get(telefone);
-                if (taskAtiva && deveProcessarFalhaTerminal(whatsappCallId, callsFalhaProcessadas)) {
-                  // CR-02: marca dedup ANTES do trabalho async (mesma ordem
-                  // de recordsProcessados.add no RECORD) — um segundo evento
-                  // CALL terminal para a mesma chamada vira no-op.
-                  callsFalhaProcessadas.add(whatsappCallId);
-                  if (callsFalhaProcessadas.size > 5000) {
-                    callsFalhaProcessadas.clear(); // backstop de memoria (dedup e best-effort)
+                if (taskAtiva) {
+                  if (deveProcessarFalhaTerminal(whatsappCallId, callsFalhaProcessadas)) {
+                    await processarFalhaTerminal(taskAtiva.taskId, telefone, whatsappCallId, payload);
                   }
-
+                } else {
+                  let taskIdFallback: string | null = null;
                   try {
-                    await gravarMetadadosLigacao(taskAtiva.taskId, {
-                      atendeu: false,
-                      motivoFalha: derivarMotivoFalha(payload),
-                      fim: Date.now(),
-                      duracao: derivarDuracao(payload),
-                    });
+                    taskIdFallback = await buscarLigacaoAbertaPorTelefone(telefone);
                   } catch (e) {
-                    // Loga-e-segue (a cadeia do webhook nao pode travar por uma
-                    // escrita isolada) — o helper subjacente JA lancou (WR-03),
-                    // este catch so evita que o 200 do CALL vire 500.
-                    console.error('[wavoip] falha ao gravar metadados de nao-atendida:', e);
+                    // Loga-e-segue (WR-03: o helper subjacente ja lancou em
+                    // erro de infra) — o webhook nunca vira 500 por uma
+                    // leitura isolada.
+                    console.error('[wavoip] falha ao buscar Ligacao aberta por telefone (branch CALL):', e);
                   }
-
-                  // ---- Agente Contexto (OPER-05, D-P3-06/12/14) — caminho NAO-ATENDIDO ----
-                  // Sem gravacao/transcricao, PULA o Agente Analise (aderencia)
-                  // — nao ha o que avaliar. Consolida direto com atendeu:false
-                  // (observacao objetiva; proximoContato = D+OPER_RETORNO_NAO_ATENDEU_DIAS,
-                  // D-P3-14) e fecha a Ligacao (D-P3-06).
-                  await consolidarEFecharLigacao(taskAtiva.taskId, {
-                    atendeu: false,
-                    resumoAnalise: `Não atendida em ${new Date().toISOString().slice(0, 10)}.`,
-                    aderencia: null,
-                    retorno: { necessario: false, data: null },
-                  });
-
-                  // CR-02: limpa a entrada telefone->task apos consolidar/
-                  // fechar — uma ligacao futura ao mesmo telefone nunca
-                  // re-consolida sobre esta task ja fechada.
-                  taskAtivaPorTelefone.delete(telefone);
+                  if (taskIdFallback) {
+                    if (deveProcessarFalhaTerminal(whatsappCallId, callsFalhaProcessadas)) {
+                      await processarFalhaTerminal(taskIdFallback, telefone, whatsappCallId, payload);
+                    }
+                  } else {
+                    const mascarado = telefone.length > 4 ? `${'*'.repeat(telefone.length - 4)}${telefone.slice(-4)}` : telefone;
+                    console.warn(`[wavoip] CALL nao-atendida sem Ligacao aberta correlacionavel (telefone=${mascarado})`);
+                  }
                 }
               }
               return c.json({ status: 'ok', correlacionado: Boolean(whatsappCallId && telefone) });
