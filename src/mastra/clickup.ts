@@ -98,6 +98,24 @@ export const OPCOES_LIGACOES = {
   },
 } as const;
 
+// Opcoes (UUID) dos 2 custom fields drop_down de VOTO da Lista 01 LEADS
+// ("Confirmou voto no Romero" / "na Andressa"). Cada um tem 3 opcoes: Sim /
+// Nao / Nao declarou. UUIDs verificados via GET /list/1000320000002833/field
+// (scripts/descobrir-campos-leads.mjs) — mesmo racional de OPCOES_LIGACOES
+// (D-07: nunca resolver opcao por nome em runtime; drop_down exige o UUID).
+export const OPCOES_LEADS = {
+  [CAMPOS_LEADS.CONFIRMOU_VOTO_ROMERO]: {
+    sim: 'af4e0629-1abf-4dbc-b362-acca1fb7e879',
+    nao: '7ced7b75-743f-4047-bb6b-5c4e575bca3b',
+    naoDeclarou: 'ca798bf8-03dc-4cf6-981b-8fc90df80904',
+  },
+  [CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA]: {
+    sim: '6a96d622-13ec-4afb-a98e-f9331ae43397',
+    nao: '74fdf62a-4393-4ab9-828d-926625063c53',
+    naoDeclarou: '229a7f1f-42a7-4b7d-8622-89e105cc3ff7',
+  },
+} as const;
+
 export interface CustomFieldClickUp {
   id: string;
   name?: string;
@@ -702,10 +720,13 @@ export async function criarLigacaoAvulsa(telefone: string): Promise<{ id: string
  * legítimo (lead não encontrado), distinto de erro de infra (LANÇA via
  * `lerTask`/`listarTasks`, WR-03).
  */
-export async function resolverLeadDaLigacao(taskLigacaoId: string): Promise<string | null> {
-  const task = await lerTask(taskLigacaoId);
-  if (!task) return null;
-
+/**
+ * Resolve o lead (Lista 01) a partir de uma task de Ligação JÁ LIDA — extraído
+ * de `resolverLeadDaLigacao` pra reaproveitar a task quando o caller já a leu
+ * (evita reler o mesmo taskId). Mesma estratégia: `LEAD_REL` (relationship) →
+ * fallback por match de TELEFONE contra a Lista 01. `null` = lead não encontrado.
+ */
+async function resolverLeadPelaTask(task: TaskClickUp): Promise<string | null> {
   const leadRel = task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.LEAD_REL)?.value;
   if (Array.isArray(leadRel) && leadRel.length > 0) {
     const primeiro = leadRel[0] as unknown;
@@ -720,6 +741,94 @@ export async function resolverLeadDaLigacao(taskLigacaoId: string): Promise<stri
     telefonesIguais(t.custom_fields?.find((c) => c.id === CAMPOS_LEADS.TELEFONE)?.value, telefone),
   );
   return leadMatch?.id ?? null;
+}
+
+export async function resolverLeadDaLigacao(taskLigacaoId: string): Promise<string | null> {
+  const task = await lerTask(taskLigacaoId);
+  if (!task) return null;
+  return resolverLeadPelaTask(task);
+}
+
+/**
+ * Valida (CR-01) que `taskId` é uma Ligação da Lista 02 atribuída ao operador
+ * logado — mesma regra de `lerLigacao`/`iniciarLigacao`, fecha IDOR: sem isso
+ * um `taskId` arbitrário deixaria um operador ler/gravar voto no lead de outro
+ * operador (ou em qualquer task da workspace). Retorna a task já lida pra
+ * reaproveitar na resolução do lead. LANÇA quando a task não existe / não é da
+ * Lista 02 / não pertence ao operador (o caller mapeia pra 404).
+ */
+async function validarLigacaoDoOperador(taskId: string, assigneeIdEsperado: string): Promise<TaskClickUp> {
+  const task = await lerTask(taskId);
+  if (!task) {
+    throw new Error(`[clickup] task ${taskId} nao encontrada`);
+  }
+  if (task.list?.id !== CLICKUP_LIST_LIGACOES) {
+    throw new Error(`[clickup] task ${taskId} nao e uma Ligacao da Lista 02`);
+  }
+  if (!task.assignees?.some((a) => String(a.id) === assigneeIdEsperado)) {
+    throw new Error(`[clickup] task ${taskId} nao pertence ao operador`);
+  }
+  return task;
+}
+
+/** Escolha de voto por candidato — chave de `OPCOES_LEADS` (traduz pra UUID da opção). */
+export type EscolhaVoto = 'sim' | 'nao' | 'naoDeclarou';
+
+/** Status de voto do lead ligado a uma Ligação — decide o que perguntar no pós-ligação. */
+export interface StatusVotoLead {
+  /** false = nenhum lead resolvido pela Ligação (nada a atualizar → não mostra a tela). */
+  temLead: boolean;
+  /** true = "Confirmou voto no Romero" já tem valor (não perguntar de novo). */
+  romeroDefinido: boolean;
+  /** true = "Confirmou voto na Andressa" já tem valor. */
+  andressaDefinido: boolean;
+}
+
+/** Um drop_down do ClickUp está "definido" quando tem qualquer valor (0 é opção válida — orderindex). */
+function campoDefinido(v: unknown): boolean {
+  return v !== null && v !== undefined && v !== '';
+}
+
+/**
+ * Lê o status de voto (Romero/Andressa) do lead ligado à Ligação `taskId` do
+ * operador. Resolve o lead (LEAD_REL → fallback telefone) e checa se cada campo
+ * drop_down JÁ tem valor — o pós-ligação só pergunta os ainda vazios ("se já
+ * confirmou não precisa mostrar"). Erros de infra/autorização LANÇAM (WR-03).
+ */
+export async function lerStatusVotoLead(taskId: string, assigneeIdEsperado: string): Promise<StatusVotoLead> {
+  const task = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  const leadId = await resolverLeadPelaTask(task);
+  if (!leadId) return { temLead: false, romeroDefinido: false, andressaDefinido: false };
+  const lead = await lerTask(leadId);
+  const valor = (fid: string) => lead?.custom_fields?.find((c) => c.id === fid)?.value;
+  return {
+    temLead: true,
+    romeroDefinido: campoDefinido(valor(CAMPOS_LEADS.CONFIRMOU_VOTO_ROMERO)),
+    andressaDefinido: campoDefinido(valor(CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA)),
+  };
+}
+
+/**
+ * Grava o(s) voto(s) confirmado(s) no lead ligado à Ligação `taskId` do
+ * operador (Lista 01 LEADS, drop_down por UUID via `OPCOES_LEADS`). Só escreve
+ * os candidatos presentes em `voto`. `{ temLead:false }` quando nenhum lead foi
+ * resolvido (nada gravado). Erros de infra/autorização LANÇAM (WR-03).
+ */
+export async function salvarVotoLead(
+  taskId: string,
+  assigneeIdEsperado: string,
+  voto: { romero?: EscolhaVoto; andressa?: EscolhaVoto },
+): Promise<{ temLead: boolean }> {
+  const task = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  const leadId = await resolverLeadPelaTask(task);
+  if (!leadId) return { temLead: false };
+  if (voto.romero) {
+    await setCustomField(leadId, CAMPOS_LEADS.CONFIRMOU_VOTO_ROMERO, OPCOES_LEADS[CAMPOS_LEADS.CONFIRMOU_VOTO_ROMERO][voto.romero]);
+  }
+  if (voto.andressa) {
+    await setCustomField(leadId, CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA, OPCOES_LEADS[CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA][voto.andressa]);
+  }
+  return { temLead: true };
 }
 
 /** Patch de contadores mecânicos do lead — mesmo shape de `ContadoresLead` (contexto.ts), injetado pelo caller. */

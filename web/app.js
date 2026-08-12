@@ -4,6 +4,7 @@
   var fila=null, filaIdx=0;
   var timerInt=null, timerStart=0;
   var wakeLock=null, emChamada=false;
+  var foiAtendida=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
   function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
@@ -135,7 +136,7 @@
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}setCallStatus('Em ligação');startTimer();});
+    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;setCallStatus('Em ligação');startTimer();});
     on(call,'peerReject',function(){setCallStatus('Recusada');endCallUI();});
     on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
     on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
@@ -159,10 +160,45 @@
     }catch(e){}
   }
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
-  function openCall(lead,status){wantHangup=false;emChamada=true;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
+  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
-  function endCallUI(){emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;setTimeout(function(){$('call-overlay').style.display='none';},1400);}
+  function endCallUI(){emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;var atendida=foiAtendida,tid=chamadaTaskId;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else{$('call-overlay').style.display='none';}},1400);}
+  // Pos-ligacao (SO quando ATENDIDA): pergunta a confirmacao de voto dos
+  // candidatos ainda nao preenchidos no lead (Lista 01) e grava. Se o lead ja
+  // tem os dois definidos, ou nao ha lead resolvido, so fecha a overlay da
+  // chamada. Best-effort: qualquer erro so fecha a overlay (nunca trava o operador).
+  function mostrarVotoSeNecessario(taskId){
+    api('/api/discador/voto/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};});}).then(function(st){
+      var pRom=!!(st&&st.temLead&&!st.romeroDefinido);
+      var pAnd=!!(st&&st.temLead&&!st.andressaDefinido);
+      if(!pRom&&!pAnd){$('call-overlay').style.display='none';return;}
+      abrirVoto(taskId,pRom,pAnd);
+    }).catch(function(e){if(e&&e.message==='401'){return;}$('call-overlay').style.display='none';});
+  }
+  function abrirVoto(taskId,pRom,pAnd){
+    votoAtualTaskId=taskId;votoSel={romero:null,andressa:null};
+    $('voto-nome').textContent=$('call-nome').textContent||'';
+    $('voto-err').textContent='';
+    $('voto-q-romero').style.display=pRom?'block':'none';
+    $('voto-q-andressa').style.display=pAnd?'block':'none';
+    var btns=document.querySelectorAll('#voto-overlay .seg-btn');
+    for(var i=0;i<btns.length;i++){btns[i].classList.remove('sel');}
+    $('call-overlay').style.display='none';
+    $('voto-overlay').style.display='flex';
+  }
+  function salvarVoto(){
+    var body={taskId:votoAtualTaskId};
+    if(votoSel.romero){body.romero=votoSel.romero;}
+    if(votoSel.andressa){body.andressa=votoSel.andressa;}
+    if(!body.romero&&!body.andressa){$('voto-overlay').style.display='none';return;}
+    var btn=$('voto-salvar');$('voto-err').textContent='';btn.disabled=true;btn.textContent='Salvando...';
+    apiPost('/api/discador/voto',body).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,d:d};});}).then(function(r){
+      btn.disabled=false;btn.textContent='Salvar';
+      if(r.status!==200){$('voto-err').textContent='Não foi possível salvar. Tente de novo ou toque em Pular.';return;}
+      $('voto-overlay').style.display='none';
+    }).catch(function(e){btn.disabled=false;btn.textContent='Salvar';if(e&&e.message==='401'){return;}$('voto-err').textContent='Não foi possível salvar. Tente de novo ou toque em Pular.';});
+  }
   window.addEventListener('DOMContentLoaded',function(){
     $('login-btn').onclick=doLogin;
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
@@ -170,6 +206,10 @@
     $('reload-btn').onclick=carregarFila;
     $('lig-proxima').onclick=avancarFila;
     $('hangup-btn').onclick=hangup;
+    var vo=$('voto-overlay');
+    if(vo){vo.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var grp=b.parentNode;var cand=grp.getAttribute('data-cand');var all=grp.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');votoSel[cand]=b.getAttribute('data-v');});}
+    $('voto-salvar').onclick=salvarVoto;
+    $('voto-pular').onclick=function(){$('voto-overlay').style.display='none';};
     // Chamadas longas: evitar perder a ligacao por refresh/fechar/logout sem querer
     // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
     window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});

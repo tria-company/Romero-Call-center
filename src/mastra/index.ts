@@ -48,6 +48,8 @@ import {
   CAMPOS_LIGACOES,
   CAMPOS_LEADS,
   resolverLeadDaLigacao,
+  lerStatusVotoLead,
+  salvarVotoLead,
   consolidarLead,
   fecharLigacao,
 } from './clickup';
@@ -449,6 +451,74 @@ export const mastra = new Mastra({
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           return c.json({ wavoipToken: WAVOIP_DEVICE_TOKEN });
+        },
+      },
+      {
+        // Status de voto do lead ligado a esta Ligacao — chamado pelo discador
+        // ao ENCERRAR uma ligacao ATENDIDA, pra decidir o que perguntar no
+        // pos-ligacao (so os campos ainda vazios; se ambos definidos ou sem
+        // lead, a UI nem mostra a tela). Mesmo isolamento por operador de
+        // /ligacao/:taskId (CR-01) — resolve o lead a partir da Ligacao do
+        // proprio operador, nunca de um taskId arbitrario.
+        path: '/api/discador/voto/:taskId',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const taskId = c.req.param('taskId');
+          try {
+            const status = await lerStatusVotoLead(taskId, assignee);
+            return c.json(status);
+          } catch (e) {
+            console.error('[discador] erro ao ler status de voto:', e);
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao carregar o status de voto' }, 502);
+          }
+        },
+      },
+      {
+        // Grava o(s) voto(s) confirmado(s) no lead (Lista 01 LEADS) ao fim da
+        // ligacao atendida. Body: { taskId, romero?, andressa? } com valores
+        // 'sim'|'nao'|'naoDeclarou'. Mesmo isolamento CR-01 do GET acima — o
+        // lead so pode ser gravado a partir de uma Ligacao do proprio operador.
+        path: '/api/discador/voto',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const taskId = String(body.taskId || '');
+          const normalizar = (v: unknown): 'sim' | 'nao' | 'naoDeclarou' | undefined =>
+            v === 'sim' || v === 'nao' || v === 'naoDeclarou' ? v : undefined;
+          const voto = { romero: normalizar(body.romero), andressa: normalizar(body.andressa) };
+          if (!voto.romero && !voto.andressa) {
+            // Nada selecionado (ou valores invalidos) — no-op idempotente.
+            return c.json({ status: 'ok', semAlteracao: true });
+          }
+          try {
+            const r = await salvarVotoLead(taskId, assignee, voto);
+            return c.json({ status: 'ok', temLead: r.temLead });
+          } catch (e) {
+            console.error('[discador] erro ao salvar voto:', e);
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao salvar o voto' }, 502);
+          }
         },
       },
 

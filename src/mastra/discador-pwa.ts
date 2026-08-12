@@ -20,10 +20,11 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v8 -> discador-v10): invalida o shell antigo nos
+// CACHE bump (discador-v8 -> discador-v11): invalida o shell antigo nos
 // dispositivos já instalados como PWA após o reskin Liquid Glass (quick
-// 260812-o4u). Mantém em sincronia com web/sw.js.
-export const DISCADOR_SW_JS = `const CACHE='discador-v10';
+// 260812-o4u) e a tela de confirmação de voto no pós-ligação (quick
+// 260812-p5p). Mantém em sincronia com web/sw.js.
+export const DISCADOR_SW_JS = `const CACHE='discador-v11';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -101,6 +102,19 @@ export const DISCADOR_HTML = `<!doctype html>
   .ctrl .ic{width:68px;height:68px;border-radius:50%;background:var(--glass2);border:1px solid var(--line);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s,transform .15s}
   .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg);box-shadow:0 10px 26px rgba(220,38,38,.45)}
   .ctrl.hangup:active .ic{transform:rotate(135deg) scale(.94)}
+  /* pos-ligacao: confirmacao de voto (grava na Lista 01 LEADS) */
+  #voto-overlay{position:fixed;inset:0;display:none;z-index:25;align-items:center;justify-content:center;padding:24px 20px calc(24px + env(safe-area-inset-bottom));background:radial-gradient(600px 500px at 50% 8%,rgba(0,123,255,.18),transparent 60%),linear-gradient(180deg,#081426,#050a14);overflow:auto}
+  .voto-card{width:100%;max-width:460px;border-radius:20px;padding:22px;background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);border-top:1px solid var(--hair-top);border-left:1px solid var(--hair-side);border-right:1px solid var(--hair-side);border-bottom:1px solid rgba(255,255,255,.05);box-shadow:0 8px 32px rgba(2,6,16,.5)}
+  .voto-title{font-size:20px;font-weight:700;letter-spacing:-.01em}
+  .voto-sub{color:var(--mut);margin:2px 0 18px;text-transform:capitalize}
+  .voto-q{margin-bottom:18px}
+  .voto-label{font-size:14px;margin-bottom:10px}
+  .voto-label b{color:var(--cyan);font-weight:700}
+  .seg{display:flex;gap:8px}
+  .seg-btn{flex:1;padding:12px 6px;border-radius:12px;border:1px solid var(--line);background:var(--glass2);color:var(--txt);font-weight:600;font-size:13px;transition:background .15s,border-color .15s,box-shadow .15s}
+  .seg-btn.sel{background:var(--accent);border-color:transparent;box-shadow:0 6px 16px rgba(0,123,255,.35)}
+  #voto-salvar{margin-top:4px}
+  #voto-pular{margin-top:10px;background:none}
 </style>
 </head>
 <body>
@@ -156,6 +170,32 @@ export const DISCADOR_HTML = `<!doctype html>
       <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">\u{1F4DE}</span></button>
     </div>
   </div>
+
+  <div id="voto-overlay">
+    <div class="voto-card">
+      <div class="voto-title">Confirmação de voto</div>
+      <div id="voto-nome" class="voto-sub"></div>
+      <div class="voto-q" id="voto-q-romero">
+        <div class="voto-label">Confirmou voto no <b>Romero</b>?</div>
+        <div class="seg" data-cand="romero">
+          <button type="button" class="seg-btn" data-v="sim">Sim</button>
+          <button type="button" class="seg-btn" data-v="nao">Não</button>
+          <button type="button" class="seg-btn" data-v="naoDeclarou">Não declarou</button>
+        </div>
+      </div>
+      <div class="voto-q" id="voto-q-andressa">
+        <div class="voto-label">Confirmou voto na <b>Andressa</b>?</div>
+        <div class="seg" data-cand="andressa">
+          <button type="button" class="seg-btn" data-v="sim">Sim</button>
+          <button type="button" class="seg-btn" data-v="nao">Não</button>
+          <button type="button" class="seg-btn" data-v="naoDeclarou">Não declarou</button>
+        </div>
+      </div>
+      <div id="voto-err" class="err"></div>
+      <button id="voto-salvar" class="primary">Salvar</button>
+      <button id="voto-pular" class="loadmore">Pular</button>
+    </div>
+  </div>
 </div>
 <script src="/discador/app.js"></script>
 </body>
@@ -167,6 +207,7 @@ export const DISCADOR_APP_JS = `(function(){
   var fila=null, filaIdx=0;
   var timerInt=null, timerStart=0;
   var wakeLock=null, emChamada=false;
+  var foiAtendida=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
   function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
@@ -298,7 +339,7 @@ export const DISCADOR_APP_JS = `(function(){
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}setCallStatus('Em ligação');startTimer();});
+    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;setCallStatus('Em ligação');startTimer();});
     on(call,'peerReject',function(){setCallStatus('Recusada');endCallUI();});
     on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
     on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
@@ -322,10 +363,45 @@ export const DISCADOR_APP_JS = `(function(){
     }catch(e){}
   }
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
-  function openCall(lead,status){wantHangup=false;emChamada=true;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
+  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
-  function endCallUI(){emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;setTimeout(function(){$('call-overlay').style.display='none';},1400);}
+  function endCallUI(){emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;var atendida=foiAtendida,tid=chamadaTaskId;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else{$('call-overlay').style.display='none';}},1400);}
+  // Pos-ligacao (SO quando ATENDIDA): pergunta a confirmacao de voto dos
+  // candidatos ainda nao preenchidos no lead (Lista 01) e grava. Se o lead ja
+  // tem os dois definidos, ou nao ha lead resolvido, so fecha a overlay da
+  // chamada. Best-effort: qualquer erro so fecha a overlay (nunca trava o operador).
+  function mostrarVotoSeNecessario(taskId){
+    api('/api/discador/voto/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};});}).then(function(st){
+      var pRom=!!(st&&st.temLead&&!st.romeroDefinido);
+      var pAnd=!!(st&&st.temLead&&!st.andressaDefinido);
+      if(!pRom&&!pAnd){$('call-overlay').style.display='none';return;}
+      abrirVoto(taskId,pRom,pAnd);
+    }).catch(function(e){if(e&&e.message==='401'){return;}$('call-overlay').style.display='none';});
+  }
+  function abrirVoto(taskId,pRom,pAnd){
+    votoAtualTaskId=taskId;votoSel={romero:null,andressa:null};
+    $('voto-nome').textContent=$('call-nome').textContent||'';
+    $('voto-err').textContent='';
+    $('voto-q-romero').style.display=pRom?'block':'none';
+    $('voto-q-andressa').style.display=pAnd?'block':'none';
+    var btns=document.querySelectorAll('#voto-overlay .seg-btn');
+    for(var i=0;i<btns.length;i++){btns[i].classList.remove('sel');}
+    $('call-overlay').style.display='none';
+    $('voto-overlay').style.display='flex';
+  }
+  function salvarVoto(){
+    var body={taskId:votoAtualTaskId};
+    if(votoSel.romero){body.romero=votoSel.romero;}
+    if(votoSel.andressa){body.andressa=votoSel.andressa;}
+    if(!body.romero&&!body.andressa){$('voto-overlay').style.display='none';return;}
+    var btn=$('voto-salvar');$('voto-err').textContent='';btn.disabled=true;btn.textContent='Salvando...';
+    apiPost('/api/discador/voto',body).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,d:d};});}).then(function(r){
+      btn.disabled=false;btn.textContent='Salvar';
+      if(r.status!==200){$('voto-err').textContent='Não foi possível salvar. Tente de novo ou toque em Pular.';return;}
+      $('voto-overlay').style.display='none';
+    }).catch(function(e){btn.disabled=false;btn.textContent='Salvar';if(e&&e.message==='401'){return;}$('voto-err').textContent='Não foi possível salvar. Tente de novo ou toque em Pular.';});
+  }
   window.addEventListener('DOMContentLoaded',function(){
     $('login-btn').onclick=doLogin;
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
@@ -333,6 +409,10 @@ export const DISCADOR_APP_JS = `(function(){
     $('reload-btn').onclick=carregarFila;
     $('lig-proxima').onclick=avancarFila;
     $('hangup-btn').onclick=hangup;
+    var vo=$('voto-overlay');
+    if(vo){vo.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var grp=b.parentNode;var cand=grp.getAttribute('data-cand');var all=grp.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');votoSel[cand]=b.getAttribute('data-v');});}
+    $('voto-salvar').onclick=salvarVoto;
+    $('voto-pular').onclick=function(){$('voto-overlay').style.display='none';};
     // Chamadas longas: evitar perder a ligacao por refresh/fechar/logout sem querer
     // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
     window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});

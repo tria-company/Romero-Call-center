@@ -70,6 +70,19 @@
   .ctrl .ic{width:68px;height:68px;border-radius:50%;background:var(--glass2);border:1px solid var(--line);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s,transform .15s}
   .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg);box-shadow:0 10px 26px rgba(220,38,38,.45)}
   .ctrl.hangup:active .ic{transform:rotate(135deg) scale(.94)}
+  /* pos-ligacao: confirmacao de voto (grava na Lista 01 LEADS) */
+  #voto-overlay{position:fixed;inset:0;display:none;z-index:25;align-items:center;justify-content:center;padding:24px 20px calc(24px + env(safe-area-inset-bottom));background:radial-gradient(600px 500px at 50% 8%,rgba(0,123,255,.18),transparent 60%),linear-gradient(180deg,#081426,#050a14);overflow:auto}
+  .voto-card{width:100%;max-width:460px;border-radius:20px;padding:22px;background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);border-top:1px solid var(--hair-top);border-left:1px solid var(--hair-side);border-right:1px solid var(--hair-side);border-bottom:1px solid rgba(255,255,255,.05);box-shadow:0 8px 32px rgba(2,6,16,.5)}
+  .voto-title{font-size:20px;font-weight:700;letter-spacing:-.01em}
+  .voto-sub{color:var(--mut);margin:2px 0 18px;text-transform:capitalize}
+  .voto-q{margin-bottom:18px}
+  .voto-label{font-size:14px;margin-bottom:10px}
+  .voto-label b{color:var(--cyan);font-weight:700}
+  .seg{display:flex;gap:8px}
+  .seg-btn{flex:1;padding:12px 6px;border-radius:12px;border:1px solid var(--line);background:var(--glass2);color:var(--txt);font-weight:600;font-size:13px;transition:background .15s,border-color .15s,box-shadow .15s}
+  .seg-btn.sel{background:var(--accent);border-color:transparent;box-shadow:0 6px 16px rgba(0,123,255,.35)}
+  #voto-salvar{margin-top:4px}
+  #voto-pular{margin-top:10px;background:none}
 </style>
 </head>
 <body>
@@ -123,6 +136,32 @@
     </div>
     <div class="call-controls">
       <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">&#128222;</span></button>
+    </div>
+  </div>
+
+  <div id="voto-overlay">
+    <div class="voto-card">
+      <div class="voto-title">Confirmação de voto</div>
+      <div id="voto-nome" class="voto-sub"></div>
+      <div class="voto-q" id="voto-q-romero">
+        <div class="voto-label">Confirmou voto no <b>Romero</b>?</div>
+        <div class="seg" data-cand="romero">
+          <button type="button" class="seg-btn" data-v="sim">Sim</button>
+          <button type="button" class="seg-btn" data-v="nao">Não</button>
+          <button type="button" class="seg-btn" data-v="naoDeclarou">Não declarou</button>
+        </div>
+      </div>
+      <div class="voto-q" id="voto-q-andressa">
+        <div class="voto-label">Confirmou voto na <b>Andressa</b>?</div>
+        <div class="seg" data-cand="andressa">
+          <button type="button" class="seg-btn" data-v="sim">Sim</button>
+          <button type="button" class="seg-btn" data-v="nao">Não</button>
+          <button type="button" class="seg-btn" data-v="naoDeclarou">Não declarou</button>
+        </div>
+      </div>
+      <div id="voto-err" class="err"></div>
+      <button id="voto-salvar" class="primary">Salvar</button>
+      <button id="voto-pular" class="loadmore">Pular</button>
     </div>
   </div>
 </div>
