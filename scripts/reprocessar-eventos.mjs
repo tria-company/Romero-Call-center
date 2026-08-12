@@ -19,10 +19,17 @@
 //     `telefoneDoEventoCall`.
 //   - Outros tipos (DEVICE, CALL não-terminal, RECORD não-READY): ignorados —
 //     não têm processamento pesado associado.
-// Despacha pelo MESMO caminho fila-ou-inline de produção (`modoFila()`); a
-// idempotência (SETNX dentro de `processador.ts`) garante que um evento já
-// processado não duplica sob reprocesso. Log-e-segue por evento — uma falha
-// isolada não aborta os demais. NUNCA loga telefone/CPF/payload — só
+// CR-03: reprocessa SEMPRE INLINE (chama `processar*Job` direto), NAO enfileira.
+// A DLQ e o set `failed` do BullMQ, mantido por `removeOnFail:false` (fila.ts) —
+// re-enfileirar com o MESMO `jobId` (whatsappCallId) e um NO-OP: o BullMQ retorna
+// o job falho existente sem re-executa-lo, entao a ferramenta cujo proposito e
+// DRENAR a DLQ nao recuperaria nada em modo bullmq. Rodar inline (esta e uma
+// ferramenta server-side de recuperacao em lote — inline e correto) re-executa
+// de fato; combinado com o dedup CRASH-SAFE do processador (CR-02: a marca de
+// "processado" so e gravada apos o efeito terminal), um evento em DLQ/'erro'
+// nunca foi marcado e re-roda por inteiro, enquanto um evento ja concluido com
+// sucesso e pulado pelo check read-only no inicio do job. Log-e-segue por evento
+// — uma falha isolada não aborta os demais. NUNCA loga telefone/CPF/payload — só
 // contagem/ids/status (LGPD, T-06-05-INFO).
 //
 // Uso: node --experimental-strip-types scripts/reprocessar-eventos.mjs
@@ -30,7 +37,7 @@
 
 import { listarEventosParaReprocesso } from '../src/mastra/supabase.ts';
 import { lerCorrelacao } from '../src/mastra/estado-webhook.ts';
-import { enfileirarRecord, enfileirarFalhaTerminal, modoFila } from '../src/mastra/fila.ts';
+import { modoFila } from '../src/mastra/fila.ts';
 import { processarRecordJob, processarFalhaTerminalJob } from '../src/mastra/processador.ts';
 import { ehStatusFalhaTerminal } from '../src/mastra/analise.ts';
 
@@ -84,18 +91,15 @@ function ehCallFalhaTerminal(payload) {
 }
 
 /**
- * Despacha pelo MESMO caminho fila-ou-inline de produção: em modo bullmq
- * tenta enfileirar (o worker processa fora deste processo); sem fila, ou se o
- * enqueue degradar (fail-open de fila.ts), chama processar*Job INLINE aqui
- * mesmo — mesma função que o worker chamaria.
+ * CR-03: reprocessa SEMPRE INLINE — chama a MESMA função que o worker chamaria
+ * (`processar*Job`), independente de `modoFila()`. NAO enfileira: re-adicionar
+ * um job com `jobId` ainda presente no set `failed` (removeOnFail:false) e um
+ * no-op no BullMQ (retorna o job falho sem re-executar), o que faria a
+ * ferramenta reportar sucesso sem recuperar nada. Inline re-executa de fato; o
+ * dedup crash-safe do processador (CR-02) garante que so jobs ja concluidos com
+ * sucesso sao pulados.
  */
 async function despachar(job, dados) {
-  if (modoFila() === 'bullmq') {
-    const { enfileirado } = job === 'record'
-      ? await enfileirarRecord(dados)
-      : await enfileirarFalhaTerminal(dados);
-    if (enfileirado) return 'enfileirado';
-  }
   if (job === 'record') await processarRecordJob(dados);
   else await processarFalhaTerminalJob(dados);
   return 'processado-inline';
