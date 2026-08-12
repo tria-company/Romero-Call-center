@@ -15,6 +15,14 @@
 //
 // diarize + utterances = transcript rotulado por falante (call tem 2 pessoas:
 // o closer e o lead), formatado como "Falante N: ...\nFalante N: ...".
+//
+// A gravacao e MONO (MP3 Monaural) — nao ha separacao por canal, entao o
+// unico jeito de saber quem e quem e pos-processar os rotulos da
+// diarizacao: `rotularPapeis` decide, por keyword-score determinístico
+// (sem LLM), quem falou o script de abertura do gabinete (vira
+// "Atendente") e rotula os demais como "Lead"/"Lead N". Critério
+// conservador — na duvida (poucas keywords, empate), mantem "Falante N"
+// intacto pra nunca inverter papeis por engano.
 
 import { DEEPGRAM_API_KEY, DEEPGRAM_MODEL, DEEPGRAM_LANGUAGE } from './config.ts';
 import { fetchTimeout } from './http.ts';
@@ -61,6 +69,93 @@ export function parseTranscript(data: any): string | null {
     data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '',
   ).trim();
   return plano || null;
+}
+
+const LINHA_FALANTE_REGEX = /^Falante (\d+): (.*)$/;
+
+/** Normalizador case/acento-insensitive pro score de `rotularPapeis`. */
+function normalizarParaScore(s: string): string {
+  return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+
+/** Peso por keyword (contando ocorrências × peso) usado em `rotularPapeis`. */
+const PESOS_KEYWORDS: Array<[string, number]> = [
+  ['aqui e do gabinete', 5],
+  ['gabinete', 3],
+  ['deputado', 2],
+  ['romero', 2],
+  ['albuquerque', 2],
+];
+
+/**
+ * Rotula os falantes de um transcript diarizado (`Falante N: texto`) por
+ * papel: quem fala o script de abertura do gabinete vira "Atendente"; os
+ * demais viram "Lead" (2 falantes) ou "Lead 1", "Lead 2"... na ordem de
+ * primeira aparição (3+ falantes). Pura e determinística — sem LLM.
+ *
+ * Critério conservador: se há menos de 2 falantes distintos, OU o maior
+ * score é 0, OU há empate no topo do score, devolve o `transcript`
+ * INALTERADO (nunca inverte papéis por engano). Linhas fora do padrão
+ * `Falante N: texto` passam intocadas, mantendo posição/ordem.
+ */
+export function rotularPapeis(transcript: string): string {
+  const linhas = transcript.split('\n');
+
+  const textoPorFalante = new Map<string, string[]>();
+  const ordemAparicao: string[] = [];
+  for (const linha of linhas) {
+    const m = linha.match(LINHA_FALANTE_REGEX);
+    if (!m) continue;
+    const [, n, texto] = m;
+    if (!textoPorFalante.has(n)) {
+      textoPorFalante.set(n, []);
+      ordemAparicao.push(n);
+    }
+    textoPorFalante.get(n)!.push(texto);
+  }
+
+  if (textoPorFalante.size < 2) return transcript;
+
+  const scorePorFalante = new Map<string, number>();
+  for (const [n, textos] of textoPorFalante) {
+    const normalizado = normalizarParaScore(textos.join(' '));
+    let score = 0;
+    for (const [kw, peso] of PESOS_KEYWORDS) {
+      const ocorrencias = normalizado.split(kw).length - 1;
+      score += ocorrencias * peso;
+    }
+    scorePorFalante.set(n, score);
+  }
+
+  let maxScore = -Infinity;
+  for (const score of scorePorFalante.values()) {
+    if (score > maxScore) maxScore = score;
+  }
+  if (maxScore === 0) return transcript;
+
+  const vencedores = [...scorePorFalante.entries()].filter(([, s]) => s === maxScore);
+  if (vencedores.length !== 1) return transcript;
+
+  const [vencedor] = vencedores[0];
+
+  const papelPorFalante = new Map<string, string>();
+  papelPorFalante.set(vencedor, 'Atendente');
+  const outros = ordemAparicao.filter((n) => n !== vencedor);
+  if (textoPorFalante.size === 2) {
+    papelPorFalante.set(outros[0], 'Lead');
+  } else {
+    outros.forEach((n, i) => papelPorFalante.set(n, `Lead ${i + 1}`));
+  }
+
+  return linhas
+    .map((linha) => {
+      const m = linha.match(LINHA_FALANTE_REGEX);
+      if (!m) return linha;
+      const [, n, texto] = m;
+      const papel = papelPorFalante.get(n) ?? `Falante ${n}`;
+      return `${papel}: ${texto}`;
+    })
+    .join('\n');
 }
 
 /** Host da URL para log seguro — nunca a URL completa (pode ter assinatura). */
@@ -122,7 +217,8 @@ export async function transcreverBytes(
     }
     const data = await res.json();
     console.log('[deepgram] transcrito via caminho=binario');
-    return parseTranscript(data);
+    const t = parseTranscript(data);
+    return t ? rotularPapeis(t) : null;
   } catch (e) {
     console.error(`[deepgram] fallback binario erro (host=${host}):`, e);
     return null;
@@ -172,7 +268,8 @@ export async function transcreverCallUrl(recordUrl: string): Promise<string | nu
     }
     const data = await res.json();
     console.log('[deepgram] transcrito via caminho=url-mode');
-    return parseTranscript(data);
+    const t = parseTranscript(data);
+    return t ? rotularPapeis(t) : null;
   } catch (e) {
     console.error('[deepgram] erro ao transcrever:', e);
     return null;
