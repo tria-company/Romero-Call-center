@@ -68,7 +68,6 @@ import {
   derivarMotivoFalha,
   derivarDuracao,
   ehStatusFalhaTerminal,
-  deveProcessarFalhaTerminal,
   montarPromptAnalise,
   parseResultadoAnalise,
   necessitaRevisao,
@@ -90,62 +89,20 @@ import { chamarLLM } from './llm';
 import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISCADOR_ICON_SVG } from './discador-pwa';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
 import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
-
-// ===== Estado in-memory do webhook Wavoip (transcricao das calls) =====
-//
-// O evento RECORD so traz `whatsapp_call_id` + `record_url` (sem telefone). O
-// evento CALL traz o telefone (caller/receiver). Correlacionamos os dois por
-// whatsapp_call_id num Map em memoria — sem banco. Caveat: se o servidor
-// reiniciar entre o CALL e o RECORD, a correlacao se perde e a transcricao
-// daquela call e ignorada (aceitavel: a call em si nao depende disto).
-const correlacaoCallTelefone = new Map<string, { telefone: string; ts: number }>();
-// Dedup de RECORD ja processado (retry do webhook nao re-transcreve).
-const recordsProcessados = new Set<string>();
-// Dedup do caminho de falha terminal do branch CALL (CR-02, gap-closure
-// 03-06) — espelha recordsProcessados: um segundo evento CALL terminal
-// (retry/reentrega do webhook) para a mesma chamada e no-op.
-const callsFalhaProcessadas = new Set<string>();
-const CORRELACAO_TTL_MS = 6 * 60 * 60 * 1000; // 6h
-
-/** Guarda call_id -> telefone e faz uma limpeza preguicosa de entradas velhas. */
-function guardarCorrelacao(callId: string, telefone: string): void {
-  const agora = Date.now();
-  correlacaoCallTelefone.set(callId, { telefone, ts: agora });
-  if (correlacaoCallTelefone.size > 2000) {
-    for (const [k, v] of correlacaoCallTelefone) {
-      if (agora - v.ts > CORRELACAO_TTL_MS) correlacaoCallTelefone.delete(k);
-    }
-  }
-}
-
-// Correlacao "task ativa" por telefone (D-P3-01): quando o operador toca
-// Ligar, o discador reporta a task em POST /api/discador/ligando ANTES do
-// evento CALL do Wavoip chegar. Guardamos telefone -> taskId aqui como
-// OTIMIZACAO em memoria (usada pelas fatias seguintes, 03-02+, pra evitar uma
-// busca na Lista 02); o fallback confiavel — que sobrevive a restart — e a
-// correlacao ja persistida no proprio ClickUp por `iniciarLigacao`
-// (INICIO+OPERADOR+status), nao esta Map.
-const taskAtivaPorTelefone = new Map<string, { taskId: string; ts: number }>();
-
-/**
- * Guarda telefone -> task ativa e faz a mesma limpeza preguicosa de
- * `guardarCorrelacao`. Normaliza a chave para so-digitos (mesmo formato
- * produzido por `telefoneDoEventoCall`) — quem chama pode passar o telefone
- * cru (ex.: E.164 com "+", como `/api/discador/ligando` faz hoje); sem essa
- * normalizacao aqui, um `Map.get` por string exata com a chave so-digitos
- * (usada em toda leitura: branch CALL, branch RECORD, e o `delete`
- * pos-consolidacao) nunca casaria.
- */
-function guardarTaskAtiva(telefone: string, taskId: string): void {
-  const agora = Date.now();
-  const chave = telefone.replace(/[^\d]/g, '');
-  taskAtivaPorTelefone.set(chave, { taskId, ts: agora });
-  if (taskAtivaPorTelefone.size > 2000) {
-    for (const [k, v] of taskAtivaPorTelefone) {
-      if (agora - v.ts > CORRELACAO_TTL_MS) taskAtivaPorTelefone.delete(k);
-    }
-  }
-}
+// Estado do webhook (Fase 5 — escala): correlacao call->telefone, task ativa
+// por telefone e dedup de RECORD/falha terminal agora moram na camada
+// Redis-ou-memoria (estado-webhook.ts) — alternavel por REDIS_URL sem
+// reescrever o handler abaixo.
+import {
+  guardarCorrelacao,
+  lerCorrelacao,
+  guardarTaskAtiva,
+  lerTaskAtiva,
+  limparTaskAtiva,
+  marcarRecordProcessado,
+  liberarRecordProcessado,
+  marcarCallFalhaProcessada,
+} from './estado-webhook.ts';
 
 /** Extrai o telefone (so digitos) do evento CALL conforme a direcao. */
 function telefoneDoEventoCall(payload: Record<string, any>): string {
@@ -268,8 +225,8 @@ async function consolidarEFecharLigacao(
  * lead (sem Agente Analise — nao ha gravacao pra avaliar) e fecha a Ligacao.
  * Chamado tanto pelo ramo map-hit quanto pelo ramo fallback-hit (busca
  * persistida no ClickUp) do branch CALL — mesma sequencia de efeitos nos
- * dois ramos. O dedup (`deveProcessarFalhaTerminal`) e responsabilidade do
- * chamador, avaliado ANTES desta funcao.
+ * dois ramos. O dedup (`marcarCallFalhaProcessada`) e responsabilidade do
+ * chamador, avaliado ANTES desta funcao (marca atomica — Fase 5).
  */
 async function processarFalhaTerminal(
   taskId: string,
@@ -277,14 +234,6 @@ async function processarFalhaTerminal(
   whatsappCallId: string,
   payload: Record<string, any>,
 ): Promise<void> {
-  // CR-02: marca dedup ANTES do trabalho async (mesma ordem de
-  // recordsProcessados.add no RECORD) — um segundo evento CALL terminal
-  // para a mesma chamada vira no-op.
-  callsFalhaProcessadas.add(whatsappCallId);
-  if (callsFalhaProcessadas.size > 5000) {
-    callsFalhaProcessadas.clear(); // backstop de memoria (dedup e best-effort)
-  }
-
   try {
     await gravarMetadadosLigacao(taskId, {
       atendeu: false,
@@ -314,7 +263,7 @@ async function processarFalhaTerminal(
   // CR-02: limpa a entrada telefone->task apos consolidar/
   // fechar — uma ligacao futura ao mesmo telefone nunca
   // re-consolida sobre esta task ja fechada.
-  taskAtivaPorTelefone.delete(telefone);
+  await limparTaskAtiva(telefone);
 }
 
 /**
@@ -475,7 +424,7 @@ export const mastra = new Mastra({
           const taskId = String(body.taskId || '');
           try {
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
-            if (telefone) guardarTaskAtiva(telefone, taskId);
+            if (telefone) await guardarTaskAtiva(telefone, taskId);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao registrar ligando:', e);
@@ -552,7 +501,7 @@ export const mastra = new Mastra({
             if (evento === 'CALL') {
               const telefone = telefoneDoEventoCall(payload);
               if (whatsappCallId && telefone) {
-                guardarCorrelacao(whatsappCallId, telefone);
+                await guardarCorrelacao(whatsappCallId, telefone);
               }
               // CR-01 (gap-closure 03-06): so entra aqui quando o `status` do
               // evento e uma falha terminal CONFIRMADA (STATUS_NAO_ATENDIDA
@@ -566,10 +515,10 @@ export const mastra = new Mastra({
               // Ligacao aberta com o mesmo TELEFONE ja gravada no ClickUp
               // por `iniciarLigacao` (mesmo racional do branch RECORD).
               if (telefone && ehStatusFalhaTerminal(payload)) {
-                const taskAtiva = taskAtivaPorTelefone.get(telefone);
-                if (taskAtiva) {
-                  if (deveProcessarFalhaTerminal(whatsappCallId, callsFalhaProcessadas)) {
-                    await processarFalhaTerminal(taskAtiva.taskId, telefone, whatsappCallId, payload);
+                const taskIdAtiva = await lerTaskAtiva(telefone);
+                if (taskIdAtiva) {
+                  if (await marcarCallFalhaProcessada(whatsappCallId)) {
+                    await processarFalhaTerminal(taskIdAtiva, telefone, whatsappCallId, payload);
                   }
                 } else {
                   let taskIdFallback: string | null = null;
@@ -582,7 +531,7 @@ export const mastra = new Mastra({
                     console.error('[wavoip] falha ao buscar Ligacao aberta por telefone (branch CALL):', e);
                   }
                   if (taskIdFallback) {
-                    if (deveProcessarFalhaTerminal(whatsappCallId, callsFalhaProcessadas)) {
+                    if (await marcarCallFalhaProcessada(whatsappCallId)) {
                       await processarFalhaTerminal(taskIdFallback, telefone, whatsappCallId, payload);
                     }
                   } else {
@@ -614,28 +563,23 @@ export const mastra = new Mastra({
                 return c.json({ status: 'payload invalido' }, 400);
               }
 
-              const correlacao = correlacaoCallTelefone.get(whatsappCallId);
-              if (!correlacao) {
+              const telefone = await lerCorrelacao(whatsappCallId);
+              if (!telefone) {
                 // CALL nao chegou (ou reinicio do servidor). 200 pra nao entrar
                 // em loop de retry do webhook.
                 console.warn(`[wavoip] RECORD sem correlacao (call=${whatsappCallId}) — transcricao ignorada`);
                 return c.json({ status: 'sem correlacao' });
               }
-              const telefone = correlacao.telefone;
 
               // Dedup: retry do webhook nao re-transcreve a mesma gravacao.
-              if (recordsProcessados.has(whatsappCallId)) {
+              if (!(await marcarRecordProcessado(whatsappCallId))) {
                 return c.json({ status: 'duplicado' });
-              }
-              recordsProcessados.add(whatsappCallId);
-              if (recordsProcessados.size > 5000) {
-                recordsProcessados.clear(); // backstop de memoria (dedup e best-effort)
               }
 
               const transcricao = await transcreverCallUrl(recordUrl);
               if (!transcricao) {
                 // Libera o dedup pra permitir um retry futuro transcrever.
-                recordsProcessados.delete(whatsappCallId);
+                await liberarRecordProcessado(whatsappCallId);
                 // WR-01: nunca telefone cru em log — so o whatsapp_call_id.
                 console.warn(`[wavoip] transcricao falhou (call=${whatsappCallId})`);
                 return c.json({ status: 'transcricao falhou' }, 502);
@@ -646,7 +590,7 @@ export const mastra = new Mastra({
               // ClickUp (Ligacao aberta com o mesmo TELEFONE), 3) D-P3-03: nao
               // casou nenhuma -> cria uma Ligacao avulsa (nenhuma ligacao real
               // fica sem registro).
-              let taskId = taskAtivaPorTelefone.get(telefone)?.taskId ?? null;
+              let taskId = await lerTaskAtiva(telefone);
               if (!taskId) {
                 try {
                   taskId = await buscarLigacaoAbertaPorTelefone(telefone);
@@ -662,7 +606,7 @@ export const mastra = new Mastra({
                   // Criar a avulsa e o unico jeito de nao perder o registro
                   // desta gravacao (D-P3-03) — se ISSO falhar, propaga (502)
                   // pro Wavoip poder retentar o webhook.
-                  recordsProcessados.delete(whatsappCallId);
+                  await liberarRecordProcessado(whatsappCallId);
                   console.error('[wavoip] falha ao criar Ligacao avulsa:', e);
                   return c.json({ status: 'erro ao registrar ligacao' }, 502);
                 }
@@ -760,7 +704,7 @@ export const mastra = new Mastra({
               // CR-02: limpa a entrada telefone->task apos consolidar/fechar —
               // uma ligacao futura ao mesmo telefone nunca re-consolida sobre
               // esta task ja fechada.
-              taskAtivaPorTelefone.delete(telefone);
+              await limparTaskAtiva(telefone);
 
               try { await marcarEventoWebhook(eventoDuravelId, 'processado'); }
               catch (e) { console.error('[wavoip] falha ao marcar evento RECORD processado:', e); }
