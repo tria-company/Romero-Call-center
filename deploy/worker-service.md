@@ -80,13 +80,22 @@ network, mesmas envs do discador **mais** `REDIS_URL` e `ALERT_WEBHOOK_URL`:
       ## de fechar a conexao. Recomendado 120s: cobre a maioria dos jobs (transcricao +
       ## 2 chamadas de LLM), mas NAO cobre o pior caso (Deepgram pode levar ate 600s num
       ## audio muito longo). TRADE-OFF explicito: se o job nao terminar dentro da janela,
-      ## o swarm manda SIGKILL e o job morre no meio — mas isso e SEGURO aqui, nao perde
-      ## nada: o dedup e SETNX (marcarRecordProcessado/marcarCallFalhaProcessada,
-      ## estado-webhook.ts) mais a durabilidade do evento cru (webhook_eventos, Fase 2)
-      ## garantem que o job e REPROCESSADO com seguranca (retry do BullMQ ou reprocesso
-      ## manual via CLI, 06-05). Aumentar a janela (ex.: 300s) reduz a chance de
-      ## reprocesso ao custo de deploys/restarts mais lentos — ajustar conforme a
-      ## distribuicao real de duracao das chamadas em producao.
+      ## o swarm manda SIGKILL e o job morre no meio — mas isso NAO perde a ligacao,
+      ## porque o dedup do processador.ts e CRASH-SAFE (CR-02): a marca duravel de
+      ## "processado" (marcarRecordProcessado/marcarCallFalhaProcessada, SETNX em
+      ## estado-webhook.ts) so e gravada DEPOIS do efeito terminal (consolidacao do
+      ## lead + fechamento da Ligacao + marcarEventoWebhook 'processado'). Um SIGKILL
+      ## no meio, portanto, NAO deixa nada marcado — e o evento cru continua durave em
+      ## webhook_eventos (Fase 2). A reentrega do job "stalled" pelo BullMQ (ou o
+      ## reprocesso manual via CLI, 06-05) re-roda o job POR INTEIRO e o consolida do
+      ## zero; o check read-only no inicio (recordJaProcessado/callFalhaJaProcessada)
+      ## so pula reentregas de jobs que JA concluiram com sucesso. (Nota: antes do
+      ## CR-02 a marca era reivindicada no INICIO do job — um SIGKILL no meio deixava
+      ## a marca orfa e BLOQUEAVA o reprocesso; isso foi corrigido.) TRADE-OFF residual:
+      ## sob entrega duplicada truly-concorrente pode haver dupla-transcricao rara (o
+      ## mesmo que o caminho throw/retry ja tolera). Aumentar a janela (ex.: 300s)
+      ## reduz a chance de reprocesso ao custo de deploys/restarts mais lentos —
+      ## ajustar conforme a distribuicao real de duracao das chamadas em producao.
       stop_grace_period: 120s
 
     ## SEM labels do Traefik — o worker nao expoe HTTP, so consome a fila.

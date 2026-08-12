@@ -9,11 +9,20 @@
 // logica — o worker (06-04) as chama fora do caminho da requisicao, e o
 // webhook (06-03) as chama inline quando nao ha fila (REDIS_URL vazio).
 //
-// Dedup (FILA-05): o SETNX atomico (`marcarRecordProcessado`/
-// `marcarCallFalhaProcessada`, sobrevive a restart via Redis) mora AQUI
-// DENTRO, nao no webhook — vale igual para o job (worker) e para o inline
-// (mesma chamada de funcao), fechando a lacuna de duplicidade sob
-// retry/replica que so proteger no request handler nao cobriria.
+// Dedup (FILA-05) CRASH-SAFE (CR-02): a marca duravel de "processado"
+// (`marcarRecordProcessado`/`marcarCallFalhaProcessada`, SETNX via Redis,
+// sobrevive a restart) so e setada DEPOIS do efeito terminal (consolidacao +
+// marcarEventoWebhook 'processado'). No INICIO apenas CHECAMOS (read-only,
+// `recordJaProcessado`/`callFalhaJaProcessada`) pra pular uma reentrega de um
+// job JA concluido. Assim um SIGKILL no meio do job (deploy durante chamada
+// longa, stop_grace_period estourado pelo Deepgram) NAO deixa nada marcado —
+// a reentrega do BullMQ (stalled) ou o reprocesso via CLI (06-05) re-rodam o
+// job inteiro e o consolidam. Isto mora AQUI DENTRO (nao no webhook) pra valer
+// igual no worker e no inline. TRADE-OFF aceito: sob entrega duplicada
+// TRULY-concorrente (duas replicas processando o mesmo call_id ao mesmo tempo,
+// antes de qualquer uma marcar) pode haver dupla-transcricao rara — o mesmo
+// que o caminho throw/retry ja tolera, e minimizado pelo dedup de enqueue
+// (jobId) da fila.
 //
 // Semantica de falha: retentavel (transcricao falhou, avulsa nao criada)
 // LANCA (`throw`) para o BullMQ retentar (FILA-03) — em modo inline o
@@ -68,8 +77,9 @@ import {
   lerTaskAtiva,
   limparTaskAtiva,
   marcarRecordProcessado,
-  liberarRecordProcessado,
+  recordJaProcessado,
   marcarCallFalhaProcessada,
+  callFalhaJaProcessada,
 } from './estado-webhook.ts';
 
 // ===== Agente Contexto — consolidacao do lead + fechamento da Ligacao =====
@@ -193,9 +203,13 @@ async function consolidarEFecharLigacao(
  * transcricao).
  */
 export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): Promise<void> {
-  // FILA-05: dedup atomico no INICIO — se ja processada (ou sem callId,
-  // mesma semantica de hoje), return silencioso.
-  if (!(await marcarCallFalhaProcessada(dados.whatsappCallId))) return;
+  // CR-02: dedup CRASH-SAFE — CHECA (read-only) se ja foi processada numa run
+  // anterior e pula; NAO reivindica a marca aqui. A marca duravel so e setada
+  // no FIM, apos o efeito terminal (consolidacao + marcarEventoWebhook). Assim
+  // um SIGKILL no meio nao deixa a falha "marcada como feita" bloqueando a
+  // reentrega/reprocesso. (callId vazio -> callFalhaJaProcessada retorna false,
+  // sempre processa — mesma semantica de hoje.)
+  if (await callFalhaJaProcessada(dados.whatsappCallId)) return;
 
   // D-P3-01: resolve a task via 1) map in-memory (task reportada em
   // /api/discador/ligando) OU, quando o map nao tem entrada (restart/
@@ -254,6 +268,11 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
   } catch (e) {
     console.error('[processador] falha ao marcar evento falha-terminal processado:', e);
   }
+
+  // CR-02: SO AGORA (efeito terminal concluido) grava a marca duravel de
+  // dedup — uma reentrega futura do MESMO call_id sera pulada pelo check no
+  // inicio. Um crash antes daqui nao deixa marca, permitindo re-rodar limpo.
+  await marcarCallFalhaProcessada(dados.whatsappCallId);
 }
 
 // ===== processarRecordJob — transcricao + Agente Analise + Agente Contexto =====
@@ -277,15 +296,17 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
 export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   const { whatsappCallId: callId, telefone, recordUrl, payload } = dados;
 
-  // FILA-05: dedup atomico no INICIO — retry do webhook/BullMQ nao
-  // re-transcreve a mesma gravacao.
-  if (!(await marcarRecordProcessado(callId))) return;
+  // CR-02: dedup CRASH-SAFE — CHECA (read-only) se este RECORD ja foi
+  // consolidado numa run anterior e pula; NAO reivindica a marca aqui. A marca
+  // duravel so e setada no FIM (apos consolidar/fechar + marcarEventoWebhook).
+  // Um SIGKILL no meio (deploy durante chamada longa) nao deixa nada marcado —
+  // a reentrega do BullMQ/reprocesso re-transcreve e consolida do zero.
+  if (await recordJaProcessado(callId)) return;
 
   const transcricao = await transcreverCallUrl(recordUrl);
   if (!transcricao) {
-    // Libera o dedup pra permitir um retry futuro transcrever.
-    await liberarRecordProcessado(callId);
-    // WR-01: nunca telefone cru em log — so o whatsapp_call_id.
+    // Retentavel: nada foi marcado (a marca so vem no fim) — o retry futuro
+    // simplesmente re-roda e transcreve. WR-01: nunca telefone cru, so o call.
     console.warn(`[processador] transcricao falhou (call=${callId})`);
     throw new Error(`transcricao falhou call=${callId}`);
   }
@@ -309,8 +330,7 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     } catch (e) {
       // Criar a avulsa e o unico jeito de nao perder o registro desta
       // gravacao (D-P3-03) — se ISSO falhar, lanca (retentavel, mesmo efeito
-      // do 502 de hoje).
-      await liberarRecordProcessado(callId);
+      // do 502 de hoje). CR-02: nada foi marcado ainda, o retry re-roda limpo.
       console.error('[processador] falha ao criar Ligacao avulsa:', e);
       throw e instanceof Error ? e : new Error(String(e));
     }
@@ -415,4 +435,10 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   } catch (e) {
     console.error('[processador] falha ao marcar evento record processado:', e);
   }
+
+  // CR-02: SO AGORA (transcricao + analise + consolidacao + fechamento +
+  // evento durave concluidos) grava a marca duravel de dedup. Uma reentrega
+  // futura do MESMO call_id sera pulada pelo check read-only no inicio; um
+  // crash antes daqui nao deixa marca, permitindo re-rodar o job por inteiro.
+  await marcarRecordProcessado(callId);
 }

@@ -80,12 +80,24 @@ function liberarRecordProcessadoMem(callId: string): void {
   recordsMem.delete(callId);
 }
 
+// CR-02: check read-only (NAO reivindica) — usado pelo processador pra pular um
+// RECORD que JA foi consolidado numa run anterior, sem marca-lo prematuramente.
+function recordJaProcessadoMem(callId: string): boolean {
+  return recordsMem.has(callId);
+}
+
 function marcarCallFalhaProcessadaMem(callId: string): boolean {
   if (!callId) return true; // sem callId nao ha chave de dedup — espelha deveProcessarFalhaTerminal
   if (falhasMem.has(callId)) return false;
   falhasMem.add(callId);
   if (falhasMem.size > 5000) falhasMem.clear();
   return true;
+}
+
+// CR-02: check read-only da falha terminal (espelha recordJaProcessadoMem).
+function callFalhaJaProcessadaMem(callId: string): boolean {
+  if (!callId) return false; // sem callId nao ha dedup — nunca "ja processado"
+  return falhasMem.has(callId);
 }
 
 // ===== Backend REDIS — cliente lazy, TTL nativo, SET NX atomico =====
@@ -179,6 +191,28 @@ async function liberarRecordProcessadoRedis(callId: string): Promise<void> {
   }
 }
 
+// CR-02: GET read-only (nao reivindica). Fail-open p/ false = "nao processado,
+// entao PROCESSA" — mesmo racional do fail-open de marcarRecordProcessadoRedis:
+// nunca perder a ligacao por causa do dedup; reprocesso raro e aceitavel.
+async function recordJaProcessadoRedis(callId: string): Promise<boolean> {
+  try {
+    return (await garantirCliente().get(PREFIXO_REC + callId)) !== null;
+  } catch (e) {
+    console.error('[estado-webhook] falha ao checar record processado (degradando p/ nao-processado):', e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+async function callFalhaJaProcessadaRedis(callId: string): Promise<boolean> {
+  if (!callId) return false; // sem callId nao ha chave de dedup
+  try {
+    return (await garantirCliente().get(PREFIXO_FALHA + callId)) !== null;
+  } catch (e) {
+    console.error('[estado-webhook] falha ao checar falha terminal processada (degradando p/ nao-processado):', e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
 async function marcarCallFalhaProcessadaRedis(callId: string): Promise<boolean> {
   if (!callId) return true; // sem callId nao ha chave de dedup — espelha deveProcessarFalhaTerminal
   try {
@@ -221,8 +255,23 @@ export async function liberarRecordProcessado(callId: string): Promise<void> {
   return MODO === 'redis' ? liberarRecordProcessadoRedis(callId) : liberarRecordProcessadoMem(callId);
 }
 
+/**
+ * CR-02: checa (read-only) se o RECORD ja foi DURAVELMENTE processado numa run
+ * anterior — usado pelo processador pra pular reentregas de um job ja concluido
+ * SEM reivindicar a marca no inicio (a marca so e setada por
+ * `marcarRecordProcessado` DEPOIS do efeito terminal). Fail-open p/ false.
+ */
+export async function recordJaProcessado(callId: string): Promise<boolean> {
+  return MODO === 'redis' ? recordJaProcessadoRedis(callId) : recordJaProcessadoMem(callId);
+}
+
 export async function marcarCallFalhaProcessada(callId: string): Promise<boolean> {
   return MODO === 'redis' ? marcarCallFalhaProcessadaRedis(callId) : marcarCallFalhaProcessadaMem(callId);
+}
+
+/** CR-02: check read-only da falha terminal (espelha `recordJaProcessado`). */
+export async function callFalhaJaProcessada(callId: string): Promise<boolean> {
+  return MODO === 'redis' ? callFalhaJaProcessadaRedis(callId) : callFalhaJaProcessadaMem(callId);
 }
 
 /** 'redis' ou 'memoria' — usado pelo smoke (Plano 04) e pelo log de boot. */
