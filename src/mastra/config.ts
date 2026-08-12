@@ -312,3 +312,22 @@ export const SUPABASE_TABLES_SERVICOS: string[] = process.env.SUPABASE_TABLES_SE
 // configurado, a durabilidade degrada para o comportamento atual (processamento
 // inline, sem rede de segurança) — NUNCA quebra o webhook.
 export const SUPABASE_TABLE_WEBHOOK_EVENTOS = process.env.SUPABASE_TABLE_WEBHOOK_EVENTOS || 'webhook_eventos';
+
+// ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
+//
+// URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook
+// Wavoip (correlação call→telefone, task ativa por telefone, dedup de RECORD/falha
+// terminal) — server-side/rede interna, NUNCA client-side. Default vazio: sem
+// REDIS_URL, o estado roda em MEMÓRIA (comportamento atual de 1 instância) — não
+// sobrevive a restart nem é compartilhado entre réplicas, mas o loop diário continua
+// fechando (degradação graciosa, decisão "construir código primeiro").
+export const REDIS_URL = process.env.REDIS_URL || '';
+
+if (!REDIS_URL) {
+  console.warn(
+    '[config] REDIS_URL vazio: o estado do webhook (correlação call→telefone, task ativa ' +
+      'por telefone, dedup de RECORD/falha) roda em MEMÓRIA — não sobrevive a restart nem é ' +
+      'compartilhado entre réplicas. Configure REDIS_URL no .env para habilitar o estado ' +
+      'compartilhado (necessário para múltiplas réplicas/worker).',
+  );
+}

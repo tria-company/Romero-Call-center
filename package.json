@@ -21,7 +21,8 @@
     "@ai-sdk/openai": "^4.0.36",
     "@mastra/core": "^1.17.0",
     "@mastra/loggers": "^1.0.3",
-    "ai": "^7.0.58"
+    "ai": "^7.0.58",
+    "ioredis": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
