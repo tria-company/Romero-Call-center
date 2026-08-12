@@ -10,11 +10,13 @@
 // - ATENDEU, MOTIVO_FALHA e DURACAO derivam do payload Wavoip (evento CALL
 //   traz `status`/`direction`/`duration`; RECORD só existe quando houve
 //   gravação) — preenchimento 100% automático, o operador não digita nada.
-// - Vocabulário de `status` assumido (ACCEPT/ACTIVE/ANSWERED = atendido;
-//   NOT_ANSWERED/UNANSWERED/REJECTED/MISSED = não atendido), combinado com
-//   `duration > 0` E/OU a existência de gravação. Cada derivação é uma
-//   função nomeada/isolada — o vocabulário real (confirmado nos logs do
-//   webhook, checkpoint 03-05) pode ser ajustado sem tocar no resto.
+// - Vocabulário de `status` CONFIRMADO nos logs reais de produção
+//   (2026-08-12): RINGING/CALLING/ACTIVE = transições (dur=0);
+//   CANCELLED/FAILED/ENDED = terminais. ENDED = atendida encerrada (dur>0).
+//   CANCELLED = não atendida (quem liga desistiu, dur=0). FAILED com dur>0 e
+//   `reason` = queda no MEIO de chamada atendida (gera RECORD depois); FAILED
+//   com dur=0 = falha real da chamada. Cada derivação é uma função
+//   nomeada/isolada — o vocabulário pode ser ajustado sem tocar no resto.
 // - Limitação aceita: caixa postal pode contar como "atendeu" (D-P3-05).
 
 /** Subconjunto do payload Wavoip (eventos CALL/RECORD) que este módulo lê. */
@@ -25,13 +27,21 @@ export interface PayloadCallWavoip {
   caller?: string;
   receiver?: string;
   record_url?: string;
+  reason?: string;
 }
 
-/** Statuses que indicam que a ligação foi atendida (vocabulário assumido — D-P3-05). */
+/** Statuses que indicam que a ligação foi atendida (vocabulário CONFIRMADO — 2026-08-12). */
 const STATUS_ATENDIDA = new Set(['ACCEPT', 'ACTIVE', 'ANSWERED']);
 
-/** Statuses que indicam que a ligação NÃO foi atendida (vocabulário assumido — D-P3-05). */
-const STATUS_NAO_ATENDIDA = new Set(['NOT_ANSWERED', 'UNANSWERED', 'REJECTED', 'MISSED']);
+/** Statuses que indicam que a ligação NÃO foi atendida (vocabulário CONFIRMADO — 2026-08-12). */
+const STATUS_NAO_ATENDIDA = new Set([
+  'NOT_ANSWERED',
+  'UNANSWERED',
+  'REJECTED',
+  'MISSED',
+  'CANCELLED',
+  'CANCELED',
+]);
 
 function paraNumero(valor: unknown): number {
   const n = Number(valor);
@@ -56,8 +66,9 @@ export function derivarDuracao(payload: PayloadCallWavoip): number {
  * payload indica atendida OU (`duration > 0` OU `teveGravacao === true`).
  * false quando o `status` indica explicitamente não-atendida, mesmo com
  * duration > 0 (ex.: toque residual antes de rejeitar). Isolada/nomeada —
- * o vocabulário de `status` pode ser ajustado após confirmação nos logs
- * (checkpoint 03-05) sem tocar no resto da cadeia.
+ * vocabulário CONFIRMADO nos logs reais (2026-08-12): CANCELLED entra pelo
+ * Set (→ false); FAILED com dur>0 cai na heurística duration/gravação
+ * (→ true, é queda no meio de chamada atendida).
  */
 export function derivarAtendeu(payload: PayloadCallWavoip, teveGravacao: boolean): boolean {
   const status = statusNormalizado(payload);
@@ -78,27 +89,34 @@ export function derivarAtendeu(payload: PayloadCallWavoip, teveGravacao: boolean
 export function derivarMotivoFalha(payload: PayloadCallWavoip): string {
   const status = statusNormalizado(payload);
   if (STATUS_ATENDIDA.has(status)) return '';
+  if (status === 'CANCELLED' || status === 'CANCELED') return 'não atendida';
   if (status === 'NOT_ANSWERED' || status === 'UNANSWERED') return 'não atendida';
   if (status === 'REJECTED') return 'recusada';
   if (status === 'MISSED') return 'perdida';
   if (derivarDuracao(payload) > 0) return '';
+  if (status === 'FAILED') return `falha na chamada${payload.reason ? ` (${payload.reason})` : ''}`;
   if (!status) return 'motivo desconhecido (status ausente)';
   return `não atendida (status=${status})`;
 }
 
 /**
  * Predicado explícito de falha terminal do branch CALL (CR-01, gap-closure
- * 03-06): retorna `true` SOMENTE quando o `status` normalizado do payload
- * está em `STATUS_NAO_ATENDIDA` (vocabulário assumido — D-P3-05). Diferente
- * de `derivarAtendeu`, este predicado NUNCA dispara por fallback de
- * `duration`/`teveGravacao` — status ausente, intermediário (ex.: RINGING,
- * CALLING) ou desconhecido retornam `false`. Existe para o gate de
+ * 03-06): retorna `true` quando o `status` normalizado do payload está em
+ * `STATUS_NAO_ATENDIDA` (vocabulário CONFIRMADO — 2026-08-12) OU quando
+ * `status === 'FAILED'` E `derivarDuracao(payload) === 0` (falha real da
+ * chamada; `FAILED` com `duration > 0` é queda no MEIO de uma chamada
+ * atendida — o `RECORD` subsequente cuida da task, então retorna `false`).
+ * Diferente de `derivarAtendeu`, este predicado NUNCA dispara por fallback
+ * de `teveGravacao` — status ausente, intermediário (ex.: RINGING, CALLING,
+ * ACTIVE) ou desconhecido retornam `false`. Existe para o gate de
  * "não-atendida" do webhook (index.ts) nunca fechar/consolidar a Ligação
  * enquanto a chamada ainda está tocando (transição), só para falha terminal
- * confirmada. Mantém o vocabulário provisório isolado em `analise.ts`.
+ * confirmada. Mantém o vocabulário isolado em `analise.ts`.
  */
 export function ehStatusFalhaTerminal(payload: PayloadCallWavoip): boolean {
-  return STATUS_NAO_ATENDIDA.has(statusNormalizado(payload));
+  const status = statusNormalizado(payload);
+  if (STATUS_NAO_ATENDIDA.has(status)) return true;
+  return status === 'FAILED' && derivarDuracao(payload) === 0;
 }
 
 /**
