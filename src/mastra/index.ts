@@ -32,6 +32,7 @@ import {
   lerLigacao,
   iniciarLigacao,
   lerStatusVotoLead,
+  validarLigacaoDoOperador,
 } from './clickup';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
@@ -398,6 +399,20 @@ export const mastra = new Mastra({
             return c.json({ status: 'ok', semAlteracao: true });
           }
           try {
+            // Checagem sincrona de autorizacao (CR-01/IDOR) ANTES de
+            // enfileirar — Fase 08 Plano 04, follow-up de verificacao. Sem
+            // isto, um taskId invalido/de outro operador responderia 200 na
+            // hora (D-07a e assincrono) e so falharia depois, em silencio,
+            // via retry+DLQ dentro do worker — regressao da UX/seguranca de
+            // 404 imediato que a gravacao sincrona de antes garantia. Mesma
+            // funcao que salvarVotoLead usa internamente (validarLigacaoDoOperador,
+            // clickup.ts): LANCA com as mesmas 3 mensagens que o catch abaixo
+            // ja mapeia pra 404 — nenhuma logica nova de erro. Custo: uma
+            // leitura a mais via fetchClickUp (ja rate-limitada, Plano 01);
+            // salvarVotoLead valida de novo dentro do job por seguranca (o
+            // assignee/taskId nao mudam entre as duas chamadas na mesma
+            // requisicao).
+            await validarLigacaoDoOperador(taskId, assignee);
             // D-07a: enfileira o sync (worker espelha no ClickUp em <60s,
             // consistencia eventual) e responde na hora; sem Redis ou se o
             // enqueue falhar em runtime, cai no fallback inline — MESMA

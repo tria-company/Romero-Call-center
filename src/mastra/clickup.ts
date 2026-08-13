@@ -800,8 +800,17 @@ export async function resolverLeadDaLigacao(taskLigacaoId: string): Promise<stri
  * operador (ou em qualquer task da workspace). Retorna a task já lida pra
  * reaproveitar na resolução do lead. LANÇA quando a task não existe / não é da
  * Lista 02 / não pertence ao operador (o caller mapeia pra 404).
+ *
+ * Exportada (Fase 08 Plano 04, follow-up de verificação): POST /voto agora
+ * enfileira o voto (D-07a, async) em vez de gravar sincrono — sem uma
+ * checagem síncrona antes do enqueue, um `taskId` inválido/de outro operador
+ * responderia 200 na hora e só falharia (silenciosamente, via DLQ) depois,
+ * dentro do worker. `index.ts` chama esta MESMA função antes de enfileirar
+ * pra manter o 404 imediato de sempre; `salvarVotoLead` (chamada dentro do
+ * job) valida de novo por segurança — o custo é uma leitura a mais via
+ * `fetchClickUp` (já rate-limitada), não uma segunda fonte de verdade.
  */
-async function validarLigacaoDoOperador(taskId: string, assigneeIdEsperado: string): Promise<TaskClickUp> {
+export async function validarLigacaoDoOperador(taskId: string, assigneeIdEsperado: string): Promise<TaskClickUp> {
   const task = await lerTask(taskId);
   if (!task) {
     throw new Error(`[clickup] task ${taskId} nao encontrada`);
