@@ -52,6 +52,7 @@ import {
   CAMPOS_LEADS,
   resolverLeadDaLigacao,
   consolidarLead,
+  atualizarTask,
   fecharLigacao,
 } from './clickup.ts';
 
@@ -71,7 +72,7 @@ import {
   extrairRetorno,
 } from './analise.ts';
 
-import { montarPromptContexto, proximoContato, derivarContadores } from './contexto.ts';
+import { montarPromptContexto, proximoContato, derivarContadores, montarBlocoLigacao } from './contexto.ts';
 
 import { chamarLLM } from './llm.ts';
 
@@ -179,6 +180,53 @@ async function consolidarEFecharLigacao(
         proximoContato: proximoContatoData.getTime(),
         contadores,
       });
+
+      // ADITIVO (OPER-05, D-P3-13): alem do resumo vivo (OBSERVACAO
+      // CONSOLIDADA, custom field, acima), o DOSSIE — a `description` NATIVA
+      // do lead — passa a ACUMULAR o processo de cada ligacao. E o que a tela
+      // de preview do discador exibe, entao o operador ve o historico ali.
+      // Complementa a OBSERVACAO CONSOLIDADA sem substitui-la. Reusa os locais
+      // ja em escopo (nao re-le o lead). Em SEU PROPRIO try/catch (log-e-segue,
+      // WR-03/D-P3-08): uma falha aqui NUNCA propaga nem impede o fecharLigacao
+      // abaixo — atualizarTask LANCA em falha de infra/HTTP.
+      //
+      // TODO (tarefa futura, fora deste plano): scripts/montar-dossies.mjs
+      // RECONSTROI a description a partir de Supabase/GHL
+      // (atualizarTask(lead.taskId, { description: dossieMarkdown }), ~linha 237)
+      // e SOBRESCREVERIA esta secao "## Historico de ligacoes" se rodar depois.
+      // montar-dossies precisa PRESERVAR/re-anexar esta secao — NAO tratado aqui.
+      try {
+        const bloco = montarBlocoLigacao({
+          atendeu: opts.atendeu,
+          hoje,
+          aderencia: opts.aderencia,
+          resumoAnalise: opts.resumoAnalise,
+          observacaoConsolidada,
+          proximoContato: proximoContatoData,
+          retorno: opts.retorno,
+        });
+        const descAtual = lead?.description ?? lead?.text_content ?? '';
+        const marcador = '## Histórico de ligações';
+        let novaDescricao: string;
+        const idx = descAtual.indexOf(marcador);
+        if (idx !== -1) {
+          // Mais recente no TOPO: insere o bloco logo apos a linha do heading.
+          const fimHeading = descAtual.indexOf('\n', idx);
+          const corte = fimHeading === -1 ? descAtual.length : fimHeading;
+          novaDescricao =
+            descAtual.slice(0, corte) + '\n\n' + bloco + descAtual.slice(corte);
+        } else {
+          novaDescricao = descAtual + '\n\n---\n\n' + marcador + '\n\n' + bloco;
+        }
+        await atualizarTask(leadTaskId, { description: novaDescricao });
+      } catch (e) {
+        // WR-01/LGPD: SO ids/flags no log — nunca a description/transcricao/
+        // telefone/CPF. Uma falha aqui nao trava consolidacao nem fechamento.
+        console.error(
+          `[processador] falha ao atualizar o dossiê (description) do lead (leadTaskId=${leadTaskId}):`,
+          e,
+        );
+      }
     }
   } catch (e) {
     console.error('[processador] falha ao consolidar o lead — a Ligacao ainda sera fechada:', e);

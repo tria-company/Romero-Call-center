@@ -79,6 +79,54 @@ export function montarPromptContexto({
   return { system, prompt: linhas.join('\n') };
 }
 
+/** Dois dígitos (zero à esquerda) — helper puro local do header do bloco. */
+function dois(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/**
+ * Monta o markdown de UM bloco de ligação para o DOSSIÊ (a `description`
+ * nativa do lead na Lista 01). PURA (sem I/O) — só formata valores já
+ * computados pelo caller (processador.ts), reusando a mesma base UTC de
+ * `formatarData` (toISOString) para manter consistência de fuso com o
+ * restante do módulo.
+ *
+ * Complementa a OBSERVAÇÃO CONSOLIDADA (resumo vivo, custom field) sem
+ * substituí-la: o resumo responde "o que importa hoje"; este bloco registra
+ * o processo daquela ligação, que aparece no preview do discador (description).
+ *
+ * Header: `### DD/MM/AAAA HH:MM — Atendida|Não atendida` (UTC). Linhas
+ * opcionais são omitidas quando o valor está ausente/vazio (nunca "null" nem
+ * rótulo sem conteúdo).
+ */
+export function montarBlocoLigacao(opts: {
+  atendeu: boolean;
+  hoje: Date;
+  aderencia: number | null;
+  resumoAnalise: string;
+  observacaoConsolidada: string;
+  proximoContato: Date;
+  retorno: RetornoConsolidacao;
+}): string {
+  const d = opts.hoje;
+  const dataHora = `${dois(d.getUTCDate())}/${dois(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} ${dois(d.getUTCHours())}:${dois(d.getUTCMinutes())}`;
+  const rotulo = opts.atendeu ? 'Atendida' : 'Não atendida';
+
+  const linhas: string[] = [`### ${dataHora} — ${rotulo}`];
+  if (opts.aderencia !== null) {
+    linhas.push(`- **Aderência ao script:** ${opts.aderencia}/10`);
+  }
+  const resumo = opts.resumoAnalise.trim();
+  if (resumo) linhas.push(`- **Resumo da análise:** ${resumo}`);
+  const obs = opts.observacaoConsolidada.trim();
+  if (obs) linhas.push(`- **Observação consolidada:** ${obs}`);
+  linhas.push(`- **Próximo contato:** ${formatarData(opts.proximoContato)}`);
+  if (opts.retorno.necessario) {
+    linhas.push(`- **Retorno combinado:** ${formatarData(opts.retorno.data)}`);
+  }
+  return linhas.join('\n');
+}
+
 function somarDias(base: Date, dias: number): Date {
   return new Date(base.getTime() + dias * 24 * 60 * 60 * 1000);
 }
