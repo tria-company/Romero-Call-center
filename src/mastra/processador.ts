@@ -59,6 +59,8 @@ import { transcreverCallUrl } from './deepgram.ts';
 
 import { mascararTelefone } from './mascarar.ts';
 
+import { registrarErroEtapa, registrarSucessoEtapa } from './metricas.ts';
+
 import {
   derivarAtendeu,
   derivarMotivoFalha,
@@ -307,13 +309,26 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // a reentrega do BullMQ/reprocesso re-transcreve e consolida do zero.
   if (await recordJaProcessado(callId)) return;
 
-  const transcricao = await transcreverCallUrl(recordUrl);
+  // D-06: instrumenta a etapa 'transcricao' — o try/catch preserva a
+  // propagacao pro BullMQ contar a tentativa (nao muda semantica de
+  // throw/retry); transcreverCallUrl hoje engole falhas internas e retorna
+  // null (nao lanca), entao o path "!transcricao" abaixo TAMBEM conta como
+  // erro real da etapa (o unico sinal de falha que este helper expoe).
+  let transcricao: Awaited<ReturnType<typeof transcreverCallUrl>>;
+  try {
+    transcricao = await transcreverCallUrl(recordUrl);
+  } catch (e) {
+    registrarErroEtapa('transcricao');
+    throw e;
+  }
   if (!transcricao) {
     // Retentavel: nada foi marcado (a marca so vem no fim) — o retry futuro
     // simplesmente re-roda e transcreve. WR-01: nunca telefone cru, so o call.
+    registrarErroEtapa('transcricao');
     console.warn(`[processador] transcricao falhou (call=${callId})`);
     throw new Error(`transcricao falhou call=${callId}`);
   }
+  registrarSucessoEtapa('transcricao');
 
   // D-P3-01: resolve a task da Ligacao — 1) map in-memory (task reportada em
   // /api/discador/ligando), 2) fallback persistido no ClickUp (Ligacao
@@ -398,12 +413,14 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     );
     await setCustomField(taskId, CAMPOS_LIGACOES.ANALISE_IA, resultado.resumoAnalise);
     await setCustomField(taskId, CAMPOS_LIGACOES.OBSERVACOES_EXTRAIDAS, resultado.observacoesExtraidas);
+    registrarSucessoEtapa('analise');
   } catch (e) {
     // D-P3-08: LLM fora do ar (ou parse/escrita falhou) — marca revisao e
     // segue, nunca trava a cadeia do processador. O helper de ClickUp
     // subjacente ainda lanca em falha de infra (WR-03); aqui so
     // distinguimos "precisa de revisao humana" de um erro que travaria o
     // job inteiro.
+    registrarErroEtapa('analise');
     console.error('[processador] falha no Agente Analise, marcando NECESSITA_REVISAO:', e);
     try {
       await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);

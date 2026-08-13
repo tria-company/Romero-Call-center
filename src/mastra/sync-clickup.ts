@@ -21,6 +21,7 @@
 
 import type { DadosJobSyncClickup } from './fila.ts';
 import { salvarVotoLead } from './clickup.ts';
+import { registrarErroEtapa, registrarSucessoEtapa } from './metricas.ts';
 
 /**
  * Espelha o voto do lead (Romero/Andressa) no ClickUp para a Ligacao
@@ -30,5 +31,14 @@ import { salvarVotoLead } from './clickup.ts';
  * fica retido na DLQ (removeOnFail:false) para inspecao/retry manual.
  */
 export async function processarSyncClickupJob(dados: DadosJobSyncClickup): Promise<void> {
-  await salvarVotoLead(dados.taskId, dados.assigneeId, dados.voto);
+  // D-06: instrumenta a etapa 'sync' — o catch conta o erro e RE-LANCA, sem
+  // engolir o throw que o BullMQ usa pro retry/DLQ (ver cabecalho do
+  // arquivo). Nenhum voto/telefone e passado ao coletor, so a etapa literal.
+  try {
+    await salvarVotoLead(dados.taskId, dados.assigneeId, dados.voto);
+    registrarSucessoEtapa('sync');
+  } catch (e) {
+    registrarErroEtapa('sync');
+    throw e;
+  }
 }
