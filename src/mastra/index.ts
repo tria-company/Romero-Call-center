@@ -33,6 +33,7 @@ import {
   iniciarLigacao,
   registrarDesfecho,
   lerStatusVotoLead,
+  lerContextoLead,
   validarLigacaoDoOperador,
 } from './clickup';
 
@@ -459,6 +460,36 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao carregar o status de voto' }, 502);
+          }
+        },
+      },
+      {
+        // Contexto (dossie 360) do lead ligado a esta Ligacao — chamado pelo
+        // preview ao tocar "Ligar" na fila (T-m3v), antes de discar. Leitura
+        // pura (sem registrarPresenca — nao e "atividade" do operador, so
+        // consulta). Mesmo isolamento por operador de /voto/:taskId (CR-01) —
+        // resolve o lead a partir da Ligacao do proprio operador.
+        path: '/api/discador/contexto/:taskId',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const taskId = c.req.param('taskId');
+          try {
+            const contexto = await lerContextoLead(taskId, assignee);
+            return c.json(contexto);
+          } catch (e) {
+            console.error('[discador] erro ao ler contexto:', e);
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao carregar o contexto' }, 502);
           }
         },
       },

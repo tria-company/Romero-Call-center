@@ -912,6 +912,36 @@ export async function lerStatusVotoLead(taskId: string, assigneeIdEsperado: stri
 }
 
 /**
+ * Contexto (dossiê) do lead ligado a uma Ligação — leitura, sem mutação.
+ *
+ * `contexto` é a DESCRIÇÃO NATIVA da task do lead (Dossiê 360°, escrito por
+ * `scripts/montar-dossies.mjs` via `atualizarTask(lead.taskId, { description:
+ * dossieMarkdown })`) — NUNCA o campo custom OBSERVACAO_CONSOLIDADA.
+ */
+export interface ContextoLead {
+  /** false = nenhum lead resolvido pela Ligação (nada a mostrar). */
+  temLead: boolean;
+  /** Descrição nativa (markdown) da task do lead na Lista 01, ou '' se ausente/sem lead. */
+  contexto: string;
+}
+
+/**
+ * Lê o contexto (dossiê 360°) do lead ligado à Ligação `taskId` do operador.
+ * Resolve o lead (LEAD_REL → fallback telefone) igual a `lerStatusVotoLead` e
+ * devolve a DESCRIÇÃO nativa da task do lead — mesmo fallback description/
+ * text_content de `lerLigacao` (a API às vezes devolve o texto plano em vez da
+ * descrição rica). Read-only: nenhuma escrita, nenhuma presença registrada.
+ * Erros de infra/autorização LANÇAM (WR-03) — o caller (index.ts) mapeia.
+ */
+export async function lerContextoLead(taskId: string, assigneeIdEsperado: string): Promise<ContextoLead> {
+  const task = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  const leadId = await resolverLeadPelaTask(task);
+  if (!leadId) return { temLead: false, contexto: '' };
+  const lead = await lerTask(leadId);
+  return { temLead: true, contexto: lead?.description ?? lead?.text_content ?? '' };
+}
+
+/**
  * Grava o(s) voto(s) confirmado(s) no lead ligado à Ligação `taskId` do
  * operador (Lista 01 LEADS, drop_down por UUID via `OPCOES_LEADS`). Só escreve
  * os candidatos presentes em `voto`. `{ temLead:false }` quando nenhum lead foi
