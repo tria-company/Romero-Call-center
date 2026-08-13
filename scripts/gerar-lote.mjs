@@ -50,6 +50,7 @@ import { buscarMilitante, listarFollowUps, listarServicosPrestados } from '../sr
 import { buscarContactIdPorTelefone, buscarConversasWhatsApp, buscarOportunidades } from '../src/mastra/ghl.ts';
 import { assigneeDoOperador } from '../src/mastra/operadores.ts';
 import { LOTE_LIMITE_TENTATIVAS, LOTE_TAMANHO_DEFAULT, SUPABASE_COL_ID } from '../src/mastra/config.ts';
+import { mascararTelefone } from '../src/mastra/mascarar.ts';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -58,14 +59,6 @@ function lerTamanhoArgv() {
   if (idx === -1) return LOTE_TAMANHO_DEFAULT;
   const valor = Number(process.argv[idx + 1]);
   return Number.isFinite(valor) && valor > 0 ? valor : LOTE_TAMANHO_DEFAULT;
-}
-
-/** Mascara o telefone (LGPD, T-02-02-I) — só os últimos 4 dígitos aparecem. */
-function mascararTelefone(telefone) {
-  const digitos = String(telefone || '').replace(/\D/g, '');
-  if (digitos.length === 0) return '(sem telefone)';
-  if (digitos.length <= 4) return `****${digitos}`;
-  return `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}`;
 }
 
 /** Pagina uma lista inteira do ClickUp (listarTasks LANÇA em falha — WR-03, nunca fila vazia silenciosa). */

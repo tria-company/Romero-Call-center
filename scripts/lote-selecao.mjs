@@ -13,20 +13,13 @@
 import { listarTasks, CLICKUP_LIST_LEADS, CAMPOS_LEADS } from '../src/mastra/clickup.ts';
 import { parseLeadDaTask, selecionarLoteElegivel } from '../src/mastra/lote.ts';
 import { LOTE_LIMITE_TENTATIVAS, LOTE_TAMANHO_DEFAULT } from '../src/mastra/config.ts';
+import { mascararTelefone } from '../src/mastra/mascarar.ts';
 
 function lerTamanhoArgv() {
   const idx = process.argv.indexOf('--tamanho');
   if (idx === -1) return LOTE_TAMANHO_DEFAULT;
   const valor = Number(process.argv[idx + 1]);
   return Number.isFinite(valor) && valor > 0 ? valor : LOTE_TAMANHO_DEFAULT;
-}
-
-/** Mascara o telefone (LGPD, T-02-01-I) — só os últimos 4 dígitos aparecem. */
-function mascararTelefone(telefone) {
-  const digitos = String(telefone || '').replace(/\D/g, '');
-  if (digitos.length === 0) return '(sem telefone)';
-  if (digitos.length <= 4) return `****${digitos}`;
-  return `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}`;
 }
 
 /** Lê TODAS as tasks da Lista 01, paginando (listarTasks LANÇA em falha — WR-03). */

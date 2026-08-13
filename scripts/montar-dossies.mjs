@@ -45,6 +45,7 @@ import { montarPromptDossie } from '../src/mastra/dossie.ts';
 import { buscarMilitante, listarFollowUps, listarServicosPrestados } from '../src/mastra/supabase.ts';
 import { buscarContactIdPorTelefone, buscarConversasWhatsApp, buscarOportunidades } from '../src/mastra/ghl.ts';
 import { SUPABASE_COL_ID } from '../src/mastra/config.ts';
+import { mascararTelefone } from '../src/mastra/mascarar.ts';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const FORCAR = process.argv.includes('--forcar');
@@ -64,14 +65,6 @@ function lerLeadArgv() {
   if (idx === -1) return null;
   const taskId = process.argv[idx + 1];
   return taskId && !taskId.startsWith('--') ? taskId : null;
-}
-
-/** Mascara o telefone (LGPD, T-DA-01) — só os últimos 4 dígitos aparecem. */
-function mascararTelefone(telefone) {
-  const digitos = String(telefone || '').replace(/\D/g, '');
-  if (digitos.length === 0) return '(sem telefone)';
-  if (digitos.length <= 4) return `****${digitos}`;
-  return `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}`;
 }
 
 /** Pagina uma lista inteira do ClickUp (listarTasks LANÇA em falha — WR-03, nunca fila vazia silenciosa). */

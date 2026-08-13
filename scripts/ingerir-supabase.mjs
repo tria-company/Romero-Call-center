@@ -34,6 +34,7 @@ import {
   SUPABASE_COL_TELEFONE,
   SUPABASE_COL_NOME,
 } from '../src/mastra/config.ts';
+import { mascararTelefone } from '../src/mastra/mascarar.ts';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -103,14 +104,6 @@ function valorCampo(task, fieldId) {
 
 function paraString(valor) {
   return valor === null || valor === undefined ? '' : String(valor);
-}
-
-/** Mascara o telefone (LGPD, T-04-03-I) -- só os últimos 4 dígitos aparecem (mesmo padrão de gerar-lote.mjs). */
-function mascararTelefone(telefone) {
-  const digitos = String(telefone || '').replace(/\D/g, '');
-  if (digitos.length === 0) return '(sem telefone)';
-  if (digitos.length <= 4) return `****${digitos}`;
-  return `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}`;
 }
 
 /** Extrai um `LeadExistente` (shape de dossie.ts) de uma TaskClickUp da Lista 01. */
