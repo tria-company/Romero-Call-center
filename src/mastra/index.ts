@@ -66,7 +66,10 @@ import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts'
 // Multi-device Wavoip (Fase 07 Plano 01): resolve o token do device do
 // usuario autenticado (dedicado -> pool -> global) em vez do WAVOIP_DEVICE_TOKEN
 // unico para todos — destrava N chamadas simultaneas por numeros diferentes.
-import { resolverConfigDoUsuario } from './dispositivos.ts';
+// alocarDevice/liberarDevice (Fase 07 Plano 02): lease/release do device de
+// POOL por chamada — cada atendente em modo:'pool' aloca um device LIVRE no
+// inicio da chamada e devolve no fim (DEVICE-02).
+import { resolverConfigDoUsuario, alocarDevice, liberarDevice } from './dispositivos.ts';
 
 /**
  * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
@@ -273,6 +276,37 @@ export const mastra = new Mastra({
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           const cfg = resolverConfigDoUsuario(sess.usuario);
           return c.json(cfg);
+        },
+      },
+      {
+        // Lease de um device de POOL (DEVICE-02) no inicio da chamada —
+        // so chamado pelo frontend quando /config respondeu modo:'pool'. O
+        // backend escolhe o device (nunca vem de param/body do cliente —
+        // mesmo racional T-07-01 do plano 07-01). Esgotamento -> 503 limpo
+        // (DD-07-09), nao 500 — a UI orienta "sem numero livre, tente de novo".
+        path: '/api/discador/dispositivo/lease',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const alocado = await alocarDevice(sess.usuario);
+          if (!alocado) return c.json({ erro: 'sem device livre' }, 503);
+          return c.json(alocado);
+        },
+      },
+      {
+        // Release do device de pool ao fim da chamada (best-effort,
+        // idempotente — liberarDevice nunca lanca). Mesmo isolamento de
+        // sessao: so o dono do lease (sess.usuario) consegue liberar
+        // (T-07-05, checado dentro de liberarDevice).
+        path: '/api/discador/dispositivo/release',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+          await liberarDevice(String(body.deviceId || ''), sess.usuario);
+          return c.json({ status: 'ok' });
         },
       },
       {
