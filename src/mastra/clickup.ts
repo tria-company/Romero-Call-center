@@ -17,10 +17,25 @@ import {
   OPER_STATUS_FECHADO,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
+import { adquirirToken } from './rate-limiter-clickup.ts';
 import { mapearFilaLigacao } from './lote.ts';
 import type { ItemFila } from './lote.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
+
+/**
+ * Choke point ÚNICO de saída HTTP ao ClickUp (CACHE-02, D-05): toda chamada
+ * passa por `adquirirToken()` (rate-limiter-clickup.ts) IMEDIATAMENTE ANTES
+ * do `fetchTimeout()` — garante que NENHUMA saída escapa do rate limiter
+ * global, sem depender de cada caller lembrar. `adquirirToken()` nunca
+ * lança (bounded-wait/fail-open); o comportamento de erro de rede/HTTP
+ * (WR-03: lança, nunca mascara) fica intacto nos callers, que continuam
+ * envolvendo esta função com o mesmo try/catch de sempre.
+ */
+async function fetchClickUp(url: string, options?: RequestInit, timeoutMs?: number): Promise<Response> {
+  await adquirirToken();
+  return fetchTimeout(url, options, timeoutMs);
+}
 
 // Mapa nome logico -> field_id na Lista 01 LEADS (1000320000002833). IDs
 // copiados de 01-CONTEXT.md (D-05). NUNCA resolver por nome em runtime (D-07).
@@ -187,7 +202,7 @@ export async function listarTasks(
   }
   let res: Response;
   try {
-    res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task?${params.toString()}`, {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${listId}/task?${params.toString()}`, {
       headers: headers(),
     });
   } catch (e) {
@@ -211,7 +226,7 @@ export async function lerTask(taskId: string): Promise<TaskClickUp | null> {
   }
   let res: Response;
   try {
-    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}`, { headers: headers() });
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${taskId}`, { headers: headers() });
   } catch (e) {
     throw new Error(
       `[clickup] falha de rede ao ler task ${taskId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -256,7 +271,7 @@ export async function criarTask(
   }
   let res: Response;
   try {
-    res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}/task`, {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${listId}/task`, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify(body),
@@ -292,7 +307,7 @@ export async function atualizarTask(
   }
   let res: Response;
   try {
-    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}`, {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${taskId}`, {
       method: 'PUT',
       headers: headers(),
       body: JSON.stringify(body),
@@ -338,7 +353,7 @@ export async function setCustomField(taskId: string, fieldId: string, value: unk
   }
   let res: Response;
   try {
-    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}/field/${fieldId}`, {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${taskId}/field/${fieldId}`, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify(body),
@@ -368,7 +383,7 @@ export async function listarStatusLista(listId: string): Promise<string[]> {
   }
   let res: Response;
   try {
-    res = await fetchTimeout(`${CLICKUP_BASE_URL}/list/${listId}`, { headers: headers() });
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${listId}`, { headers: headers() });
   } catch (e) {
     throw new Error(
       `[clickup] falha de rede ao ler a lista ${listId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -505,7 +520,7 @@ export async function comentarTask(taskId: string, texto: string): Promise<boole
   }
   let res: Response;
   try {
-    res = await fetchTimeout(`${CLICKUP_BASE_URL}/task/${taskId}/comment`, {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${taskId}/comment`, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({ comment_text: texto }),
