@@ -156,12 +156,39 @@ async function testeDesambiguacaoPorDevice() {
   );
 }
 
+// CR-01 (Fase 07): prova que limparTaskAtiva(tel, deviceId) remove a chave
+// COMPOSTA (deviceId|telefone) — não só a telefone-só. Esta é a regressão que
+// vazava: guardarTaskAtiva com deviceId grava DUAS chaves (composta + telefone-
+// só) e o processador limpava só a telefone-só (limparTaskAtiva(tel)), deixando
+// a composta viva até o TTL de 6h; um RECORD futuro do mesmo (device, telefone)
+// re-consolidava sobre a Ligação já fechada. Aqui limpamos COM deviceId e
+// exigimos que AMBAS as leituras (com e sem deviceId) devolvam null.
+async function testeLimpezaChaveComposta() {
+  const tel = '5511977776666';
+  const dev = 'devX';
+  await guardarTaskAtiva(tel, 'taskComposta', dev); // grava composta + telefone-só
+  checar(
+    (await lerTaskAtiva(tel, dev)) === 'taskComposta',
+    'pré-condição: lerTaskAtiva(tel, dev) deveria achar a task recém-guardada na chave composta',
+  );
+  await limparTaskAtiva(tel, dev); // <- a correção: limpa COM deviceId
+  checar(
+    (await lerTaskAtiva(tel, dev)) === null,
+    'CR-01: lerTaskAtiva(tel, dev) depois de limparTaskAtiva(tel, dev) deveria ser null — a chave COMPOSTA não pode vazar',
+  );
+  checar(
+    (await lerTaskAtiva(tel)) === null,
+    'CR-01: lerTaskAtiva(tel) SEM deviceId também deveria ser null — a chave telefone-só foi limpa junto',
+  );
+}
+
 async function main() {
   testeModo();
   await testeCorrelacao();
   await testeCorrelacaoDevice();
   await testeTaskAtivaComNormalizacao();
   await testeDesambiguacaoPorDevice();
+  await testeLimpezaChaveComposta();
   await testeDedupRecord();
   await testeDedupFalhaTerminal();
   await testeIsolamentoEntreConteineres();

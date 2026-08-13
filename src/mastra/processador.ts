@@ -215,7 +215,7 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
   // /api/discador/ligando) OU, quando o map nao tem entrada (restart/
   // hot-reload), 2) fallback persistido — a Ligacao aberta com o mesmo
   // TELEFONE ja gravada no ClickUp por `iniciarLigacao`.
-  let taskId = await lerTaskAtiva(dados.telefone);
+  let taskId = await lerTaskAtiva(dados.telefone, dados.deviceId);
   if (!taskId) {
     try {
       taskId = await buscarLigacaoAbertaPorTelefone(dados.telefone);
@@ -259,8 +259,11 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
 
   // CR-02: limpa a entrada telefone->task apos consolidar/fechar — uma
   // ligacao futura ao mesmo telefone nunca re-consolida sobre esta task ja
-  // fechada.
-  await limparTaskAtiva(dados.telefone);
+  // fechada. CR-01 (Fase 07): simetria com a leitura acima
+  // (`lerTaskAtiva(dados.telefone, dados.deviceId)`) — limpa tambem a chave
+  // COMPOSTA (deviceId|telefone) escrita por `guardarTaskAtiva`, senao ela
+  // vazava ate o TTL de 6h. Sem deviceId o comportamento e identico ao de antes.
+  await limparTaskAtiva(dados.telefone, dados.deviceId);
 
   // Fecha o desfecho durave do evento cru (Fase 2 — durabilidade).
   try {
@@ -426,8 +429,13 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
 
   // CR-02: limpa a entrada telefone->task apos consolidar/fechar — uma
   // ligacao futura ao mesmo telefone nunca re-consolida sobre esta task ja
-  // fechada.
-  await limparTaskAtiva(telefone);
+  // fechada. CR-01 (Fase 07): passa o mesmo deviceId usado na leitura acima
+  // (`lerTaskAtiva(telefone, dados.deviceId)`) pra que a chave COMPOSTA
+  // (deviceId|telefone) escrita por `guardarTaskAtiva` seja limpa junto — sem
+  // isso a composta sobrevivia ate o TTL de 6h e um RECORD futuro do mesmo
+  // (device, telefone) re-consolidava sobre esta Ligacao ja fechada. Sem
+  // deviceId (modo telefone-so) o comportamento e identico ao de antes.
+  await limparTaskAtiva(telefone, dados.deviceId);
 
   // Fecha o desfecho duravel do evento cru (Fase 2 — durabilidade).
   try {

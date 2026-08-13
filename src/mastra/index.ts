@@ -463,7 +463,11 @@ export const mastra = new Mastra({
               // — chamavel tanto pelo worker quanto inline aqui.
               const falhaTerminal = Boolean(telefone) && ehStatusFalhaTerminal(payload);
               if (falhaTerminal) {
-                const dados: DadosJobFalhaTerminal = { whatsappCallId, telefone, payload, eventoDuravelId };
+                // CR-01: propaga o deviceId (mesma derivacao deviceIdPorNumero
+                // usada acima p/ guardarCorrelacaoDevice) pro job, pra que o
+                // caminho nao-atendido leia/limpe a chave COMPOSTA tambem. null
+                // -> undefined (degrada telefone-so, DD-07-13).
+                const dados: DadosJobFalhaTerminal = { whatsappCallId, telefone, payload, eventoDuravelId, deviceId: deviceId || undefined };
                 const { enfileirado } = await enfileirarFalhaTerminal(dados);
                 if (!enfileirado) {
                   // Inline/fallback — mesma tolerancia de hoje: a

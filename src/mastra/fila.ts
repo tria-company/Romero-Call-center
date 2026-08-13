@@ -42,6 +42,7 @@ export interface DadosJobFalhaTerminal {
   telefone: string;
   payload: Record<string, any>;
   eventoDuravelId: string | null;
+  deviceId?: string; // CR-01/DEVICE-03: capturado no enqueue (deviceIdPorNumero), imune ao TTL — permite ler/limpar a chave COMPOSTA (deviceId|telefone) tambem no caminho nao-atendido
 }
 
 export type NomeJob = 'record' | 'falha-terminal';
