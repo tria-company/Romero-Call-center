@@ -20,13 +20,15 @@ export function mascararTelefone(telefone: string): string {
 
 /**
  * Mascara o CPF (D-10) — revela só os 3 PRIMEIROS + 2 ÚLTIMOS dígitos, no
- * formato pontilhado alvo `123.***.***-45`. CPF com menos de 5 dígitos não
- * tem margem pra separar prefixo/sufixo sem sobrepor ou vazar o miolo —
- * nesse caso volta totalmente mascarado. NUNCA retorna o CPF inteiro.
+ * formato pontilhado alvo `123.***.***-45`. Precisa de pelo menos 1 dígito de
+ * miolo sobrando (length > 3+2) pra esse formato realmente mascarar algo —
+ * com exatamente 5 dígitos, prefixo+sufixo cobririam o CPF inteiro disfarçado
+ * de mascarado, o que violaria a garantia. Abaixo desse mínimo volta
+ * totalmente mascarado. NUNCA retorna o CPF inteiro.
  */
 export function mascararCpf(cpf: string): string {
   const digitos = String(cpf || '').replace(/\D/g, '');
   if (digitos.length === 0) return '(sem cpf)';
-  if (digitos.length < 5) return '*'.repeat(digitos.length);
+  if (digitos.length < 6) return '*'.repeat(digitos.length);
   return `${digitos.slice(0, 3)}.***.***-${digitos.slice(-2)}`;
 }

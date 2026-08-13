@@ -50,6 +50,17 @@ function testeMascararCpf() {
     !cpfMascarado.includes('789'),
     `mascararCpf('123.456.789-09') NÃO deveria conter '789', recebido: '${cpfMascarado}'`,
   );
+  // Regressão: com exatamente 5 dígitos, prefixo(3)+sufixo(2) cobre o input inteiro —
+  // o formato pontilhado não pode ser usado aqui, senão revela 100% disfarçado de mascarado.
+  const cpfCurto = mascararCpf('12345');
+  checar(
+    cpfCurto === '*****',
+    `mascararCpf('12345') deveria retornar '*****' (totalmente mascarado), recebido: '${cpfCurto}'`,
+  );
+  checar(
+    !cpfCurto.includes('12345'),
+    `mascararCpf('12345') NÃO deveria conter o CPF completo, recebido: '${cpfCurto}'`,
+  );
 }
 
 function main() {
