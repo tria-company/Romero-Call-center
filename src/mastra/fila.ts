@@ -45,7 +45,19 @@ export interface DadosJobFalhaTerminal {
   deviceId?: string; // CR-01/DEVICE-03: capturado no enqueue (deviceIdPorNumero), imune ao TTL — permite ler/limpar a chave COMPOSTA (deviceId|telefone) tambem no caminho nao-atendido
 }
 
-export type NomeJob = 'record' | 'falha-terminal';
+/**
+ * Payload MINIMO do job de sync ClickUp (CACHE-03, Fase 08 Plano 03) —
+ * espelha o voto pos-ligacao confirmado no fim da chamada. So ids + a
+ * escolha em si: NUNCA telefone/nome/CPF (minimizacao LGPD do payload da
+ * fila e da DLQ, T-08-03-PII).
+ */
+export interface DadosJobSyncClickup {
+  taskId: string;
+  assigneeId: string;
+  voto: { romero?: 'sim' | 'nao' | 'naoDeclarou'; andressa?: 'sim' | 'nao' | 'naoDeclarou' };
+}
+
+export type NomeJob = 'record' | 'falha-terminal' | 'sync-clickup';
 
 /** Nome da fila BullMQ (Redis key namespace) — padrao 'processamento-ligacao'. */
 export const NOME_FILA: string = FILA_NOME;
@@ -161,6 +173,37 @@ export async function enfileirarFalhaTerminal(
   } catch (e) {
     console.error(
       '[fila] falha ao enfileirar falha-terminal (degradando p/ inline):',
+      e instanceof Error ? e.message : String(e),
+    );
+    return { enfileirado: false };
+  }
+}
+
+/**
+ * Enfileira o job de sync ClickUp (CACHE-03, Fase 08 Plano 03) — espelha o
+ * voto pos-ligacao no ClickUp fora do caminho da requisicao. Mesmo molde de
+ * `enfileirarRecord`: fail-open p/ inline sem Redis ou em erro de enqueue em
+ * runtime (o caller grava sincrono, D-07/SC5). jobId = `sync:voto:{taskId}`
+ * (dedup idempotente — o ULTIMO voto enfileirado vence; um segundo enqueue
+ * do mesmo taskId antes do primeiro ser consumido substitui o job pendente
+ * em vez de empilhar). Reusa `opcoesJob()` (backoff exponencial + DLQ,
+ * D-08) e a MESMA fila `NOME_FILA` (Discretion D-07 — sem fila propria).
+ */
+export async function enfileirarSyncClickup(
+  dados: DadosJobSyncClickup,
+): Promise<{ enfileirado: boolean }> {
+  if (MODO !== 'bullmq') return { enfileirado: false };
+  try {
+    await garantirFila().add('sync-clickup', dados, {
+      ...opcoesJob(),
+      jobId: 'sync:voto:' + dados.taskId,
+    });
+    return { enfileirado: true };
+  } catch (e) {
+    // Fail-open p/ inline: o caller (Plano 04) grava o voto sincrono no
+    // ClickUp em vez de esperar o worker (SC5).
+    console.error(
+      '[fila] falha ao enfileirar sync-clickup (degradando p/ inline):',
       e instanceof Error ? e.message : String(e),
     );
     return { enfileirado: false };

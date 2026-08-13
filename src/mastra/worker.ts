@@ -29,12 +29,15 @@ import {
   fecharFila,
   type DadosJobRecord,
   type DadosJobFalhaTerminal,
+  type DadosJobSyncClickup,
   type NomeJob,
 } from './fila.ts';
 
 import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts';
+import { processarSyncClickupJob } from './sync-clickup.ts';
 import { marcarEventoWebhook } from './supabase.ts';
 import { fecharEstadoWebhook } from './estado-webhook.ts';
+import { fecharRateLimiter } from './rate-limiter-clickup.ts';
 
 // Degradacao graciosa: sem REDIS_URL, fila.ts roda em modo inline (o
 // webhook processa a request sincrona, 06-03) — nao ha fila para este
@@ -56,6 +59,9 @@ const worker = new Worker(
         return;
       case 'falha-terminal':
         await processarFalhaTerminalJob(job.data as DadosJobFalhaTerminal);
+        return;
+      case 'sync-clickup':
+        await processarSyncClickupJob(job.data as DadosJobSyncClickup);
         return;
       default:
         // Nome de job desconhecido (schema futuro/engano de enqueue) — loga
@@ -92,20 +98,30 @@ worker.on('failed', async (job, err) => {
   // do BullMQ (DLQ inspecionavel, removeOnFail:false de opcoesJob()). Marca
   // o desfecho durvel do evento cru como 'erro' (log-e-segue) e dispara o
   // alerta. NUNCA telefone/CPF/payload — so ids e a classe do erro.
-  const dados = job.data as DadosJobRecord | DadosJobFalhaTerminal;
-  try {
-    await marcarEventoWebhook(dados.eventoDuravelId, 'erro', String(err?.message ?? err).slice(0, 500));
-  } catch (e) {
-    console.error(
-      '[worker] falha ao marcar evento durvel como erro apos DLQ:',
-      e instanceof Error ? e.message : String(e),
-    );
+  //
+  // job.data e tratado como Record<string,any> aqui (nao um union dos 3
+  // tipos de payload) porque o job de sync-clickup (CACHE-03) NAO tem
+  // `eventoDuravelId`/`whatsappCallId` (payload minimizado, so
+  // taskId/assigneeId/voto) — o guard condicional abaixo evita chamar
+  // marcarEventoWebhook com um campo inexistente.
+  const dados = job.data as Record<string, any>;
+  if (dados.eventoDuravelId) {
+    try {
+      await marcarEventoWebhook(dados.eventoDuravelId, 'erro', String(err?.message ?? err).slice(0, 500));
+    } catch (e) {
+      console.error(
+        '[worker] falha ao marcar evento durvel como erro apos DLQ:',
+        e instanceof Error ? e.message : String(e),
+      );
+    }
   }
 
   await alertarDLQ({
     job: job.name as NomeJob,
-    whatsappCallId: dados.whatsappCallId,
-    eventoDuravelId: dados.eventoDuravelId,
+    // O job de sync-clickup nao tem whatsappCallId — correlaciona pelo
+    // taskId da Ligacao no lugar (ambos identificam o "o que" falhou).
+    whatsappCallId: dados.whatsappCallId ?? dados.taskId ?? 'n/a',
+    eventoDuravelId: dados.eventoDuravelId ?? null,
     erro: err?.name || 'erro',
   });
 });
@@ -132,6 +148,13 @@ async function encerrar(sinal: NodeJS.Signals): Promise<void> {
   }
   await fecharFila();
   await fecharEstadoWebhook();
+  // INFRA-05: o worker abre o cliente Redis do rate limiter ao escrever no
+  // ClickUp (record/falha-terminal/sync-clickup saem pelo choke point
+  // rate-limitado do Plano 01) — fecha no shutdown gracioso junto com os
+  // demais clientes. O worker nunca le a fila do dia (o cache-aside do
+  // Plano 02 vive so no processo web) — esse outro cliente Redis jamais e
+  // aberto neste processo, entao nao ha o que fechar aqui alem do acima.
+  await fecharRateLimiter();
   process.exit(0);
 }
 
