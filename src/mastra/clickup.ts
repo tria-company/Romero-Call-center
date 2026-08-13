@@ -896,6 +896,26 @@ function lerAtendeu(task: TaskClickUp): boolean {
  * no TELEFONE. Ordena por data (INICIO, epoch ms) DESC — ausentes por último
  * — e limita a `CAP` itens. LGPD/WR-01: NUNCA loga telefone/CPF/transcrição.
  */
+/**
+ * Formata o epoch (ms, string) da Ligação para uma data legível em horário de
+ * Brasília ("DD/MM/AAAA HH:MM") — o dossiê injeta esse campo via JSON.stringify,
+ * então guardar o epoch cru fazia o LLM escrever timestamps numéricos ilegíveis
+ * na Seção 4. Epoch vazio/não-numérico vira '' (preserva o "ausente" que o sort
+ * e o dossiê já tratam). Puro: sem I/O, sem log (LGPD — não há PII aqui).
+ */
+function formatarDataLigacao(epochMs: string): string {
+  const n = Number(epochMs);
+  if (epochMs === '' || !Number.isFinite(n)) return '';
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(n));
+}
+
 export async function buscarLigacoesDoLead(
   leadTaskId: string,
   telefone: string,
@@ -941,14 +961,16 @@ export async function buscarLigacoesDoLead(
   }));
 
   // Ordena por data (INICIO, epoch ms) DESC — mais recente primeiro; ausentes
-  // (data vazia / não-numérica) por último.
+  // (data vazia / não-numérica) por último. O sort roda sobre o epoch CRU;
+  // só DEPOIS formatamos `data` para horário de Brasília (não antes, senão a
+  // ordenação por Number() quebraria).
   ligacoes.sort((a, b) => {
     const na = a.data !== '' && Number.isFinite(Number(a.data)) ? Number(a.data) : -Infinity;
     const nb = b.data !== '' && Number.isFinite(Number(b.data)) ? Number(b.data) : -Infinity;
     return nb - na;
   });
 
-  return ligacoes.slice(0, CAP);
+  return ligacoes.slice(0, CAP).map((l) => ({ ...l, data: formatarDataLigacao(l.data) }));
 }
 
 /**
