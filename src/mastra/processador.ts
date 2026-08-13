@@ -315,7 +315,7 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // /api/discador/ligando), 2) fallback persistido no ClickUp (Ligacao
   // aberta com o mesmo TELEFONE), 3) D-P3-03: nao casou nenhuma -> cria uma
   // Ligacao avulsa (nenhuma ligacao real fica sem registro).
-  let taskId = await lerTaskAtiva(telefone);
+  let taskId = await lerTaskAtiva(telefone, dados.deviceId);
   if (!taskId) {
     try {
       taskId = await buscarLigacaoAbertaPorTelefone(telefone);

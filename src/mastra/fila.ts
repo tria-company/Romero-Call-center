@@ -34,6 +34,7 @@ export interface DadosJobRecord {
   recordUrl: string;
   payload: Record<string, any>;
   eventoDuravelId: string | null; // linha webhook_eventos, p/ o job fechar o desfecho
+  deviceId?: string; // DEVICE-03/DD-07-15: capturado no enqueue (lerCorrelacaoDevice), imune ao TTL entre CALL e RECORD
 }
 
 export interface DadosJobFalhaTerminal {

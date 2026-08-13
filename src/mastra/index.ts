@@ -50,9 +50,14 @@ import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
 // alternavel por REDIS_URL sem reescrever o handler abaixo. Resolucao de
 // task ativa e dedup de RECORD/falha terminal migraram pra processador.ts
 // (Fase 06 Plano 02/03).
+// guardarCorrelacaoDevice/lerCorrelacaoDevice (DEVICE-03, Fase 07 Plano 03):
+// correlacao SEPARADA call->deviceId (DD-07-11) — desambigua a task ativa
+// quando 2 devices ligam pro mesmo telefone ao mesmo tempo.
 import {
   guardarCorrelacao,
   lerCorrelacao,
+  guardarCorrelacaoDevice,
+  lerCorrelacaoDevice,
   guardarTaskAtiva,
 } from './estado-webhook.ts';
 // Fila assincrona de processamento (Fase 06 Plano 01/03): os branches RECORD
@@ -69,7 +74,10 @@ import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts'
 // alocarDevice/liberarDevice (Fase 07 Plano 02): lease/release do device de
 // POOL por chamada — cada atendente em modo:'pool' aloca um device LIVRE no
 // inicio da chamada e devolve no fim (DEVICE-02).
-import { resolverConfigDoUsuario, alocarDevice, liberarDevice } from './dispositivos.ts';
+// deviceIdPorNumero (Fase 07 Plano 03): mapa reverso numero->deviceId, usado
+// pelo branch CALL do webhook pra derivar o deviceId de origem da chamada
+// (payload.caller, DD-07-10).
+import { resolverConfigDoUsuario, alocarDevice, liberarDevice, deviceIdPorNumero } from './dispositivos.ts';
 
 /**
  * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
@@ -248,9 +256,14 @@ export const mastra = new Mastra({
           }
           const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
           const taskId = String(body.taskId || '');
+          // DEVICE-03/DD-07-14: o cliente informa o proprio deviceId corrente
+          // (dedicado via /config, pool via lease do 07-02) — chaveia so a
+          // PROPRIA task ativa do operador (T-07-10, isolamento ja garantido
+          // por assigneeDoOperador acima). Ausente -> telefone-so (DD-07-13).
+          const deviceId = String(body.deviceId || '') || undefined;
           try {
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
-            if (telefone) await guardarTaskAtiva(telefone, taskId);
+            if (telefone) await guardarTaskAtiva(telefone, taskId, deviceId);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao registrar ligando:', e);
@@ -429,6 +442,16 @@ export const mastra = new Mastra({
               if (whatsappCallId && telefone) {
                 await guardarCorrelacao(whatsappCallId, telefone);
               }
+              // DEVICE-03/DD-07-10: na saida, payload.caller e o numero do
+              // PROPRIO device (receiver e o lead) — deriva o deviceId por
+              // lookup estrito no inventario (deviceIdPorNumero). Caller
+              // forjado/desconhecido -> deviceId null -> degrada telefone-so
+              // (DD-07-13, T-07-07). WR-01/LGPD: nunca loga numero/telefone,
+              // so callId/deviceId.
+              const deviceId = deviceIdPorNumero(String(payload.caller || '').replace(/[^\d]/g, ''));
+              if (whatsappCallId && deviceId) {
+                await guardarCorrelacaoDevice(whatsappCallId, deviceId);
+              }
               // CR-01 (gap-closure 03-06): so entra aqui quando o `status` do
               // evento e uma falha terminal CONFIRMADA (STATUS_NAO_ATENDIDA
               // conhecido, via ehStatusFalhaTerminal) — status de transicao
@@ -499,7 +522,12 @@ export const mastra = new Mastra({
               // OU se o enqueue falhar em runtime, processa INLINE aqui mesmo,
               // chamando a MESMA funcao que o worker chamaria — degradacao
               // graciosa, comportamento identico ao de hoje sem Redis.
-              const dados: DadosJobRecord = { whatsappCallId, telefone, recordUrl, payload, eventoDuravelId };
+              // DEVICE-03/DD-07-15: le a correlacao de device capturada no
+              // branch CALL e injeta no job — imune ao TTL entre CALL e
+              // RECORD (mesmo racional do telefone). null quando o device
+              // nao foi derivavel (degrada telefone-so, DD-07-13).
+              const deviceId = (await lerCorrelacaoDevice(whatsappCallId)) || undefined;
+              const dados: DadosJobRecord = { whatsappCallId, telefone, recordUrl, payload, eventoDuravelId, deviceId };
               const { enfileirado } = await enfileirarRecord(dados);
               if (enfileirado) {
                 return c.json({ status: 'enfileirado' });

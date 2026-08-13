@@ -20,11 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v11 -> discador-v12): invalida o shell antigo nos
-// dispositivos já instalados como PWA após o pool de devices com
-// lease/release (DEVICE-02, Fase 07 Plano 02 — app.js mudou). Mantém em
-// sincronia com web/sw.js.
-export const DISCADOR_SW_JS = `const CACHE='discador-v12';
+// CACHE bump (discador-v12 -> discador-v13): invalida o shell antigo nos
+// dispositivos já instalados como PWA após o deviceId no /ligando (DEVICE-03,
+// Fase 07 Plano 03 — app.js mudou). Mantém em sincronia com web/sw.js.
+export const DISCADOR_SW_JS = `const CACHE='discador-v13';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -210,8 +209,10 @@ export const DISCADOR_APP_JS = `(function(){
   var foiAtendida=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
   // Multi-device pool (DEVICE-02): deviceModo aprendido uma vez via /config
   // ('dedicado'|'pool'|'global'); leaseDeviceId guarda o device alocado na
-  // chamada corrente (so em modo pool) pra devolver ao fim.
-  var deviceModo=null, leaseDeviceId=null;
+  // chamada corrente (so em modo pool) pra devolver ao fim. dedicadoDeviceId
+  // (DEVICE-03) guarda o deviceId de /config quando modo='dedicado' — os
+  // dois alimentam deviceIdCorrente() pro /ligando desambiguar a task ativa.
+  var deviceModo=null, leaseDeviceId=null, dedicadoDeviceId=null;
   function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
@@ -330,19 +331,24 @@ export const DISCADOR_APP_JS = `(function(){
       return api('/api/discador/config').then(function(res){return res.json();}).then(function(cfg){
         deviceModo=cfg.modo;
         if(deviceModo==='pool'){return alocarDeviceELigar();}
+        if(deviceModo==='dedicado'){dedicadoDeviceId=cfg.deviceId||null;}
         wavoipToken=cfg.wavoipToken;if(!wavoipToken){throw new Error('sem token wavoip');}
         return instanciarWavoip(wavoipToken).then(function(w){wavoip=w;return wavoip;});
       });
     }
     return alocarDeviceELigar();
   }
+  // DEVICE-03: deviceId corrente pro /ligando desambiguar a task ativa —
+  // dedicado usa o deviceId aprendido de /config, pool usa o lease da
+  // chamada corrente, global nao tem device individual (''; degrada
+  // telefone-so, DD-07-13).
+  function deviceIdCorrente(){
+    if(deviceModo==='dedicado'){return dedicadoDeviceId||'';}
+    if(deviceModo==='pool'){return leaseDeviceId||'';}
+    return '';
+  }
   function iniciarLigacao(lead){
     openCall(lead,'Pedindo microfone...');
-    // D-P3-01: reporta a task ativa ao backend (grava INICIO+OPERADOR e move
-    // pra "em processamento" — D-P3-02/07) best-effort — nunca bloqueia a
-    // discagem se o backend falhar (mesmo tom de degradacao graciosa do
-    // resto do app).
-    apiPost('/api/discador/ligando',{taskId:lead.taskId}).catch(function(){});
     // iOS: o prompt de microfone SO aparece se getUserMedia rodar DENTRO do
     // gesto do toque, antes de qualquer await. Pedimos aqui pra conceder a
     // permissao; o SDK depois adquire o proprio stream (sem novo prompt).
@@ -354,6 +360,13 @@ export const DISCADOR_APP_JS = `(function(){
       setCallStatus('Conectando...');
       return garantirWavoip();
     }).then(function(w){
+      // D-P3-01/DEVICE-03: reporta a task ativa ao backend (grava
+      // INICIO+OPERADOR e move pra "em processamento" — D-P3-02/07) DEPOIS
+      // de garantirWavoip resolver, pra incluir o deviceId corrente (dedicado
+      // ou pool ja alocado nesta chamada) — sem isso o pool nunca teria
+      // deviceId conhecido a tempo (lease so acontece dentro de
+      // garantirWavoip). Best-effort (.catch) — nunca bloqueia a discagem.
+      apiPost('/api/discador/ligando',{taskId:lead.taskId,deviceId:deviceIdCorrente()}).catch(function(){});
       return w.startCall({ to: lead.telefone });
     }).then(function(r){
       if(r && r.err){ setCallStatus('Erro: '+((r.err&&r.err.message)?r.err.message:'falha ao iniciar')); endCallUI(); return; }
