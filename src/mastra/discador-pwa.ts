@@ -20,11 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v14 -> discador-v15): invalida o shell antigo nos
-// dispositivos já instalados como PWA após a tela de preview (CONTEXTO +
-// SCRIPT antes de ligar, quick-260813-m3v — index.html e app.js mudaram).
+// CACHE bump (discador-v15 -> discador-v16): fix de especificidade CSS do
+// botao "Ligar" da fila (cobria nome/telefone) — index.html mudou de novo.
 // Mantém em sincronia com web/sw.js.
-export const DISCADOR_SW_JS = `const CACHE='discador-v15';
+export const DISCADOR_SW_JS = `const CACHE='discador-v16';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
