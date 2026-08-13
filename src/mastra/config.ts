@@ -415,3 +415,31 @@ export const RL_CLICKUP_WAIT_MAX_MS = Number(process.env.RL_CLICKUP_WAIT_MAX_MS)
 // cache-fila.ts degrada para leitura DIRETO ao ClickUp (não para um cache in-process —
 // D-02).
 export const CACHE_FILA_TTL_MS = Number(process.env.CACHE_FILA_TTL_MS) || 45000;
+
+// ===== Escala — observabilidade/alertas (Fase 10, escala-150-atendentes, OBS-02) =====
+//
+// Thresholds da checagem periódica de métricas (src/mastra/metricas.ts) — profundidade
+// de fila, taxa de erro por etapa e 429s do ClickUp (D-06/D-07). Todas têm default
+// sensato — mesmo espírito de FILA_*/RL_CLICKUP_*, sem console.warn quando há default.
+// Destino do alerta continua sendo ALERT_WEBHOOK_URL (já definido acima, linha ~388).
+
+// Profundidade de fila (jobs pendentes no BullMQ) que dispara alerta (D-07).
+export const METRICAS_FILA_ALERTA = Number(process.env.METRICAS_FILA_ALERTA) || 50;
+
+// Taxa de erro por etapa (0-1) que dispara alerta — ponto de partida sugerido em UI-SPEC.md.
+export const METRICAS_ERRO_TAXA_ALERTA = Number(process.env.METRICAS_ERRO_TAXA_ALERTA) || 0.1;
+
+// Janela (ms) sobre a qual a taxa de erro por etapa é calculada — 15 min.
+export const METRICAS_ERRO_JANELA_MS = Number(process.env.METRICAS_ERRO_JANELA_MS) || 900000;
+
+// Contagem de 429s reais do ClickUp que dispara alerta na janela abaixo.
+export const METRICAS_429_ALERTA = Number(process.env.METRICAS_429_ALERTA) || 5;
+
+// Janela (ms) sobre a qual a contagem de 429s é calculada — 5 min.
+export const METRICAS_429_JANELA_MS = Number(process.env.METRICAS_429_JANELA_MS) || 300000;
+
+// Período (ms) da checagem periódica de threshold (D-07) — 1 min.
+export const METRICAS_ALERTA_INTERVALO_MS = Number(process.env.METRICAS_ALERTA_INTERVALO_MS) || 60000;
+
+// Janela (ms) em que um operador (presença registrada) ainda conta como "online" — 2 min.
+export const METRICAS_PRESENCA_TTL_MS = Number(process.env.METRICAS_PRESENCA_TTL_MS) || 120000;
