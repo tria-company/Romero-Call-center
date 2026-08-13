@@ -58,6 +58,13 @@ import { ehStatusFalhaTerminal } from './analise';
 
 // Assets estaticos do PWA discador (HTML/JS/manifest/SW/icon).
 import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISCADOR_ICON_SVG } from './discador-pwa';
+// Painel operacional (Fase 10 Plano 05, OBS-01): HTML/JS estaticos, mesmo
+// padrao dos assets do discador acima.
+import { ADMIN_HTML, ADMIN_APP_JS } from './admin-painel';
+// Metricas operacionais (Fase 10 Plano 02, OBS-02/D-06): leitura agregada
+// (painel) + presenca de operador + contagem de erro por etapa (webhook).
+import { lerMetricas, registrarPresenca, registrarErroEtapa } from './metricas.ts';
+import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA } from './config';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
 import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
@@ -155,6 +162,22 @@ export const mastra = new Mastra({
         handler: (c) => new Response(DISCADOR_ICON_SVG, { headers: { 'Content-Type': 'image/svg+xml; charset=utf-8' } }),
       },
 
+      // ============ PAINEL OPERACIONAL (estatico) — Fase 10, OBS-01/D-01..D-04 ============
+      // Mesmo shape das rotas /discador acima: HTML/JS servidos como texto puro.
+      // O gate de sessao e client-side (reusa o token do discador, D-02) — a
+      // rota HTML em si nao precisa de verificarToken no servidor (T-10-05-I2,
+      // accept: o markup sozinho nao vaza dado, so /api/admin/metricas exige auth).
+      {
+        path: '/admin',
+        method: 'GET',
+        handler: (c) => new Response(ADMIN_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }),
+      },
+      {
+        path: '/admin/app.js',
+        method: 'GET',
+        handler: (c) => new Response(ADMIN_APP_JS, { headers: { 'Content-Type': 'text/javascript; charset=utf-8' } }),
+      },
+
       // ============ API DISCADOR ============
       {
         // Healthcheck HTTP raso (D-06, INFRA-03): confirma so que o processo
@@ -212,6 +235,8 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          // Fonte do KPI "atendentes online" (10-05, OBS-01) — nunca lanca.
+          registrarPresenca(sess.usuario);
           const assignee = assigneeDoOperador(sess.usuario);
           if (!assignee) {
             // Operador sem DISCADOR_ASSIGNEES configurado — distinto de fila
@@ -276,6 +301,8 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          // Fonte do KPI "atendentes online" (10-05, OBS-01) — nunca lanca.
+          registrarPresenca(sess.usuario);
           const assignee = assigneeDoOperador(sess.usuario);
           if (!assignee) {
             return c.json({ erro: 'Ligação não encontrada' }, 404);
@@ -469,6 +496,31 @@ export const mastra = new Mastra({
         },
       },
 
+      // ============ API ADMIN (painel operacional) — Fase 10, OBS-01/02/D-02 ============
+      {
+        // Mesmo shape de /api/discador/config: verificarToken -> 401 sem
+        // sessao valida. Per D-02, qualquer sessao valida do discador e
+        // autorizada (sem novo nivel de acesso gestor/atendente). Retorna so
+        // o MetricasSnapshot agregado (numeros) + os thresholds configurados
+        // (T-10-05-I1: NUNCA telefone/CPF/voto) — o front usa os thresholds
+        // pra decidir accent/destructive sem hardcode.
+        path: '/api/admin/metricas',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const m = await lerMetricas();
+          return c.json({
+            ...m,
+            thresholds: {
+              fila: METRICAS_FILA_ALERTA,
+              erroTaxa: METRICAS_ERRO_TAXA_ALERTA,
+              contagem429: METRICAS_429_ALERTA,
+            },
+          });
+        },
+      },
+
       // ============ WEBHOOK WAVOIP (transcricao + analise das calls) ============
       // Configurado no app Wavoip em Integrations > Webhook. Dois eventos:
       //   CALL   -> guarda whatsapp_call_id -> telefone (pro RECORD correlacionar);
@@ -636,6 +688,10 @@ export const mastra = new Mastra({
             return c.json({ status: 'ignorado', evento });
           } catch (erro) {
             console.error('[wavoip] Erro no webhook:', erro);
+            // Fecha a 4a etapa de D-06 (10-05): conta o erro da etapa
+            // 'webhook' pra taxaErroPorEtapa do painel/alertas. Nunca lanca —
+            // nao muda em nada o desfecho existente do catch.
+            registrarErroEtapa('webhook');
             try { await marcarEventoWebhook(eventoDuravelId, 'erro', String(erro)); }
             catch (e2) { console.error('[wavoip] falha ao marcar evento com erro:', e2); }
             return c.json({ status: 'erro', mensagem: String(erro) }, 500);
