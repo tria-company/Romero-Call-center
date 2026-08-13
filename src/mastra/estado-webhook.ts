@@ -32,9 +32,20 @@ const MODO: 'redis' | 'memoria' = REDIS_URL ? 'redis' : 'memoria';
 // ===== Backend MEMORIA — identico ao comportamento anterior a esta fase =====
 
 const correlacaoMem = new Map<string, { telefone: string; ts: number }>();
+const correlacaoDeviceMem = new Map<string, { deviceId: string; ts: number }>();
 const taskAtivaMem = new Map<string, { taskId: string; ts: number }>();
 const recordsMem = new Set<string>();
 const falhasMem = new Set<string>();
+
+/**
+ * Chave de task ativa (DD-07-12): composta (deviceId+telefone) quando o
+ * device e conhecido, telefone-so quando nao — degrada pro comportamento
+ * pre-DEVICE-03 sem `deviceId` (DD-07-13).
+ */
+function chaveTaskAtiva(telefone: string, deviceId?: string): string {
+  const t = chaveTelefone(telefone);
+  return deviceId ? `${deviceId}|${t}` : t;
+}
 
 function guardarCorrelacaoMem(callId: string, telefone: string): void {
   const agora = Date.now();
@@ -50,10 +61,29 @@ function lerCorrelacaoMem(callId: string): string | null {
   return correlacaoMem.get(callId)?.telefone ?? null;
 }
 
-function guardarTaskAtivaMem(telefone: string, taskId: string): void {
+/** DD-07-11: correlacao de device SEPARADA (call->deviceId) — mesmo padrao da correlacao de telefone, prefixo/container proprio. */
+function guardarCorrelacaoDeviceMem(callId: string, deviceId: string): void {
   const agora = Date.now();
-  const chave = chaveTelefone(telefone);
-  taskAtivaMem.set(chave, { taskId, ts: agora });
+  correlacaoDeviceMem.set(callId, { deviceId, ts: agora });
+  if (correlacaoDeviceMem.size > 2000) {
+    for (const [k, v] of correlacaoDeviceMem) {
+      if (agora - v.ts > CORRELACAO_TTL_MS) correlacaoDeviceMem.delete(k);
+    }
+  }
+}
+
+function lerCorrelacaoDeviceMem(callId: string): string | null {
+  return correlacaoDeviceMem.get(callId)?.deviceId ?? null;
+}
+
+/**
+ * DD-07-12: com deviceId, grava na chave composta E TAMBEM na chave
+ * telefone-so (fallback best-effort pra RECORDs que nao derivarem o device).
+ */
+function guardarTaskAtivaMem(telefone: string, taskId: string, deviceId?: string): void {
+  const agora = Date.now();
+  taskAtivaMem.set(chaveTaskAtiva(telefone, deviceId), { taskId, ts: agora });
+  if (deviceId) taskAtivaMem.set(chaveTelefone(telefone), { taskId, ts: agora });
   if (taskAtivaMem.size > 2000) {
     for (const [k, v] of taskAtivaMem) {
       if (agora - v.ts > CORRELACAO_TTL_MS) taskAtivaMem.delete(k);
@@ -61,11 +91,17 @@ function guardarTaskAtivaMem(telefone: string, taskId: string): void {
   }
 }
 
-function lerTaskAtivaMem(telefone: string): string | null {
+/** DD-07-12: com deviceId tenta a chave composta primeiro, cai na telefone-so se faltar. */
+function lerTaskAtivaMem(telefone: string, deviceId?: string): string | null {
+  if (deviceId) {
+    const composta = taskAtivaMem.get(chaveTaskAtiva(telefone, deviceId))?.taskId ?? null;
+    if (composta) return composta;
+  }
   return taskAtivaMem.get(chaveTelefone(telefone))?.taskId ?? null;
 }
 
-function limparTaskAtivaMem(telefone: string): void {
+function limparTaskAtivaMem(telefone: string, deviceId?: string): void {
+  if (deviceId) taskAtivaMem.delete(chaveTaskAtiva(telefone, deviceId));
   taskAtivaMem.delete(chaveTelefone(telefone));
 }
 
@@ -122,6 +158,7 @@ function garantirCliente(): Redis {
 }
 
 const PREFIXO_CORR = 'wh:corr:';
+const PREFIXO_DEV = 'wh:dev:';
 const PREFIXO_TASK = 'wh:task:';
 const PREFIXO_REC = 'wh:rec:';
 const PREFIXO_FALHA = 'wh:falha:';
@@ -143,16 +180,43 @@ async function lerCorrelacaoRedis(callId: string): Promise<string | null> {
   }
 }
 
-async function guardarTaskAtivaRedis(telefone: string, taskId: string): Promise<void> {
+/** DD-07-11: correlacao de device SEPARADA (call->deviceId), prefixo/TTL proprios — espelha guardarCorrelacaoRedis. */
+async function guardarCorrelacaoDeviceRedis(callId: string, deviceId: string): Promise<void> {
   try {
-    await garantirCliente().set(PREFIXO_TASK + chaveTelefone(telefone), taskId, 'PX', CORRELACAO_TTL_MS);
+    await garantirCliente().set(PREFIXO_DEV + callId, deviceId, 'PX', CORRELACAO_TTL_MS);
+  } catch (e) {
+    console.error('[estado-webhook] falha ao guardar correlacao de device (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function lerCorrelacaoDeviceRedis(callId: string): Promise<string | null> {
+  try {
+    return await garantirCliente().get(PREFIXO_DEV + callId);
+  } catch (e) {
+    console.error('[estado-webhook] falha ao ler correlacao de device (degradando p/ miss):', e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
+
+/** DD-07-12: com deviceId, grava na chave composta E TAMBEM na chave telefone-so (fallback best-effort). */
+async function guardarTaskAtivaRedis(telefone: string, taskId: string, deviceId?: string): Promise<void> {
+  try {
+    await garantirCliente().set(PREFIXO_TASK + chaveTaskAtiva(telefone, deviceId), taskId, 'PX', CORRELACAO_TTL_MS);
+    if (deviceId) {
+      await garantirCliente().set(PREFIXO_TASK + chaveTelefone(telefone), taskId, 'PX', CORRELACAO_TTL_MS);
+    }
   } catch (e) {
     console.error('[estado-webhook] falha ao guardar task ativa (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
   }
 }
 
-async function lerTaskAtivaRedis(telefone: string): Promise<string | null> {
+/** DD-07-12: com deviceId tenta a chave composta primeiro, cai na telefone-so se faltar. */
+async function lerTaskAtivaRedis(telefone: string, deviceId?: string): Promise<string | null> {
   try {
+    if (deviceId) {
+      const composta = await garantirCliente().get(PREFIXO_TASK + chaveTaskAtiva(telefone, deviceId));
+      if (composta) return composta;
+    }
     return await garantirCliente().get(PREFIXO_TASK + chaveTelefone(telefone));
   } catch (e) {
     console.error('[estado-webhook] falha ao ler task ativa (degradando p/ miss):', e instanceof Error ? e.message : String(e));
@@ -160,8 +224,9 @@ async function lerTaskAtivaRedis(telefone: string): Promise<string | null> {
   }
 }
 
-async function limparTaskAtivaRedis(telefone: string): Promise<void> {
+async function limparTaskAtivaRedis(telefone: string, deviceId?: string): Promise<void> {
   try {
+    if (deviceId) await garantirCliente().del(PREFIXO_TASK + chaveTaskAtiva(telefone, deviceId));
     await garantirCliente().del(PREFIXO_TASK + chaveTelefone(telefone));
   } catch (e) {
     console.error('[estado-webhook] falha ao limpar task ativa (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
@@ -235,16 +300,32 @@ export async function lerCorrelacao(callId: string): Promise<string | null> {
   return MODO === 'redis' ? lerCorrelacaoRedis(callId) : lerCorrelacaoMem(callId);
 }
 
-export async function guardarTaskAtiva(telefone: string, taskId: string): Promise<void> {
-  return MODO === 'redis' ? guardarTaskAtivaRedis(telefone, taskId) : guardarTaskAtivaMem(telefone, taskId);
+/** DEVICE-03/DD-07-11: correlacao SEPARADA call->deviceId — lerCorrelacao(callId)->telefone fica intacta. */
+export async function guardarCorrelacaoDevice(callId: string, deviceId: string): Promise<void> {
+  return MODO === 'redis' ? guardarCorrelacaoDeviceRedis(callId, deviceId) : guardarCorrelacaoDeviceMem(callId, deviceId);
 }
 
-export async function lerTaskAtiva(telefone: string): Promise<string | null> {
-  return MODO === 'redis' ? lerTaskAtivaRedis(telefone) : lerTaskAtivaMem(telefone);
+export async function lerCorrelacaoDevice(callId: string): Promise<string | null> {
+  return MODO === 'redis' ? lerCorrelacaoDeviceRedis(callId) : lerCorrelacaoDeviceMem(callId);
 }
 
-export async function limparTaskAtiva(telefone: string): Promise<void> {
-  return MODO === 'redis' ? limparTaskAtivaRedis(telefone) : limparTaskAtivaMem(telefone);
+/**
+ * DEVICE-03/DD-07-12: assinatura retrocompativel — 3o argumento `deviceId`
+ * opcional. Sem deviceId, comportamento identico ao de antes desta fase
+ * (chaveia so por telefone). Com deviceId, desambigua 2 devices ligando pro
+ * MESMO telefone ao mesmo tempo (grava tambem na chave telefone-so, fallback
+ * best-effort).
+ */
+export async function guardarTaskAtiva(telefone: string, taskId: string, deviceId?: string): Promise<void> {
+  return MODO === 'redis' ? guardarTaskAtivaRedis(telefone, taskId, deviceId) : guardarTaskAtivaMem(telefone, taskId, deviceId);
+}
+
+export async function lerTaskAtiva(telefone: string, deviceId?: string): Promise<string | null> {
+  return MODO === 'redis' ? lerTaskAtivaRedis(telefone, deviceId) : lerTaskAtivaMem(telefone, deviceId);
+}
+
+export async function limparTaskAtiva(telefone: string, deviceId?: string): Promise<void> {
+  return MODO === 'redis' ? limparTaskAtivaRedis(telefone, deviceId) : limparTaskAtivaMem(telefone, deviceId);
 }
 
 export async function marcarRecordProcessado(callId: string): Promise<boolean> {

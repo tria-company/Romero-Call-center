@@ -18,6 +18,8 @@
 import {
   guardarCorrelacao,
   lerCorrelacao,
+  guardarCorrelacaoDevice,
+  lerCorrelacaoDevice,
   guardarTaskAtiva,
   lerTaskAtiva,
   limparTaskAtiva,
@@ -113,10 +115,53 @@ async function testeIsolamentoEntreConteineres() {
   );
 }
 
+// DEVICE-03: correlação de device (call->deviceId) — separada da correlação
+// de telefone (guardarCorrelacao/lerCorrelacao, testada acima).
+async function testeCorrelacaoDevice() {
+  await guardarCorrelacaoDevice('call1', 'dev1');
+  checar(
+    (await lerCorrelacaoDevice('call1')) === 'dev1',
+    'lerCorrelacaoDevice deveria devolver o deviceId guardado pra call1',
+  );
+  checar(
+    (await lerCorrelacaoDevice('nao-existe')) === null,
+    'lerCorrelacaoDevice de um callId inexistente deveria ser null (miss)',
+  );
+}
+
+// DEVICE-03/DD-07-12: o núcleo da desambiguação — 2 devices ligando pro
+// MESMO telefone ao mesmo tempo não podem embaralhar a task ativa um do
+// outro. lerTaskAtiva SEM deviceId ainda resolve (fallback telefone-só,
+// best-effort, DD-07-13).
+async function testeDesambiguacaoPorDevice() {
+  const tel = '5511988887777';
+  await guardarTaskAtiva(tel, 'taskA', 'dev1');
+  await guardarTaskAtiva(tel, 'taskB', 'dev2');
+  checar(
+    (await lerTaskAtiva(tel, 'dev1')) === 'taskA',
+    'lerTaskAtiva(tel, dev1) deveria resolver taskA — não deveria embaralhar com dev2',
+  );
+  checar(
+    (await lerTaskAtiva(tel, 'dev2')) === 'taskB',
+    'lerTaskAtiva(tel, dev2) deveria resolver taskB — não deveria embaralhar com dev1',
+  );
+  checar(
+    (await lerTaskAtiva(tel)) !== null,
+    'lerTaskAtiva(tel) SEM deviceId ainda deveria resolver (cai na chave telefone-só, best-effort)',
+  );
+  await limparTaskAtiva(tel, 'dev2');
+  checar(
+    (await lerTaskAtiva(tel, 'dev2')) === null,
+    'lerTaskAtiva(tel, dev2) depois de limparTaskAtiva(tel, dev2) deveria ser null (chave composta limpa)',
+  );
+}
+
 async function main() {
   testeModo();
   await testeCorrelacao();
+  await testeCorrelacaoDevice();
   await testeTaskAtivaComNormalizacao();
+  await testeDesambiguacaoPorDevice();
   await testeDedupRecord();
   await testeDedupFalhaTerminal();
   await testeIsolamentoEntreConteineres();
