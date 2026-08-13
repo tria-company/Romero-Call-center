@@ -502,10 +502,15 @@ export async function lerLigacao(taskId: string, assigneeIdEsperado: string): Pr
 
 /**
  * Registra o início da ligação ao tocar "Ligar" no discador (OPER-01/02,
- * D-P3-01/02/07): grava INICIO + OPERADOR na task IMEDIATAMENTE (sobrevive a
- * restart — a correlação call↔task fica persistida no próprio ClickUp) e
- * move o status nativo para `OPER_STATUS_EM_PROCESSAMENTO`, tirando a task da
- * fila (`buscarFilaLigacoes`) enquanto ela é processada.
+ * D-P3-01/02): grava INICIO + OPERADOR na task IMEDIATAMENTE (sobrevive a
+ * restart — a correlação call↔task fica persistida no próprio ClickUp).
+ *
+ * TELEMETRIA PURA (quick-260813-lf7 / RETENTION-BY-OUTCOME): NÃO muda mais o
+ * status nem tira a task da fila. A saída da fila passou a ser decidida pelo
+ * DESFECHO da chamada (`registrarDesfecho`), não pelo clique em "Ligar" —
+ * uma chamada não atendida / desligada antes de atender deixa a task na fila
+ * (reaparece no próximo poll). A transição para `OPER_STATUS_EM_PROCESSAMENTO`
+ * migrou para `registrarDesfecho('atendida')`.
  *
  * `assigneeIdEsperado` é OBRIGATÓRIO: mesma validação CR-01 de `lerLigacao`
  * (task tem que ser da Lista 02 e pertencer ao operador logado) — sem isso,
@@ -533,16 +538,55 @@ export async function iniciarLigacao(
     throw new Error(`[clickup] iniciarLigacao: task ${taskId} nao pertence ao operador`);
   }
   // D-P3-02: grava INICIO + OPERADOR imediatamente (custom fields, D-07 — por
-  // field_id). Falha de infra LANÇA (WR-03) — o caller decide o 502.
+  // field_id). Falha de infra LANÇA (WR-03) — o caller decide o 502. A task
+  // PERMANECE na fila; a saída é decidida pelo desfecho (registrarDesfecho).
   await setCustomField(taskId, CAMPOS_LIGACOES.INICIO, Date.now());
   await setCustomField(taskId, CAMPOS_LIGACOES.OPERADOR, operadorLabel);
-  // D-P3-07: move pro status intermediário nativo, se configurado (ver
-  // OPER_STATUS_EM_PROCESSAMENTO em config.ts — vazio até a descoberta rodar).
-  if (OPER_STATUS_EM_PROCESSAMENTO) {
-    await atualizarTask(taskId, { status: OPER_STATUS_EM_PROCESSAMENTO });
-  }
   const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
   return { telefone };
+}
+
+/** Desfecho terminal de uma chamada que tira a Ligação da fila (RETENTION-BY-OUTCOME). */
+export type ResultadoDesfecho = 'atendida' | 'recusou';
+
+/**
+ * Registra o DESFECHO terminal de uma chamada (quick-260813-lf7 /
+ * RETENTION-BY-OUTCOME) — é o ÚNICO ponto que tira a Ligação da fila, migrado
+ * do clique em "Ligar" (`iniciarLigacao`) para o resultado da chamada:
+ *
+ * - `'atendida'` (peerAccept): move a task para `OPER_STATUS_EM_PROCESSAMENTO`
+ *   (exatamente a transição que saiu de `iniciarLigacao` — o pipeline de
+ *   gravação/análise depende dela para não re-entregar a task). Degradação
+ *   graciosa se o status não estiver configurado (mesmo comportamento de hoje).
+ * - `'recusou'` (peerReject): grava `ATENDEU=false` + `MOTIVO_FALHA` (campos
+ *   existentes, D-07 por field_id) e FECHA a task via `fecharLigacao`
+ *   (`OPER_STATUS_FECHADO='complete'`), removendo-a da fila
+ *   (`includeClosed:false`). Fecha direto — e NÃO reusa em_processamento —
+ *   porque uma recusa não tem gravação a analisar: em_processamento criaria um
+ *   zumbi preso em limbo (nada avançaria a task pra 'complete'), poluindo
+ *   métricas/fila. Fechar em 'complete' usa o mesmo mecanismo já provado pelo
+ *   pipeline das atendidas.
+ *
+ * `assigneeIdEsperado` é OBRIGATÓRIO — `validarLigacaoDoOperador` roda PRIMEIRO
+ * (CR-01/IDOR, mesma garantia de /ligando e /voto): o `taskId` do body nunca
+ * pode desfechar a Ligação de outro operador. Erros de infra/HTTP ou de
+ * autorização LANÇAM (WR-03) — nunca mascarados como sucesso.
+ */
+export async function registrarDesfecho(
+  taskId: string,
+  assigneeIdEsperado: string,
+  resultado: ResultadoDesfecho,
+): Promise<void> {
+  await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  if (resultado === 'atendida') {
+    if (OPER_STATUS_EM_PROCESSAMENTO) {
+      await atualizarTask(taskId, { status: OPER_STATUS_EM_PROCESSAMENTO });
+    }
+    return;
+  }
+  // resultado === 'recusou'
+  await gravarMetadadosLigacao(taskId, { atendeu: false, motivoFalha: 'Recusada pelo lead' });
+  await fecharLigacao(taskId);
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   buscarFilaLigacoes,
   lerLigacao,
   iniciarLigacao,
+  registrarDesfecho,
   lerStatusVotoLead,
   validarLigacaoDoOperador,
 } from './clickup';
@@ -317,15 +318,13 @@ export const mastra = new Mastra({
           try {
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
             if (telefone) await guardarTaskAtiva(telefone, taskId, deviceId);
-            // CACHE-04 (Plano 04): iniciarLigacao ja moveu a task pra "em
-            // processamento" no ClickUp de forma SINCRONA — so precisa
-            // espelhar esse efeito no cache da fila DO OPERADOR (D-04).
-            // Remove a task especifica + invalida a chave inteira
-            // (belt-and-suspenders D-03); ambas no-op sem Redis (SC5) e
-            // nunca lancam — evento de INICIO DE CHAMADA, distinto do warm
-            // do resultado no /voto (D-07b, Task 2).
-            await removerDaFilaCache(assignee, taskId);
-            await invalidarFilaCache(assignee);
+            // quick-260813-lf7 (RETENTION-BY-OUTCOME): /ligando virou TELEMETRIA
+            // PURA (INICIO+OPERADOR+correlacao call<->task). NAO despeja mais o
+            // cache da fila — a task FICA na fila ao clicar "Ligar"; despejar o
+            // cache aqui so causaria um refetch inutil que retornaria a MESMA
+            // task. A eviction (removerDaFilaCache/invalidarFilaCache) migrou
+            // pro POST /desfecho, junto com a transicao de status — a fila so
+            // muda no RESULTADO da chamada (atendida/recusou), nao no clique.
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao registrar ligando:', e);
@@ -340,6 +339,54 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao iniciar ligação' }, 502);
+          }
+        },
+      },
+      {
+        // Desfecho terminal da chamada (quick-260813-lf7 / RETENTION-BY-OUTCOME)
+        // — o UNICO ponto que tira a Ligacao da fila, migrado do /ligando. Body:
+        // { taskId, resultado } com resultado 'atendida'|'recusou' (whitelist
+        // estrita — T-lf7-02). Mesmo isolamento por operador de /ligando (CR-01/
+        // T-lf7-01): assignee vem SEMPRE de sess.usuario, nunca do body; um
+        // taskId arbitrario nao pode desfechar a Ligacao de outro operador.
+        // Nao-atendida / hangup antes de atender NAO chamam este endpoint — a
+        // task fica na fila (status inalterado), reaparecendo no proximo poll.
+        path: '/api/discador/desfecho',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          // Fonte do KPI "atendentes online" (10-05, OBS-01) — nunca lanca.
+          registrarPresenca(sess.usuario);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const taskId = String(body.taskId || '');
+          const resultado = body.resultado;
+          if (resultado !== 'atendida' && resultado !== 'recusou') {
+            return c.json({ erro: 'resultado inválido' }, 400);
+          }
+          try {
+            await registrarDesfecho(taskId, assignee, resultado);
+            // Espelha no cache do OPERADOR a saida da fila — a MESMA eviction
+            // que saiu do /ligando (D-04/D-03, belt-and-suspenders). Ambas
+            // no-op sem Redis (SC5) e nunca lancam — fica fora do caminho
+            // critico, nunca transforma um sucesso em erro.
+            await removerDaFilaCache(assignee, taskId);
+            await invalidarFilaCache(assignee);
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            // LGPD: nunca logar telefone/CPF/taskId em claro — so a mensagem
+            // generica de erro (mesmo padrao de /ligando).
+            console.error('[discador] erro ao registrar desfecho:', e);
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao registrar desfecho' }, 502);
           }
         },
       },
