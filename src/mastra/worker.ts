@@ -38,6 +38,7 @@ import { processarSyncClickupJob } from './sync-clickup.ts';
 import { marcarEventoWebhook } from './supabase.ts';
 import { fecharEstadoWebhook } from './estado-webhook.ts';
 import { fecharRateLimiter } from './rate-limiter-clickup.ts';
+import { iniciarChecagemAlertas, fecharAlertas } from './alertas.ts';
 
 // Degradacao graciosa: sem REDIS_URL, fila.ts roda em modo inline (o
 // webhook processa a request sincrona, 06-03) — nao ha fila para este
@@ -128,6 +129,11 @@ worker.on('failed', async (job, err) => {
 
 console.log(`[worker] consumindo a fila ${NOME_FILA} (concurrency=${FILA_CONCURRENCY})`);
 
+// D-07/OBS-02: checador periódico de threshold (fila/erro-por-etapa/429) só
+// no caminho modo bullmq — o early return `process.exit(0)` do modo inline
+// (linhas 46-51 acima) já impede que rode sem fila/Redis para monitorar.
+iniciarChecagemAlertas();
+
 // ===== Graceful shutdown (INFRA-05) =====
 //
 // SIGTERM (deploy/scale-down do swarm, dentro do stop_grace_period) ou
@@ -146,6 +152,7 @@ async function encerrar(sinal: NodeJS.Signals): Promise<void> {
   } catch (e) {
     console.error('[worker] falha ao drenar/fechar o worker:', e instanceof Error ? e.message : String(e));
   }
+  fecharAlertas();
   await fecharFila();
   await fecharEstadoWebhook();
   // INFRA-05: o worker abre o cliente Redis do rate limiter ao escrever no
