@@ -386,3 +386,21 @@ export const FILA_NOME = process.env.FILA_NOME || 'processamento-ligacao';
 // (`[ALERTA][DLQ]`), sem console.warn (mesmo espírito de ALERT_WEBHOOK_URL vazio
 // não ser um erro de configuração, e sim um degrau de observabilidade opcional).
 export const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || '';
+
+// ===== Escala — rate limiter global do ClickUp (Fase 8, escala-150-atendentes) =====
+//
+// Parâmetros do token bucket (src/mastra/rate-limiter-clickup.ts) na frente de TODAS
+// as chamadas de saída ao ClickUp (CACHE-02). Todas têm default sensato — mesmo
+// espírito de FILA_*, sem console.warn quando há default. Sem REDIS_URL, o bucket
+// degrada para modo local por processo (best-effort, ~mesmo teto — D-02).
+
+// Capacidade do balde (tokens/janela) — folga deliberada abaixo dos ~100 req/min
+// do ClickUp (D-05).
+export const RL_CLICKUP_MAX = Number(process.env.RL_CLICKUP_MAX) || 90;
+
+// Janela de recarga do balde, em ms.
+export const RL_CLICKUP_WINDOW_MS = Number(process.env.RL_CLICKUP_WINDOW_MS) || 60000;
+
+// Teto da espera limitada (bounded-wait) ao esvaziar o balde, em ms — nunca espera
+// além disso; ao esgotar, deixa passar (fail-open, D-06, nunca gera 429 pro chamador).
+export const RL_CLICKUP_WAIT_MAX_MS = Number(process.env.RL_CLICKUP_WAIT_MAX_MS) || 3000;
