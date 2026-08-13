@@ -175,40 +175,81 @@ function truncarCorpo(texto: string): string {
 
 /**
  * Fallback binario (D-03/D-05): baixa o audio da record_url e re-POSTa os
- * bytes COMPLETOS (ArrayBuffer) pro /v1/listen — Content-Length
- * deterministico, ao contrario do caminho url-mode que pode devolver 411 em
- * producao. Fail-open: retorna null em qualquer falha, nunca lanca.
+ * bytes pro /v1/listen — Content-Length deterministico, ao contrario do
+ * caminho url-mode que pode devolver 411 em producao. Fail-open: retorna
+ * null em qualquer falha, nunca lanca.
+ *
+ * Streaming (RESIL-05/D-07): quando o download devolve `Content-Length`,
+ * o upload faz PIPE do `ReadableStream` de download (`dl.body`) direto pro
+ * `body` do POST, repassando o MESMO `Content-Length` do header de download
+ * (nunca `bytes.length` de um buffer materializado) — preserva o
+ * determinismo que corrigiu o 411 sem carregar o audio inteiro (60-90 min)
+ * na RAM. `fetch`/undici no Node exige `duplex: 'half'` no RequestInit
+ * quando `body` e um ReadableStream; `fetchTimeout` (http.ts) ja faz spread
+ * de `options` em `fetch(url, { ...options, signal })`, entao `duplex`
+ * passa direto sem mudar a assinatura. Se `Content-Length` do download vier
+ * ausente (raro — resposta chunked sem tamanho conhecido), cai pro caminho
+ * antigo de buffer completo (`dl.arrayBuffer()`), sem `duplex` e sem
+ * `Content-Length` manual — preserva o fix do 411 nesse cenario. Erro no
+ * meio do pipe (branch de streaming) cancela `dl.body` antes de retornar
+ * null (T-09-06 — sem vazamento de stream/socket).
  */
 export async function transcreverBytes(
   recordUrl: string,
   params: URLSearchParams,
 ): Promise<string | null> {
   const host = hostSeguro(recordUrl);
+  // Hoistado ANTES do try do upload para ficar visivel no catch — permite
+  // cancelar o stream de download se o upload falhar no meio do pipe.
+  let streamPendente: ReadableStream | null = null;
   try {
     const dl = await fetchTimeout(recordUrl, { method: 'GET' }, TIMEOUT_TRANSCRICAO_MS);
     if (!dl.ok) {
       console.error(`[deepgram] fallback: download da record_url falhou (${dl.status}) host=${host}`);
       return null;
     }
-    // Corpo COMPLETO como bytes (nunca .body/stream) — buffer completo faz o
-    // undici mandar Content-Length deterministico no re-POST; e a raiz da
-    // correcao do 411.
-    const bytes = await dl.arrayBuffer();
     const contentType = dl.headers.get('content-type') || 'audio/mpeg';
+    const contentLength = dl.headers.get('content-length');
 
-    const res = await fetchTimeout(
-      `${DEEPGRAM_URL}?${params.toString()}`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Token ${DEEPGRAM_API_KEY}`,
-          'Content-Type': contentType,
-          'Accept': 'application/json',
+    let res: Response;
+    if (contentLength && dl.body) {
+      // Streaming: pipe direto do download pro upload, Content-Length
+      // repassado do header de download (determinismo — D-07).
+      streamPendente = dl.body;
+      res = await fetchTimeout(
+        `${DEEPGRAM_URL}?${params.toString()}`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+            'Content-Type': contentType,
+            'Accept': 'application/json',
+            'Content-Length': contentLength,
+          },
+          body: dl.body,
+          duplex: 'half',
+        } as RequestInit & { duplex: 'half' },
+        TIMEOUT_TRANSCRICAO_MS,
+      );
+      streamPendente = null; // stream consumido — nada a cancelar
+    } else {
+      // Fallback D-07: sem Content-Length conhecido, mantem o buffer
+      // completo (caminho original que corrigiu o 411).
+      const bytes = await dl.arrayBuffer();
+      res = await fetchTimeout(
+        `${DEEPGRAM_URL}?${params.toString()}`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+            'Content-Type': contentType,
+            'Accept': 'application/json',
+          },
+          body: bytes,
         },
-        body: bytes,
-      },
-      TIMEOUT_TRANSCRICAO_MS,
-    );
+        TIMEOUT_TRANSCRICAO_MS,
+      );
+    }
     if (!res.ok) {
       const corpo = truncarCorpo(await res.text());
       console.error(
@@ -221,6 +262,9 @@ export async function transcreverBytes(
     const t = parseTranscript(data);
     return t ? rotularPapeis(t) : null;
   } catch (e) {
+    if (streamPendente) {
+      await streamPendente.cancel().catch(() => {});
+    }
     console.error(`[deepgram] fallback binario erro (host=${host}):`, e);
     return null;
   }
