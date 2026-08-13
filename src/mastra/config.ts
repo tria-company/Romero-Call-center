@@ -404,3 +404,14 @@ export const RL_CLICKUP_WINDOW_MS = Number(process.env.RL_CLICKUP_WINDOW_MS) || 
 // Teto da espera limitada (bounded-wait) ao esvaziar o balde, em ms — nunca espera
 // além disso; ao esgotar, deixa passar (fail-open, D-06, nunca gera 429 pro chamador).
 export const RL_CLICKUP_WAIT_MAX_MS = Number(process.env.RL_CLICKUP_WAIT_MAX_MS) || 3000;
+
+// ===== Escala — cache-aside de leitura da fila/script (Fase 8, escala-150-atendentes) =====
+//
+// TTL (ms) do cache-aside Redis (src/mastra/cache-fila.ts) SOBRE o ClickUp para a fila
+// do dia + o script/detalhe da Ligação (CACHE-01). O ClickUp permanece a fonte da
+// verdade (D-01) — o Redis é só uma rede de segurança de leitura. 45s fica dentro da
+// janela 30-60s de D-03 (belt-and-suspenders com invalidação explícita na escrita).
+// Default sensato -> sem console.warn (mesmo espírito de RL_CLICKUP_*). Sem REDIS_URL,
+// cache-fila.ts degrada para leitura DIRETO ao ClickUp (não para um cache in-process —
+// D-02).
+export const CACHE_FILA_TTL_MS = Number(process.env.CACHE_FILA_TTL_MS) || 45000;
