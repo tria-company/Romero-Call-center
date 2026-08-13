@@ -1,10 +1,11 @@
 import { Mastra } from '@mastra/core/mastra';
 import { PinoLogger } from '@mastra/loggers';
 
-// Config: token do device Wavoip (SDK do navegador) + credenciais GHL +
-// token do webhook Wavoip (transcricao das calls).
+// Config: credenciais GHL + token do webhook Wavoip (transcricao das calls).
+// O token do device Wavoip (SDK do navegador) agora e resolvido por usuario
+// via dispositivos.ts (DEVICE-01, Fase 07 Plano 01) — nao mais um unico
+// WAVOIP_DEVICE_TOKEN global importado aqui.
 import {
-  WAVOIP_DEVICE_TOKEN,
   WAVOIP_WEBHOOK_TOKEN,
 } from './config';
 
@@ -62,6 +63,10 @@ import {
 import { enfileirarRecord, enfileirarFalhaTerminal, modoFila } from './fila.ts';
 import type { DadosJobRecord, DadosJobFalhaTerminal } from './fila.ts';
 import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts';
+// Multi-device Wavoip (Fase 07 Plano 01): resolve o token do device do
+// usuario autenticado (dedicado -> pool -> global) em vez do WAVOIP_DEVICE_TOKEN
+// unico para todos — destrava N chamadas simultaneas por numeros diferentes.
+import { resolverConfigDoUsuario } from './dispositivos.ts';
 
 /**
  * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
@@ -266,7 +271,8 @@ export const mastra = new Mastra({
         handler: (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
-          return c.json({ wavoipToken: WAVOIP_DEVICE_TOKEN });
+          const cfg = resolverConfigDoUsuario(sess.usuario);
+          return c.json(cfg);
         },
       },
       {

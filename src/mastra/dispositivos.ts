@@ -13,7 +13,7 @@
 // client-side por design (o SDK do navegador precisa dele), mas nunca em log
 // de servidor.
 
-import { WAVOIP_DEVICES, WAVOIP_USER_DEVICES, WAVOIP_DEVICE_TOKEN } from './config';
+import { WAVOIP_DEVICES, WAVOIP_USER_DEVICES, WAVOIP_DEVICE_TOKEN } from './config.ts';
 
 export type ModoDevice = 'dedicado' | 'pool' | 'global';
 
