@@ -1,0 +1,57 @@
+version: "3.7"
+services:
+
+## --------------------------- DISCADOR WAVOIP --------------------------- ##
+
+  discador:
+    image: discador-wavoip:latest ## Build local na VPS: docker build -t discador-wavoip:latest /opt/discador
+
+    networks:
+      - public_network ## Nome da rede interna
+
+    environment:
+      ## 📲 GoHighLevel — lista de leads qualificados (COMERCIAL USI)
+      ## PIT: Settings -> Integrations -> Private Integrations. Scope: opportunities.readonly
+      - GHL_PIT_TOKEN=${GHL_PIT_TOKEN}
+      - GHL_API_VERSION_V2=${GHL_API_VERSION_V2}
+      - GHL_LOCATION_ID=${GHL_LOCATION_ID}
+      - GHL_PIPELINE_ID=${GHL_PIPELINE_ID}
+
+      ## ☎️ Wavoip — token do device pro SDK do navegador (WebRTC)
+      - WAVOIP_DEVICE_TOKEN=${WAVOIP_DEVICE_TOKEN}
+
+      ## 🔐 Login do discador (closers)
+      ## DISCADOR_USERS: "user:sha256hex,..."  |  DISCADOR_SESSION_SECRET: segredo HMAC
+      - DISCADOR_USERS=${DISCADOR_USERS}
+      - DISCADOR_SESSION_SECRET=${DISCADOR_SESSION_SECRET}
+
+      ## 🏷️ Ambiente
+      - NODE_ENV=production
+      - TZ=America/Sao_Paulo
+
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.discador.rule=Host(`discador.${VPS_HOST_IP}.sslip.io`)
+        - traefik.http.routers.discador.entrypoints=websecure
+        - traefik.http.routers.discador.priority=1
+        - traefik.http.routers.discador.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.discador.service=discador
+        - traefik.http.services.discador.loadbalancer.server.port=4111
+        - traefik.http.services.discador.loadbalancer.passHostHeader=1
+
+## --------------------------- DISCADOR WAVOIP --------------------------- ##
+
+networks:
+  public_network: ## Nome da rede interna
+    external: true
+    name: public_network ## Nome da rede interna

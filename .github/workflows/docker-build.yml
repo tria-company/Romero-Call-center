@@ -2,18 +2,16 @@ name: Deploy na VPS (Docker Swarm)
 
 # Trigger: push pra main (auto-deploy) OU manual via Actions -> Run workflow.
 #
-# Pre-requisito: o primeiro deploy precisa ter sido feito manualmente
-# (ver docs/deploy-vps-ubuntu.md). Este workflow assume que ja existe:
-#   - /opt/sdr-auton (clone do repo)
-#   - ~/sdr-auton.yaml (com secrets reais editados)
-#   - stack 'sdr-auton' deployada pelo menos uma vez
+# Pre-requisito: o primeiro deploy precisa ter sido feito manualmente. Este
+# workflow assume que ja existe na VPS:
+#   - /opt/discador (clone do repo)
+#   - ~/discador.yaml (deploy/discador.swarm.yaml com os secrets reais editados)
+#   - stack 'discador' deployada pelo menos uma vez
 #
 # Secrets necessarios em Settings -> Secrets and variables -> Actions:
-#   - VPS_HOST: IP publico da VPS (84.46.244.167)
+#   - VPS_HOST: IP publico da VPS
 #   - VPS_USER: usuario SSH (ex: root)
 #   - VPS_SSH_KEY: chave SSH privada (conteudo do arquivo, geralmente ed25519)
-#
-# Setup completo: docs/auto-deploy-github-actions.md
 
 on:
   push:
@@ -32,21 +30,21 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -e
-            cd /opt/sdr-auton
-            # Stash mudanças locais (geralmente edicoes em deploy/sdr-auton.swarm.yaml
-            # com credenciais reais que substituem os placeholders ${VAR}).
-            # Sem isso, git pull --ff-only falha quando a VPS tem yaml editado.
-            # As envs em runtime ficam no docker service, nao dependem do yaml local.
+            cd /opt/discador
+            # Stash mudancas locais (ex.: deploy/discador.swarm.yaml com credenciais
+            # reais no lugar dos placeholders ${VAR}). Sem isso, git pull --ff-only
+            # falha quando a VPS tem yaml editado. As envs em runtime ficam no
+            # docker service, nao dependem do yaml local.
             git stash --include-untracked || true
             git pull --ff-only
-            docker build -t agent-sdr-auton:latest .
-            # stack deploy nao detecta mudanca quando so a imagem 'latest'
-            # tem novo conteudo (mesmo digest no spec). Por isso forcamos o
-            # service update -- assim a task e recriada com a imagem nova.
-            if docker service ls --filter name=sdr-auton_agent_sdr_auton --format '{{.Name}}' | grep -q sdr-auton_agent_sdr_auton; then
-              docker service update --force --image agent-sdr-auton:latest sdr-auton_agent_sdr_auton
+            docker build -t discador-wavoip:latest .
+            # stack deploy nao detecta mudanca quando so a imagem 'latest' tem
+            # novo conteudo (mesmo digest no spec). Por isso forcamos o service
+            # update -- assim a task e recriada com a imagem nova.
+            if docker service ls --filter name=discador_discador --format '{{.Name}}' | grep -q discador_discador; then
+              docker service update --force --image discador-wavoip:latest discador_discador
             else
-              docker stack deploy --resolve-image=never -c ~/sdr-auton.yaml sdr-auton
+              docker stack deploy --resolve-image=never -c ~/discador.yaml discador
             fi
             sleep 5
-            docker service ps sdr-auton_agent_sdr_auton --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -5
+            docker service ps discador_discador --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -5

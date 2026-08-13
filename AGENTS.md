@@ -4,26 +4,27 @@ You are a TypeScript developer experienced with the Mastra framework. You build 
 
 ## Project Overview
 
-This is a **Mastra** project written in TypeScript. Mastra is a framework for building AI-powered applications and agents with a modern TypeScript stack. The Node.js runtime is `>=22.13.0`.
+This is a **Mastra** project written in TypeScript. It serves the **Discador Wavoip** — a
+PWA that lists qualified GHL leads and dials them from the browser via the Wavoip SDK. Mastra
+is used only as the HTTP server (routes), not for AI agents. The Node.js runtime is `>=22.13.0`.
 
 ## Commands
 
 ```bash
-npm run dev # Start Mastra Studio at localhost:4111 (long-running, use a separate terminal)
+npm run dev # Start the server at localhost:4111 (long-running, use a separate terminal)
 npm run build # Build a production-ready server
 ```
 
 ## Project Structure
 
-| Folder                 | Description                                                                                                                              |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/mastra`           | Entry point for all Mastra-related code and configuration.                                                                               |
-| `src/mastra/agents`    | Define and configure your agents - their behavior, goals, and tools.                                                                     |
-| `src/mastra/workflows` | Define multi-step workflows that orchestrate agents and tools together.                                                                  |
-| `src/mastra/tools`     | Create reusable tools that your agents can call                                                                                          |
-| `src/mastra/mcp`       | (Optional) Implement custom MCP servers to share your tools with external agents                                                         |
-| `src/mastra/scorers`   | (Optional) Define scorers for evaluating agent performance over time                                                                     |
-| `src/mastra/public`    | (Optional) Contents are copied into the `.build/output` directory during the build process, making them available for serving at runtime |
+| File                          | Description                                                              |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `src/mastra/index.ts`         | Mastra server + discador routes (static PWA + API).                      |
+| `src/mastra/discador-pwa.ts`  | PWA frontend (HTML/JS/manifest/service worker/icon) as strings.         |
+| `src/mastra/discador-auth.ts` | Closer login + HMAC session token.                                       |
+| `src/mastra/ghl.ts`           | `buscarQualificados` — reads the qualified-leads list from GHL.          |
+| `src/mastra/config.ts`        | Central config (GHL + Wavoip token).                                     |
+| `src/mastra/http.ts`          | `fetchTimeout` (fetch with AbortController).                             |
 
 ### Top-level files
 

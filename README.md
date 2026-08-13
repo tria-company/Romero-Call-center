@@ -1,46 +1,45 @@
-# SDR Auton
+# Discador Wavoip — AUTON Health
 
-Agente de WhatsApp que qualifica alunos da base USI (profissionais de saude que ja
-compraram a pos de saude integrativa) via BANT×SPIN e agenda calls comerciais com um
-closer humano, movendo o card no pipeline COMERCIAL USI (GoHighLevel). E um **SDR**
-(qualifica + agenda, nao fecha venda). Stack: **Mastra + GoHighLevel (GHL) + Supabase +
-Azure OpenAI**.
+PWA de discagem para closers: lista os leads **QUALIFICADOS** do pipeline COMERCIAL USI
+(GoHighLevel) e liga para eles direto do navegador via **SDK Wavoip** (WebRTC). Não há
+telefonia no backend — a ligação acontece 100% no cliente.
 
-## Como comecar
+Stack: **Mastra** (só o servidor HTTP/rotas) + **GoHighLevel** (lista de leads) + **Wavoip** (ligação no navegador).
+
+## Como rodar
 
 ```shell
 npm install
-cp .env.example .env   # preencha as chaves
-npm run dev            # Mastra Studio em http://localhost:4111
+# configure as variáveis no .env (ver abaixo)
+npm run dev     # servidor em http://localhost:4111
 ```
 
-## Estrutura (resumo)
+Acesse o discador em **http://localhost:4111/discador** (login inicial: `admin` / `admin` — trocar em produção).
 
-| Pasta | Para que serve |
+## Variáveis de ambiente
+
+| Var | Para que serve |
 |---|---|
-| [docs/](docs/) | Docs vivos do SDR AUTON (CONTEXT.md, sql/auton_sdr/). Docs historicos do bot Closer original ficam num subdiretorio de arquivo dentro de `docs/` — ver README de origem la dentro para o nome exato e o escopo. |
-| [src/mastra/](src/mastra/) | Codigo do agente. Veja [src/mastra/CONTEXT.md](src/mastra/CONTEXT.md). |
-| [src/mastra/agents/](src/mastra/agents/) | `qualificador.ts` (avalia BANT via formulario) e `camila.ts` (SPIN + agendamento, runtime). |
-| [src/mastra/tools/](src/mastra/tools/) | Tools GHL (`read-lead-ficha`, `update-contact-field`, `move-pipeline-stage`, `create-calendar-event`, `create-task`, `log-note`, `read-conversation-history`, `send-whatsapp-message`) e `escalate-to-human`. |
+| `GHL_PIT_TOKEN` | Private Integration Token do GHL (scope `opportunities.readonly`) — usado para listar os qualificados. |
+| `GHL_LOCATION_ID` / `GHL_PIPELINE_ID` | Location e pipeline COMERCIAL USI (têm default no `config.ts`). |
+| `WAVOIP_DEVICE_TOKEN` | Token do device Wavoip — o SDK do navegador precisa dele para abrir a ligação. |
+| `DISCADOR_USERS` | Login dos closers: `user:sha256hex,...` (default seed `admin/admin`). |
+| `DISCADOR_SESSION_SECRET` | Segredo HMAC do token de sessão (trocar em produção). |
 
-A organizacao segue o padrao **CLAUDE.md (mapa) + CONTEXT.md (workspace)**. Comece pelo [CLAUDE.md](CLAUDE.md) para entender o roteamento.
+## Estrutura
+
+| Arquivo | Para que serve |
+|---|---|
+| [src/mastra/index.ts](src/mastra/index.ts) | Servidor Mastra + rotas do discador (PWA estático + API). |
+| [src/mastra/discador-pwa.ts](src/mastra/discador-pwa.ts) | Frontend do PWA (HTML/JS/manifest/service worker/ícone) como strings. |
+| [src/mastra/discador-auth.ts](src/mastra/discador-auth.ts) | Login por closer + token de sessão HMAC. |
+| [src/mastra/ghl.ts](src/mastra/ghl.ts) | `buscarQualificados` — leitura da lista de leads no GHL. |
+| [src/mastra/config.ts](src/mastra/config.ts) | Config central (GHL + token Wavoip). |
+| [src/mastra/http.ts](src/mastra/http.ts) | `fetchTimeout` (fetch com AbortController). |
 
 ## Endpoints
 
-- `POST /api/webhook/formulario` — recebe submissao do formulario 14q (dispara Qualificador).
-- `POST /api/webhook/gravacao` — recebe gravacao de call/ligacao concluida.
-- `POST /api/webhook/evolution` — recebe mensagens de WhatsApp (path legado mantido; origem hoje e workflow GHL, nao a Evolution API).
-- `POST /api/desbloquear` — reativa a IA depois que humano termina o atendimento. Body: `{ "telefone": "5511..." }`.
-- `GET /api/dashboard` — dashboard de metricas (Basic Auth).
-
-## Migrations
-
-Migrations vivas em [docs/sql/auton_sdr/](docs/sql/auton_sdr/) (tabelas com prefixo `auton_sdr_`, banco Supabase dedicado do SDR AUTON).
-
-## Historico
-
-Este projeto reaproveita a infraestrutura Mastra do bot Closer original (agente de WhatsApp
-vendedor de curso/infoproduto) — canal, memoria, buffer, follow-up e dashboard. Os docs de
-PRD/arquitetura daquela era ficam preservados como referencia num subdiretorio de arquivo
-dentro de `docs/` (ver README de origem la dentro para o nome exato e o escopo) e nao
-refletem o SDR AUTON atual.
+- `GET /discador` — o PWA (frontend).
+- `POST /api/discador/login` — login do closer. Body: `{ "usuario", "senha" }` → `{ token }`.
+- `GET /api/discador/qualificados` — lista paginada de leads qualificados (Bearer token).
+- `GET /api/discador/config` — devolve o `wavoipToken` para o SDK do navegador (Bearer token).

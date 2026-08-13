@@ -1,7 +1,7 @@
 services:
-  loovi-agents:
+  discador:
     build: .
-    container_name: loovi-agents
+    container_name: discador-wavoip
     restart: unless-stopped
     ports:
       - "4111:4111"
@@ -9,8 +9,3 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-    volumes:
-      - loovi-data:/app/data
-
-volumes:
-  loovi-data:
