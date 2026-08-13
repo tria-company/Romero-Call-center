@@ -35,17 +35,14 @@
 import {
   listarTasks,
   lerTask,
-  atualizarTask,
-  buscarLigacoesDoLead,
   CAMPOS_LEADS,
   CLICKUP_LIST_LEADS,
 } from '../src/mastra/clickup.ts';
-import { chamarLLM } from '../src/mastra/llm.ts';
 import { parseLeadDaTask } from '../src/mastra/lote.ts';
-import { montarPromptDossie } from '../src/mastra/dossie.ts';
-import { buscarMilitante, listarFollowUps, listarServicosPrestados } from '../src/mastra/supabase.ts';
-import { buscarContactIdPorTelefone, buscarConversasWhatsApp, buscarOportunidades } from '../src/mastra/ghl.ts';
-import { SUPABASE_COL_ID } from '../src/mastra/config.ts';
+// Fonte ÚNICA da geração do dossiê — a orquestração gather+build+write
+// (antes duplicada aqui em `montarDossieDoLead`) mora agora no módulo app
+// compartilhado, reusado também pelo processador (pós-ligação).
+import { regenerarDossieDoLead } from '../src/mastra/gerar-dossie.ts';
 import { mascararTelefone } from '../src/mastra/mascarar.ts';
 
 const DRY_RUN = process.argv.includes('--dry-run');
@@ -82,181 +79,10 @@ async function lerTodasAsTasks(listId, opts = {}) {
   return todas;
 }
 
-/**
- * Lê um custom field bruto de uma TaskClickUp por field-id (D-07) — usado só
- * para ler CPF/ID_SUPABASE/OBSERVACAO_CONSOLIDADA/ULTIMO_RESULTADO da própria
- * task do lead já carregada (histórico RomeroCall, seções 3/6 do dossiê —
- * D-P4-03). CPF NUNCA é logado por este runner — só usado como chave de
- * identidade para o lookup no Supabase (D-P4-08).
- */
-function valorCampoTask(task, fieldId) {
-  const campo = task?.custom_fields?.find((c) => c.id === fieldId);
-  const v = campo?.value;
-  return v === null || v === undefined ? '' : String(v);
-}
-
-/** `true` se o valor está ausente/vazio (mesmo racional de statusFonte em dossie.ts, sem importá-lo — só para o log de diagnóstico do dry-run). */
-function fonteVaziaOuAusente(valor) {
-  if (valor === null || valor === undefined) return true;
-  if (Array.isArray(valor)) return valor.length === 0;
-  if (typeof valor === 'string') return valor.trim() === '';
-  if (typeof valor === 'object') return Object.keys(valor).length === 0;
-  return false;
-}
-
-/** Lista os rótulos das seções do dossiê que ficaram degradadas (sem dado) — só para o log do --dry-run, nunca imprime CPF/PII. */
-function secoesDegradadas(fontes) {
-  const rotulos = [];
-  if (fonteVaziaOuAusente(fontes.ghlContato)) rotulos.push('contato GHL');
-  if (fonteVaziaOuAusente(fontes.supabaseMilitante)) rotulos.push('militante Supabase');
-  // Seção 4 (Histórico de chamados) combina oportunidades GHL + Ligações da
-  // Lista 02 (quick 260813-pfm) — só conta como degradada quando AMBAS estão
-  // vazias/ausentes.
-  if (fonteVaziaOuAusente(fontes.ghlOportunidades) && fonteVaziaOuAusente(fontes.ligacoesRomeroCall)) {
-    rotulos.push('histórico de chamados');
-  }
-  if (fonteVaziaOuAusente(fontes.ghlConversas)) rotulos.push('conversas GHL');
-  if (fonteVaziaOuAusente(fontes.supabaseFollowUps)) rotulos.push('follow-ups Supabase');
-  if (fonteVaziaOuAusente(fontes.servicosPrestados)) rotulos.push('serviços prestados');
-  if (fonteVaziaOuAusente(fontes.observacaoConsolidada) && fonteVaziaOuAusente(fontes.ultimoResultado)) {
-    rotulos.push('histórico RomeroCall');
-  }
-  return rotulos;
-}
-
 /** `true` se a descrição (não-vazia) já contém o marcador do dossiê (case-insensitive). */
 function jaTemDossie(descricao) {
   if (!descricao) return false;
   return descricao.toLowerCase().includes(MARCADOR_DOSSIE.toLowerCase());
-}
-
-/**
- * Reúne as fontes do dossiê de UM lead (GHL + Supabase + histórico
- * RomeroCall, D-P4-04), monta o dossiê via Agente Contexto
- * (`montarPromptDossie` + `chamarLLM`) e grava na descrição da task do lead
- * na Lista 01 (D-P4-01, sobrescreve SEMPRE — D-P4-05).
- *
- * Cada leitura Supabase (buscarMilitante/listarFollowUps — LANÇA, WR-03) é
- * isolada em try/catch local: on-throw, a seção correspondente vira `null`
- * (degradação explícita — D-P4-06), sem abortar a montagem do dossiê deste
- * lead. As leituras GHL de enriquecimento (buscarConversasWhatsApp/
- * buscarOportunidades) já degradam sozinhas (nunca lançam — ghl.ts).
- *
- * `ghlContato` (seção 1/Perfil) é montado a partir do próprio `lead` (nome/
- * telefone), que já reflete o GHL via ID_LEAD_GHL — este runner não chama um
- * endpoint dedicado de "contato" (não existe hoje em ghl.ts; fora do escopo).
- *
- * Em `--dry-run`, monta o dossiê em memória (loga tamanho + seções
- * degradadas) mas NÃO grava (`atualizarTask`).
- */
-async function montarDossieDoLead(lead, taskLead, identificador) {
-  const cpf = valorCampoTask(taskLead, CAMPOS_LEADS.CPF);
-  const idSupabase = valorCampoTask(taskLead, CAMPOS_LEADS.ID_SUPABASE);
-  const observacaoConsolidada = valorCampoTask(taskLead, CAMPOS_LEADS.OBSERVACAO_CONSOLIDADA);
-  const ultimoResultado = valorCampoTask(taskLead, CAMPOS_LEADS.ULTIMO_RESULTADO);
-
-  // GHL: resolve o contactId uma vez (D-P4-12); sem contactId, conversas/
-  // oportunidades ficam indisponíveis (null) — não há como tentar a leitura.
-  const contactId = await buscarContactIdPorTelefone(lead.telefone);
-  const ghlContato = lead.nome ? { nome: lead.nome, telefone: lead.telefone } : null;
-  let ghlConversas = null;
-  let ghlOportunidades = null;
-  if (contactId) {
-    const mensagens = await buscarConversasWhatsApp(contactId);
-    ghlConversas = mensagens.length > 0 ? { mensagens } : {};
-    ghlOportunidades = await buscarOportunidades(contactId);
-  }
-
-  // Supabase: LANÇA em falha de config/infra (WR-03) — converte o throw na
-  // degradação de seção que o dossiê exige (D-P4-06), sem abortar o lead.
-  const chaveSupabase = {
-    idSupabase: idSupabase || undefined,
-    cpf: cpf || undefined,
-    telefone: lead.telefone || undefined,
-  };
-
-  let supabaseMilitante = null;
-  try {
-    supabaseMilitante = await buscarMilitante(chaveSupabase);
-  } catch (e) {
-    console.warn(`  [aviso] militante Supabase indisponível para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // refMilitante (CR-02, 04-VERIFICATION.md): a FK correta pra filtrar a seção 5
-  // (follow-ups) é o id DO MILITANTE — nunca id/cpf/telefone do lead misturados.
-  // Fonte primária: a linha real retornada por buscarMilitante (SUPABASE_COL_ID);
-  // fallback: o ID_SUPABASE já lido da task do lead (todo lead ingerido tem um).
-  // Sem nenhum dos dois, listarFollowUps LANÇA "referência do militante ausente"
-  // — o try/catch abaixo converte isso em seção 5 degradada (D-P4-06), NUNCA em
-  // dado de outra pessoa.
-  const refMilitante = supabaseMilitante?.[SUPABASE_COL_ID]
-    ? String(supabaseMilitante[SUPABASE_COL_ID])
-    : idSupabase || undefined;
-
-  let supabaseFollowUps = null;
-  try {
-    supabaseFollowUps = await listarFollowUps({ refMilitante });
-  } catch (e) {
-    console.warn(`  [aviso] follow-ups Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // Serviços prestados (seção 5, quick 260811-l7k): lê TODAS as tabelas
-  // romero_db_* (SUPABASE_TABLES_SERVICOS) por telefone (variantes BR) +
-  // refMilitante (mesmo id de identidade já usado pelos follow-ups acima —
-  // sem introduzir nova chave). Degradação por tabela já vem embutida em
-  // tabelasComErro; on-throw (config ausente, WR-03) a fonte inteira degrada
-  // sem abortar o dossiê deste lead (D-P4-06).
-  let servicosPrestados = null;
-  let tabelasComErro = null;
-  try {
-    const resultadoServicos = await listarServicosPrestados({ telefone: lead.telefone, idContato: refMilitante });
-    servicosPrestados = resultadoServicos.servicos;
-    tabelasComErro = resultadoServicos.tabelasComErro.length > 0 ? resultadoServicos.tabelasComErro : null;
-  } catch (e) {
-    console.warn(`  [aviso] serviços prestados Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // Seção 4 (Histórico de chamados): as Ligações do discador (Lista 02),
-  // consistente com o board do Miro (quick 260813-pfm). buscarLigacoesDoLead
-  // LANÇA em falha de infra (WR-03) — degrada por fonte (null + aviso
-  // mascarado), sem abortar o dossiê deste lead (D-P4-06). `identificador` já
-  // mascara o telefone — não logar PII.
-  let ligacoesRomeroCall = null;
-  try {
-    ligacoesRomeroCall = await buscarLigacoesDoLead(lead.taskId, lead.telefone);
-  } catch (e) {
-    console.warn(`  [aviso] ligações RomeroCall (Lista 02) indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  const fontes = {
-    ghlContato,
-    ghlConversas,
-    ghlOportunidades,
-    ligacoesRomeroCall,
-    supabaseMilitante,
-    supabaseFollowUps,
-    servicosPrestados,
-    tabelasComErro,
-    observacaoConsolidada: observacaoConsolidada || null,
-    ultimoResultado: ultimoResultado || null,
-  };
-
-  const { system, prompt } = montarPromptDossie(fontes);
-  const dossieMarkdown = await chamarLLM(prompt, system);
-
-  if (DRY_RUN) {
-    const degradadas = secoesDegradadas(fontes);
-    console.log(
-      `  [dry-run] dossiê de ${identificador} montado em memória (${dossieMarkdown.length} caractere(s)); ` +
-        `seções degradadas: ${degradadas.length ? degradadas.join(', ') : 'nenhuma'}.`,
-    );
-  } else {
-    // D-P4-01/05: grava as 6 seções na descrição da task do lead — sempre
-    // sobrescreve (nunca faz merge parcial).
-    await atualizarTask(lead.taskId, { description: dossieMarkdown });
-  }
-
-  return dossieMarkdown;
 }
 
 async function main() {
@@ -324,9 +150,24 @@ async function main() {
   for (const lead of candidatos) {
     const identificador = `${lead.nome || '(sem nome)'} (${mascararTelefone(lead.telefone)})`;
     try {
-      await montarDossieDoLead(lead, mapaTasksLeads.get(lead.taskId), identificador);
-      console.log(`  Dossiê montado para ${identificador}.`);
-      montados += 1;
+      // Fonte única: delega gather+build+write ao módulo compartilhado.
+      // CAVEATS aceitos (fonte única > microtrade-off): (a) a fn re-lê a task
+      // por taskId (1 lerTask extra por lead — o runner já a tinha em
+      // mapaTasksLeads); (b) o log de --dry-run reporta o TAMANHO do markdown,
+      // não mais a lista por-seção de "seções degradadas" — a degradação POR
+      // FONTE continua idêntica, só o detalhamento do log foi simplificado.
+      const md = await regenerarDossieDoLead(lead.taskId, { dryRun: DRY_RUN });
+      if (md) {
+        console.log(
+          DRY_RUN
+            ? `  [dry-run] dossiê de ${identificador} montado em memória (${md.length} caractere(s)) — não gravado.`
+            : `  Dossiê montado para ${identificador}.`,
+        );
+        montados += 1;
+      } else {
+        console.warn(`  [aviso] dossiê de ${identificador} não gerado (LLM vazio) — description preservada.`);
+        falhas += 1;
+      }
     } catch (e) {
       // T-DA-03: nunca colapsar erro em sucesso silencioso — reporta e conta a falha.
       falhas += 1;
