@@ -20,10 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v12 -> discador-v13): invalida o shell antigo nos
-// dispositivos já instalados como PWA após o deviceId no /ligando (DEVICE-03,
-// Fase 07 Plano 03 — app.js mudou). Mantém em sincronia com web/sw.js.
-export const DISCADOR_SW_JS = `const CACHE='discador-v13';
+// CACHE bump (discador-v13 -> discador-v14): invalida o shell antigo nos
+// dispositivos já instalados como PWA após a fila ao vivo + script no overlay
+// (quick-260813-lf7 — index.html e app.js mudaram). Mantém em sincronia com web/sw.js.
+export const DISCADOR_SW_JS = `const CACHE='discador-v14';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -77,6 +77,11 @@ export const DISCADOR_HTML = `<!doctype html>
   .loadmore{width:100%;background:var(--glass2);color:var(--txt);border:1px solid var(--line);border-radius:12px;padding:13px;margin-top:10px;font-weight:600}
   .loadmore:active{background:rgba(255,255,255,.10)}
   .call-lg{margin-top:0;padding:16px;font-size:17px}
+  /* fila ao vivo: lista de todas as ligacoes pendentes (LIVE-QUEUE) */
+  .fila-item{position:relative;display:flex;align-items:center;gap:12px;border-radius:16px;padding:14px 16px;margin-bottom:12px;background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);border-top:1px solid var(--hair-top);border-left:1px solid var(--hair-side);border-right:1px solid var(--hair-side);border-bottom:1px solid rgba(255,255,255,.05);box-shadow:0 6px 22px rgba(2,6,16,.4)}
+  .fila-item:active{transform:translateY(1px)}
+  .fila-item .lig-info{flex:1;min-width:0}
+  .fila-ligar{flex:0 0 auto;width:auto;padding:11px 20px;font-size:14px}
   /* login */
   #login-view{flex:1;display:flex;flex-direction:column;justify-content:center;padding:28px;gap:14px;max-width:420px;margin:0 auto;width:100%}
   #login-view .logo{width:66px;height:66px;margin:0 auto 8px;border-radius:20px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:30px;box-shadow:0 10px 30px rgba(0,123,255,.4)}
@@ -96,6 +101,8 @@ export const DISCADOR_HTML = `<!doctype html>
   #call-tel{color:var(--mut);margin-top:2px}
   #call-status{margin-top:16px;font-size:14px;color:var(--cyan);letter-spacing:.14em;text-transform:uppercase}
   #call-timer{font-size:20px;font-variant-numeric:tabular-nums;margin-top:6px;color:var(--mut)}
+  /* script visivel durante a chamada (SCRIPT-IN-OVERLAY) — rolavel p/ chamadas de 30-90min */
+  .call-script{width:100%;max-width:560px;max-height:38vh;overflow:auto;white-space:pre-wrap;background:rgba(255,255,255,.03);border:1px solid var(--line);border-left:3px solid var(--cyan);border-radius:12px;padding:12px 14px;font-size:14px;line-height:1.55;margin:8px 0;flex:0 0 auto}
   .call-controls{display:flex;align-items:center;justify-content:center;gap:48px}
   .ctrl{display:flex;flex-direction:column;align-items:center;gap:8px;background:none;border:0;color:var(--mut);font-size:13px;font-weight:600}
   .ctrl .ic{width:68px;height:68px;border-radius:50%;background:var(--glass2);border:1px solid var(--line);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s,transform .15s}
@@ -131,7 +138,7 @@ export const DISCADOR_HTML = `<!doctype html>
   <div id="fila-view" style="display:none">
     <header>
       <div class="row">
-        <h1>Próxima ligação</h1>
+        <h1>Fila de ligações</h1>
         <span id="fila-contador" class="pill"></span>
         <button id="reload-btn" class="ghost">↻</button>
         <button id="logout-btn" class="ghost">Sair</button>
@@ -139,21 +146,7 @@ export const DISCADOR_HTML = `<!doctype html>
     </header>
     <main>
       <div id="fila-status" class="muted" style="display:none"></div>
-      <div id="fila-card" class="card-ligacao" style="display:none">
-        <div class="lig-head">
-          <div id="lig-avatar" class="lig-avatar"></div>
-          <div class="lig-info">
-            <div id="lig-nome" class="lig-nome"></div>
-            <div id="lig-tel" class="lig-tel"></div>
-          </div>
-        </div>
-        <div class="lig-script-wrap">
-          <div class="lig-script-label">Script</div>
-          <div id="lig-script" class="lig-script"></div>
-        </div>
-        <button id="lig-ligar" class="primary call-lg">\u{1F4DE} Ligar</button>
-        <button id="lig-proxima" class="loadmore">Concluir / Próxima</button>
-      </div>
+      <div id="fila-lista"></div>
     </main>
   </div>
 
@@ -165,6 +158,7 @@ export const DISCADOR_HTML = `<!doctype html>
       <div id="call-status"></div>
       <div id="call-timer"></div>
     </div>
+    <div id="call-script" class="call-script"></div>
     <div class="call-controls">
       <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">\u{1F4DE}</span></button>
     </div>
