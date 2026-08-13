@@ -32,6 +32,12 @@ import {
   salvarVotoLead,
 } from './clickup';
 
+// Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
+// remove a task recem-iniciada do cache POR OPERADOR (D-04) — iniciarLigacao
+// ja escreve no ClickUp de forma SINCRONA, entao so precisa espelhar esse
+// efeito no cache. (/voto usa aquecerFilaCache, D-07b — Plano 04 Task 2.)
+import { removerDaFilaCache, invalidarFilaCache } from './cache-fila.ts';
+
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador } from './operadores';
 
@@ -264,6 +270,15 @@ export const mastra = new Mastra({
           try {
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
             if (telefone) await guardarTaskAtiva(telefone, taskId, deviceId);
+            // CACHE-04 (Plano 04): iniciarLigacao ja moveu a task pra "em
+            // processamento" no ClickUp de forma SINCRONA — so precisa
+            // espelhar esse efeito no cache da fila DO OPERADOR (D-04).
+            // Remove a task especifica + invalida a chave inteira
+            // (belt-and-suspenders D-03); ambas no-op sem Redis (SC5) e
+            // nunca lancam — evento de INICIO DE CHAMADA, distinto do warm
+            // do resultado no /voto (D-07b, Task 2).
+            await removerDaFilaCache(assignee, taskId);
+            await invalidarFilaCache(assignee);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao registrar ligando:', e);
