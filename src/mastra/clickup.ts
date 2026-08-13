@@ -18,6 +18,7 @@ import {
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 import { adquirirToken } from './rate-limiter-clickup.ts';
+import { obterFilaCache, guardarFilaCache, obterLigacaoCache, guardarLigacaoCache } from './cache-fila.ts';
 import { mapearFilaLigacao } from './lote.ts';
 import type { ItemFila } from './lote.ts';
 
@@ -403,11 +404,25 @@ export async function listarStatusLista(listId: string): Promise<string[]> {
  * no SERVIDOR (T-02-03-E — cada operador só vê a própria fila) e só tasks
  * abertas (`include_closed=false`). Erro de infra/HTTP PROPAGA (WR-03/
  * T-02-03-D — o caller/rota decide o 502, nunca mascara como fila vazia).
+ *
+ * Read-through (CACHE-01, D-01/D-02): só a fila PADRÃO (sem `opts.page`) é
+ * cacheada — páginas seguintes não passam pelo cache-aside, mantendo o
+ * comportamento atual. No hit, retorna direto do cache (não bate no
+ * ClickUp); no miss, roda o corpo normal e aquece o cache antes de
+ * retornar. `guardarFilaCache` é no-op sem Redis (`obterFilaCache` sempre
+ * `null`), preservando 100% o comportamento de 1 instância (SC5) — e a
+ * semântica de erro de `listarTasks` (WR-03, que LANÇA) fica intacta: o
+ * cache só serve leitura de SUCESSO, nunca mascara uma falha.
  */
 export async function buscarFilaLigacoes(
   assigneeId: string,
   opts: { page?: number } = {},
 ): Promise<ItemFila[]> {
+  const cacheavel = !opts.page;
+  if (cacheavel) {
+    const cached = await obterFilaCache(assigneeId);
+    if (cached) return cached;
+  }
   const { tasks } = await listarTasks(CLICKUP_LIST_LIGACOES, {
     page: opts.page,
     includeClosed: false,
@@ -421,7 +436,11 @@ export async function buscarFilaLigacoes(
   const abertas = OPER_STATUS_EM_PROCESSAMENTO
     ? tasks.filter((t) => nomeDoStatus(t.status) !== OPER_STATUS_EM_PROCESSAMENTO)
     : tasks;
-  return mapearFilaLigacao(abertas, CAMPOS_LIGACOES);
+  const fila = mapearFilaLigacao(abertas, CAMPOS_LIGACOES);
+  if (cacheavel) {
+    await guardarFilaCache(assigneeId, fila);
+  }
+  return fila;
 }
 
 /**
@@ -436,8 +455,16 @@ export async function buscarFilaLigacoes(
  * operador autenticado lesse a Ligacao de outro operador ou qualquer task
  * da workspace (Lista 01 LEADS inclusive, telefone sem mascara) — quebrando
  * a garantia T-02-03-E (CR-01, IDOR/LGPD).
+ *
+ * Read-through (CACHE-01, D-04/anti-IDOR): a chave do cache leva
+ * `assigneeIdEsperado` — um operador diferente SEMPRE dá miss e cai no corpo
+ * completo abaixo, que re-roda as 3 checagens de autorização. Nada de outro
+ * operador é servido do cache. No miss, monta `DetalheLigacao` normalmente e
+ * só então aquece o cache (`guardarLigacaoCache`, no-op sem Redis).
  */
 export async function lerLigacao(taskId: string, assigneeIdEsperado: string): Promise<DetalheLigacao> {
+  const cached = await obterLigacaoCache(assigneeIdEsperado, taskId);
+  if (cached) return cached;
   const task = await lerTask(taskId);
   if (!task) {
     throw new Error(`[clickup] lerLigacao: task ${taskId} nao encontrada`);
@@ -455,13 +482,15 @@ export async function lerLigacao(taskId: string, assigneeIdEsperado: string): Pr
   const [item] = mapearFilaLigacao([task], CAMPOS_LIGACOES);
   const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
   const idLead = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.ID_LEAD)?.value ?? '');
-  return {
+  const detalhe: DetalheLigacao = {
     taskId: task.id,
     nome: item?.nome ?? task.name ?? telefone,
     telefone: item?.telefone ?? telefone,
     idLead: item?.idLead ?? idLead,
     script: task.description ?? task.text_content ?? '',
   };
+  await guardarLigacaoCache(assigneeIdEsperado, taskId, detalhe);
+  return detalhe;
 }
 
 /**
