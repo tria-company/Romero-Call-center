@@ -20,10 +20,11 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v13 -> discador-v14): invalida o shell antigo nos
-// dispositivos já instalados como PWA após a fila ao vivo + script no overlay
-// (quick-260813-lf7 — index.html e app.js mudaram). Mantém em sincronia com web/sw.js.
-export const DISCADOR_SW_JS = `const CACHE='discador-v14';
+// CACHE bump (discador-v14 -> discador-v15): invalida o shell antigo nos
+// dispositivos já instalados como PWA após a tela de preview (CONTEXTO +
+// SCRIPT antes de ligar, quick-260813-m3v — index.html e app.js mudaram).
+// Mantém em sincronia com web/sw.js.
+export const DISCADOR_SW_JS = `const CACHE='discador-v15';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -108,6 +109,9 @@ export const DISCADOR_HTML = `<!doctype html>
   .ctrl .ic{width:68px;height:68px;border-radius:50%;background:var(--glass2);border:1px solid var(--line);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s,transform .15s}
   .ctrl.hangup .ic{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(135deg);box-shadow:0 10px 26px rgba(220,38,38,.45)}
   .ctrl.hangup:active .ic{transform:rotate(135deg) scale(.94)}
+  /* preview do lead antes de ligar (CONTEXTO + SCRIPT) */
+  #preview-overlay{position:fixed;inset:0;display:none;z-index:20;overflow:auto;padding:calc(20px + env(safe-area-inset-top)) 20px calc(28px + env(safe-area-inset-bottom));background:radial-gradient(600px 500px at 50% 8%,rgba(0,123,255,.18),transparent 60%),linear-gradient(180deg,#081426,#050a14)}
+  .preview-card{width:100%;max-width:560px;margin:0 auto}
   /* pos-ligacao: confirmacao de voto (grava na Lista 01 LEADS) */
   #voto-overlay{position:fixed;inset:0;display:none;z-index:25;align-items:center;justify-content:center;padding:24px 20px calc(24px + env(safe-area-inset-bottom));background:radial-gradient(600px 500px at 50% 8%,rgba(0,123,255,.18),transparent 60%),linear-gradient(180deg,#081426,#050a14);overflow:auto}
   .voto-card{width:100%;max-width:460px;border-radius:20px;padding:22px;background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);border-top:1px solid var(--hair-top);border-left:1px solid var(--hair-side);border-right:1px solid var(--hair-side);border-bottom:1px solid rgba(255,255,255,.05);box-shadow:0 8px 32px rgba(2,6,16,.5)}
@@ -148,6 +152,28 @@ export const DISCADOR_HTML = `<!doctype html>
       <div id="fila-status" class="muted" style="display:none"></div>
       <div id="fila-lista"></div>
     </main>
+  </div>
+
+  <div id="preview-overlay">
+    <div class="preview-card">
+      <button id="preview-voltar" class="ghost" type="button" style="margin-bottom:6px">← Voltar</button>
+      <div class="lig-head">
+        <div id="preview-avatar" class="lig-avatar"></div>
+        <div class="lig-info">
+          <div id="preview-nome" class="lig-nome"></div>
+          <div id="preview-tel" class="lig-tel"></div>
+        </div>
+      </div>
+      <div class="lig-script-wrap">
+        <div class="lig-script-label">Contexto</div>
+        <div id="preview-contexto" class="call-script"></div>
+      </div>
+      <div class="lig-script-wrap">
+        <div class="lig-script-label">Script</div>
+        <div id="preview-script" class="call-script"></div>
+      </div>
+      <button id="preview-ligar" class="primary call-lg" type="button">Ligar</button>
+    </div>
   </div>
 
   <div id="call-overlay">
