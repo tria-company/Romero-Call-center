@@ -20,23 +20,31 @@ import { buscarQualificados } from './ghl';
 // uma Ligacao (LOTE-04/05, Fase 02 Plano 03 — substitui buscarQualificados).
 // iniciarLigacao grava INICIO+OPERADOR e move a task pra "em processamento"
 // ao tocar Ligar (OPER-01/02, D-P3-01/02/07, Fase 03 Plano 01).
-// lerStatusVotoLead/salvarVotoLead atendem a tela de voto pos-ligacao (Lista
-// 01 LEADS). O resto do acesso ao ClickUp usado pelo webhook (transcricao/
-// metadados/avulsa/Agente Analise/Agente Contexto) migrou pra processador.ts
-// (Fase 06 Plano 02/03) — nao roda mais no caminho da requisicao.
+// lerStatusVotoLead atende a tela de voto pos-ligacao (Lista 01 LEADS); a
+// gravacao (salvarVotoLead) agora e chamada indiretamente via
+// processarSyncClickupJob (enfileirado ou fallback inline, Fase 08 Plano
+// 03/04 — CACHE-03/04). O resto do acesso ao ClickUp usado pelo webhook
+// (transcricao/metadados/avulsa/Agente Analise/Agente Contexto) migrou pra
+// processador.ts (Fase 06 Plano 02/03) — nao roda mais no caminho da
+// requisicao.
 import {
   buscarFilaLigacoes,
   lerLigacao,
   iniciarLigacao,
   lerStatusVotoLead,
-  salvarVotoLead,
 } from './clickup';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
 // remove a task recem-iniciada do cache POR OPERADOR (D-04) — iniciarLigacao
 // ja escreve no ClickUp de forma SINCRONA, entao so precisa espelhar esse
-// efeito no cache. (/voto usa aquecerFilaCache, D-07b — Plano 04 Task 2.)
-import { removerDaFilaCache, invalidarFilaCache } from './cache-fila.ts';
+// efeito no cache. /voto usa aquecerFilaCache (D-07b, read-your-writes) —
+// evento SEPARADO, o sync ao ClickUp e ASSINCRONO (janela <60s).
+import { removerDaFilaCache, invalidarFilaCache, aquecerFilaCache } from './cache-fila.ts';
+// Sync assincrono do voto pos-ligacao (Fase 08 Plano 03, CACHE-03/D-07a):
+// /voto enfileira o job (worker espelha no ClickUp em <60s) com fallback
+// inline (processarSyncClickupJob) sem Redis (SC5).
+import { enfileirarSyncClickup } from './fila.ts';
+import { processarSyncClickupJob } from './sync-clickup.ts';
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador } from './operadores';
@@ -390,8 +398,37 @@ export const mastra = new Mastra({
             return c.json({ status: 'ok', semAlteracao: true });
           }
           try {
-            const r = await salvarVotoLead(taskId, assignee, voto);
-            return c.json({ status: 'ok', temLead: r.temLead });
+            // D-07a: enfileira o sync (worker espelha no ClickUp em <60s,
+            // consistencia eventual) e responde na hora; sem Redis ou se o
+            // enqueue falhar em runtime, cai no fallback inline — MESMA
+            // gravacao sincrona de hoje (processarSyncClickupJob propaga o
+            // throw de salvarVotoLead, WR-03 — o catch abaixo mapeia
+            // autz/infra em qualquer um dos dois caminhos).
+            const dados = { taskId, assigneeId: assignee, voto };
+            const { enfileirado } = await enfileirarSyncClickup(dados);
+            if (!enfileirado) {
+              await processarSyncClickupJob(dados);
+            }
+            // D-07b (read-your-writes): aquece a fila cacheada DO OPERADOR
+            // com o resultado recem-gravado, na hora — sem esperar o ClickUp
+            // espelhar (o sync e ASSINCRONO quando enfileirado, janela
+            // <60s; invalidar+refetch leria o estado pre-voto ainda no
+            // ClickUp). buscarFilaLigacoes ja exclui a Ligacao da fila por
+            // status "em processamento" (setado no /ligando, Task 1) — nao
+            // ha campo de resultado em ItemFila pra mesclar, entao `null`
+            // remove a task da fila acionavel do operador (read-your-writes
+            // "sumiu da minha fila"; idempotente mesmo se ja tiver sido
+            // removida). Never-throws, no-op sem Redis (SC5) — fica fora do
+            // caminho critico da resposta, nunca transforma um sucesso em
+            // erro. Por operador (D-04): so a fila de `assignee` (resolvido
+            // por assigneeDoOperador(sess.usuario) acima, nunca do body).
+            await aquecerFilaCache(assignee, taskId, null);
+            // temLead so era conhecido no caminho sincrono de hoje
+            // (retorno de salvarVotoLead); processarSyncClickupJob (usado
+            // tanto pelo worker quanto no fallback inline) nao o expoe, e o
+            // frontend (web/app.js) nunca leu esse campo da resposta do
+            // POST /voto (so o HTTP status) — omitido em ambos os caminhos.
+            return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao salvar voto:', e);
             const msg = e instanceof Error ? e.message : String(e);
