@@ -75,6 +75,8 @@ import { montarPromptContexto, proximoContato, derivarContadores } from './conte
 
 import { chamarLLM } from './llm.ts';
 
+import { regenerarDossieDoLead } from './gerar-dossie.ts';
+
 import { marcarEventoWebhook } from './supabase.ts';
 
 import {
@@ -179,6 +181,24 @@ async function consolidarEFecharLigacao(
         proximoContato: proximoContatoData.getTime(),
         contadores,
       });
+
+      // Fase 3 do board do Miro aplicada POR-LIGACAO: o Agente Contexto
+      // regenera o Dossie 360 completo (6 secoes) na description do lead
+      // (Lista 01) LOGO APOS a consolidacao — o dossie ja incorpora o
+      // historico de Ligacoes (Secao 4, Lista 02) + a observacao consolidada
+      // recem-escrita acima; e ESSE dossie que aparece no preview do discador.
+      // Log-e-segue: NUNCA bloqueia fecharLigacao — a task nao pode ficar
+      // aberta por uma falha isolada de regeneracao (WR-03/D-P3-08).
+      // CAVEAT (aceito, T-pxq-03): regenerar o dossie inteiro a cada ligacao
+      // re-consulta GHL/Supabase; se uma fonte externa estiver instavel, a
+      // secao dela degrada ("sem dados") ate a proxima regeneracao/lote —
+      // trade-off aceito por um dossie fresco a cada ligacao (auto-cura na
+      // proxima remontagem; mesma degradacao por fonte do lote diario).
+      try {
+        await regenerarDossieDoLead(leadTaskId);
+      } catch (e) {
+        console.error('[processador] falha ao regenerar dossie pos-ligacao (segue):', e instanceof Error ? e.message : String(e));
+      }
     }
   } catch (e) {
     console.error('[processador] falha ao consolidar o lead — a Ligacao ainda sera fechada:', e);
