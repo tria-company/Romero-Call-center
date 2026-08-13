@@ -1,10 +1,10 @@
 (function(){
   var tokenKey='discador_token';
   var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
-  var fila=null, filaIdx=0;
+  var fila=null, filaPollInt=null;
   var timerInt=null, timerStart=0;
   var wakeLock=null, emChamada=false;
-  var foiAtendida=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
+  var foiAtendida=false, desfechoEnviado=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
   // Multi-device pool (DEVICE-02): deviceModo aprendido uma vez via /config
   // ('dedicado'|'pool'|'global'); leaseDeviceId guarda o device alocado na
   // chamada corrente (so em modo pool) pra devolver ao fim. dedicadoDeviceId
@@ -37,65 +37,96 @@
   // Fila do operador logado (Lista 02 ClickUp — LOTE-04). Substitui a antiga
   // lista rolável do GHL QUALIFICADO (D-P2-07): /api/discador/qualificados
   // NAO e mais chamada por esta tela.
-  function mostrarStatus(msg){$('fila-card').style.display='none';$('fila-status').textContent=msg;$('fila-status').style.display='block';}
+  function mostrarStatus(msg){$('fila-lista').style.display='none';$('fila-status').textContent=msg;$('fila-status').style.display='block';}
+  // Lista AO VIVO (LIVE-QUEUE): reconstroi #fila-lista inteiro a cada render
+  // (fila pequena, aceitavel). Nome/telefone via textContent (sem XSS, sem
+  // escaping) — nunca innerHTML/template literal.
+  function renderFila(itens){
+    if(!itens||!itens.length){
+      $('fila-contador').textContent='';
+      mostrarStatus('Sem ligações na sua fila hoje.');
+      return;
+    }
+    $('fila-status').style.display='none';
+    $('fila-contador').textContent=itens.length+' ligações';
+    var lista=$('fila-lista');
+    lista.textContent='';
+    lista.style.display='block';
+    for(var i=0;i<itens.length;i++){
+      lista.appendChild(criarItemFila(itens[i]));
+    }
+  }
+  function criarItemFila(item){
+    var row=document.createElement('div');row.className='fila-item';
+    var av=document.createElement('div');av.className='lig-avatar';av.textContent=initials(item.nome||item.telefone);
+    var info=document.createElement('div');info.className='lig-info';
+    var nome=document.createElement('div');nome.className='lig-nome';nome.textContent=item.nome||item.telefone;
+    var tel=document.createElement('div');tel.className='lig-tel';tel.textContent=item.telefone;
+    info.appendChild(nome);info.appendChild(tel);
+    var btn=document.createElement('button');btn.className='primary fila-ligar';btn.textContent='Ligar';
+    btn.onclick=function(){iniciarLigacao(item);};
+    row.appendChild(av);row.appendChild(info);row.appendChild(btn);
+    return row;
+  }
   function carregarFila(){
     mostrarStatus('Carregando fila...');
+    buscarFila(false);
+  }
+  // Poll silencioso (~15s + pos-fluxo): NAO troca pra "Carregando fila..." (pra
+  // nao piscar) e, em erro, mantem a lista atual (nao sobrescreve com mensagem).
+  function carregarFilaSilencioso(){buscarFila(true);}
+  function buscarFila(silencioso){
     api('/api/discador/fila').then(function(res){
       return res.json().catch(function(){return {};}).then(function(data){return {status:res.status,data:data};});
     }).then(function(r){
       if(r.status!==200){
         // Erro de carregamento e DISTINTO de fila vazia (WR-03/T-02-03-D) —
         // nunca mostra "sem ligações" quando na verdade a chamada falhou.
-        mostrarStatus('Erro ao carregar a fila. Toque em ↻ para tentar de novo.');
+        if(!silencioso){mostrarStatus('Erro ao carregar a fila. Toque em ↻ para tentar de novo.');}
         return;
       }
       if(r.data.semMapeamento){
-        mostrarStatus('Seu usuário ainda não está vinculado a um operador do ClickUp. Configure DISCADOR_ASSIGNEES.');
+        if(!silencioso){mostrarStatus('Seu usuário ainda não está vinculado a um operador do ClickUp. Configure DISCADOR_ASSIGNEES.');}
         return;
       }
-      fila=r.data.fila||[];filaIdx=0;
-      mostrarItemAtual();
+      fila=r.data.fila||[];
+      renderFila(fila);
     }).catch(function(e){
       if(e&&e.message==='401'){return;}
-      mostrarStatus('Erro ao carregar a fila. Toque em ↻ para tentar de novo.');
+      if(!silencioso){mostrarStatus('Erro ao carregar a fila. Toque em ↻ para tentar de novo.');}
     });
   }
-  function mostrarItemAtual(){
-    if(!fila||!fila.length){
-      $('fila-contador').textContent='';
-      mostrarStatus('Sem ligações na sua fila hoje.');
-      return;
-    }
-    if(filaIdx>=fila.length){
-      $('fila-contador').textContent=fila.length+' de '+fila.length;
-      mostrarStatus('Fila concluída — toque em ↻ para recarregar.');
-      return;
-    }
-    $('fila-status').style.display='none';
-    var item=fila[filaIdx];
-    $('fila-contador').textContent=(filaIdx+1)+' de '+fila.length;
-    $('lig-avatar').textContent=initials(item.nome||item.telefone);
-    $('lig-nome').textContent=item.nome||item.telefone;
-    $('lig-tel').textContent=item.telefone;
-    $('lig-script').textContent='Carregando script...';
-    $('fila-card').style.display='block';
-    $('lig-ligar').onclick=function(){iniciarLigacao(item);};
-    carregarScriptDoItem(item);
-  }
-  function carregarScriptDoItem(item){
-    api('/api/discador/ligacao/'+encodeURIComponent(item.taskId)).then(function(res){
+  // Poll ~15s: NUNCA dispara durante uma chamada ativa (LOCKED: nao interromper).
+  function pollFila(){if(emChamada){return;}carregarFilaSilencioso();}
+  // Volta pra fila apos os pontos terminais do fluxo (chamada/voto) e refetcha
+  // silenciosamente — a task recem-desfechada some da lista (ou reaparece se
+  // ficou na fila por nao-atendida/hangup antes de atender).
+  function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';carregarFilaSilencioso();}
+  // Script no overlay da chamada (SCRIPT-IN-OVERLAY): fetch on-demand ao abrir a
+  // chamada (nao mais por item da lista) — menos chamadas por poll.
+  function carregarScriptDaChamada(taskId){
+    var el=$('call-script');if(!el){return;}
+    el.textContent='Carregando script...';
+    api('/api/discador/ligacao/'+encodeURIComponent(taskId)).then(function(res){
       return res.json().catch(function(){return {};}).then(function(data){return {status:res.status,data:data};});
     }).then(function(r){
-      if(!fila||fila[filaIdx]!==item){return;} // fila avancou enquanto o script carregava
-      if(r.status!==200||!r.data.ligacao){$('lig-script').textContent='Não foi possível carregar o script.';return;}
-      $('lig-script').textContent=r.data.ligacao.script||'(sem script)';
+      if(chamadaTaskId!==taskId){return;} // outra chamada comecou enquanto carregava
+      if(r.status!==200||!r.data.ligacao){el.textContent='Não foi possível carregar o script.';return;}
+      el.textContent=r.data.ligacao.script||'(sem script)';
     }).catch(function(e){
       if(e&&e.message==='401'){return;}
-      if(!fila||fila[filaIdx]!==item){return;}
-      $('lig-script').textContent='Não foi possível carregar o script.';
+      if(chamadaTaskId!==taskId){return;}
+      el.textContent='Não foi possível carregar o script.';
     });
   }
-  function avancarFila(){filaIdx+=1;mostrarItemAtual();}
+  // Desfecho best-effort (RETENTION-BY-OUTCOME): idempotente por chamada
+  // (desfechoEnviado) — atendida so no peerAccept, recusou so no peerReject;
+  // nunca bloqueia a UI. Nao-atendida/hangup NAO chamam (task fica na fila).
+  function enviarDesfecho(resultado){
+    if(desfechoEnviado||!chamadaTaskId){return;}
+    desfechoEnviado=true;
+    apiPost('/api/discador/desfecho',{taskId:chamadaTaskId,resultado:resultado}).catch(function(){});
+  }
   function instanciarWavoip(token){
     return import('https://esm.sh/@wavoip/wavoip-api@2.6.3').then(function(mod){
       var W=mod.Wavoip||(mod.default&&mod.default.Wavoip)||mod.default||mod;
@@ -184,8 +215,8 @@
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;setCallStatus('Em ligação');startTimer();});
-    on(call,'peerReject',function(){setCallStatus('Recusada');endCallUI();});
+    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');setCallStatus('Em ligação');startTimer();});
+    on(call,'peerReject',function(){enviarDesfecho('recusou');setCallStatus('Recusada');endCallUI();});
     on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
     on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
     on(call,'connectivityIssue',function(){setCallStatus('Problema de conexão');});
@@ -208,10 +239,10 @@
     }catch(e){}
   }
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
-  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
+  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
-  function endCallUI(){liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;var atendida=foiAtendida,tid=chamadaTaskId;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else{$('call-overlay').style.display='none';}},1400);}
+  function endCallUI(){liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;var atendida=foiAtendida,tid=chamadaTaskId;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else{voltarParaFila();}},1400);}
   // Pos-ligacao (SO quando ATENDIDA): pergunta a confirmacao de voto dos
   // candidatos ainda nao preenchidos no lead (Lista 01) e grava. Se o lead ja
   // tem os dois definidos, ou nao ha lead resolvido, so fecha a overlay da
@@ -220,9 +251,9 @@
     api('/api/discador/voto/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};});}).then(function(st){
       var pRom=!!(st&&st.temLead&&!st.romeroDefinido);
       var pAnd=!!(st&&st.temLead&&!st.andressaDefinido);
-      if(!pRom&&!pAnd){$('call-overlay').style.display='none';return;}
+      if(!pRom&&!pAnd){voltarParaFila();return;}
       abrirVoto(taskId,pRom,pAnd);
-    }).catch(function(e){if(e&&e.message==='401'){return;}$('call-overlay').style.display='none';});
+    }).catch(function(e){if(e&&e.message==='401'){return;}voltarParaFila();});
   }
   function abrirVoto(taskId,pRom,pAnd){
     votoAtualTaskId=taskId;votoSel={romero:null,andressa:null};
@@ -239,12 +270,12 @@
     var body={taskId:votoAtualTaskId};
     if(votoSel.romero){body.romero=votoSel.romero;}
     if(votoSel.andressa){body.andressa=votoSel.andressa;}
-    if(!body.romero&&!body.andressa){$('voto-overlay').style.display='none';return;}
+    if(!body.romero&&!body.andressa){voltarParaFila();return;}
     var btn=$('voto-salvar');$('voto-err').textContent='';btn.disabled=true;btn.textContent='Salvando...';
     apiPost('/api/discador/voto',body).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,d:d};});}).then(function(r){
       btn.disabled=false;btn.textContent='Salvar';
       if(r.status!==200){$('voto-err').textContent='Não foi possível salvar. Tente de novo ou toque em Pular.';return;}
-      $('voto-overlay').style.display='none';
+      voltarParaFila();
     }).catch(function(e){btn.disabled=false;btn.textContent='Salvar';if(e&&e.message==='401'){return;}$('voto-err').textContent='Não foi possível salvar. Tente de novo ou toque em Pular.';});
   }
   window.addEventListener('DOMContentLoaded',function(){
@@ -252,12 +283,13 @@
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
     $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}setToken('');show('login');};
     $('reload-btn').onclick=carregarFila;
-    $('lig-proxima').onclick=avancarFila;
     $('hangup-btn').onclick=hangup;
+    // Poll ~15s da fila ao vivo (LIVE-QUEUE) — pulado durante chamada ativa (pollFila).
+    filaPollInt=setInterval(pollFila,15000);
     var vo=$('voto-overlay');
     if(vo){vo.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var grp=b.parentNode;var cand=grp.getAttribute('data-cand');var all=grp.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');votoSel[cand]=b.getAttribute('data-v');});}
     $('voto-salvar').onclick=salvarVoto;
-    $('voto-pular').onclick=function(){$('voto-overlay').style.display='none';};
+    $('voto-pular').onclick=voltarParaFila;
     // Chamadas longas: evitar perder a ligacao por refresh/fechar/logout sem querer
     // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
     window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});
