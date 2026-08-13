@@ -33,7 +33,7 @@ import {
   type NomeJob,
 } from './fila.ts';
 
-import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts';
+import { processarRecordJob, processarFalhaTerminalJob, finalizarRecordSemTranscricao } from './processador.ts';
 import { processarSyncClickupJob } from './sync-clickup.ts';
 import { marcarEventoWebhook } from './supabase.ts';
 import { fecharEstadoWebhook } from './estado-webhook.ts';
@@ -125,6 +125,25 @@ worker.on('failed', async (job, err) => {
     eventoDuravelId: dados.eventoDuravelId ?? null,
     erro: err?.name || 'erro',
   });
+
+  // Desfecho gracioso do RECORD (FILA-04/OPER-05): sem esta finalizacao a
+  // Ligacao fica presa em "em processamento" para SEMPRE quando a transcricao
+  // nunca sucede (zumbi observado em prod). ADITIVA — fecha a Ligacao ALEM do
+  // registro na DLQ/alerta/marcarEventoWebhook('erro') acima, nao os substitui.
+  // So para 'record' (falha-terminal ja fecha; sync-clickup nao tem Ligacao a
+  // fechar). try/catch loga-e-segue: uma falha ao finalizar NAO pode quebrar o
+  // handler de falha nem invalidar o registro na DLQ que ja rodou acima (WR-01:
+  // so ids/classe do erro em log, nunca payload).
+  if (job.name === 'record') {
+    try {
+      await finalizarRecordSemTranscricao(job.data as DadosJobRecord);
+    } catch (e) {
+      console.error(
+        `[worker] falha ao finalizar record sem transcricao (id=${job.id}):`,
+        e instanceof Error ? e.name : String(e),
+      );
+    }
+  }
 });
 
 console.log(`[worker] consumindo a fila ${NOME_FILA} (concurrency=${FILA_CONCURRENCY})`);
