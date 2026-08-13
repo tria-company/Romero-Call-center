@@ -368,6 +368,57 @@ export async function fecharEstadoWebhook(): Promise<void> {
   }
 }
 
+/**
+ * Conta chamadas ativas (D-06, OBS-02) — numero de telefones DISTINTOS com
+ * task ativa. Conta so as chaves de telefone-so (chaveTelefone), NUNCA as
+ * compostas (deviceId|telefone) que guardarTaskAtiva grava JUNTO (linhas
+ * 85-86/204-207) — contar as duas dobraria o numero (T-10-02-I2). Memoria:
+ * entradas de taskAtivaMem cuja chave nao contem '|'. Redis: SCAN por
+ * PREFIXO_TASK, mesma exclusao das chaves compostas. Nunca lanca — retorna 0
+ * em qualquer erro (fail-open, metricas.ts nunca pode travar por esta fonte).
+ */
+export async function contarChamadasAtivas(): Promise<number> {
+  if (MODO === 'redis') {
+    try {
+      let cursor = '0';
+      let total = 0;
+      do {
+        const [proximoCursor, chaves] = await garantirCliente().scan(
+          cursor,
+          'MATCH',
+          PREFIXO_TASK + '*',
+          'COUNT',
+          200,
+        );
+        cursor = proximoCursor;
+        for (const chave of chaves) {
+          if (!chave.slice(PREFIXO_TASK.length).includes('|')) total += 1;
+        }
+      } while (cursor !== '0');
+      return total;
+    } catch (e) {
+      console.error(
+        '[estado-webhook] falha ao contar chamadas ativas (degradando p/ 0):',
+        e instanceof Error ? e.message : String(e),
+      );
+      return 0;
+    }
+  }
+  try {
+    let total = 0;
+    for (const chave of taskAtivaMem.keys()) {
+      if (!chave.includes('|')) total += 1;
+    }
+    return total;
+  } catch (e) {
+    console.error(
+      '[estado-webhook] falha ao contar chamadas ativas em memoria (degradando p/ 0):',
+      e instanceof Error ? e.message : String(e),
+    );
+    return 0;
+  }
+}
+
 console.log(
   MODO === 'redis'
     ? '[estado-webhook] estado do webhook em Redis (compartilhado)'

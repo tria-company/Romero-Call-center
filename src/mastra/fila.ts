@@ -258,6 +258,27 @@ export async function fecharFila(): Promise<void> {
   }
 }
 
+/**
+ * Profundidade da fila (D-06, OBS-02) — jobs pendentes (waiting + delayed +
+ * active) na MESMA Queue de enfileirar* (garantirFila(), nunca instancia
+ * outro cliente Redis). Reusa a Queue lazy singleton do producer. Retorna 0
+ * em modo inline (nao ha fila a medir) e em qualquer erro do Redis em
+ * runtime — metricas.ts NUNCA pode travar por causa desta fonte.
+ */
+export async function profundidadeFila(): Promise<number> {
+  if (MODO !== 'bullmq') return 0;
+  try {
+    const contagens = await garantirFila().getJobCounts('waiting', 'delayed', 'active');
+    return (contagens.waiting ?? 0) + (contagens.delayed ?? 0) + (contagens.active ?? 0);
+  } catch (e) {
+    console.error(
+      '[fila] falha ao ler profundidade da fila (degradando p/ 0):',
+      e instanceof Error ? e.message : String(e),
+    );
+    return 0;
+  }
+}
+
 console.log(
   MODO === 'bullmq'
     ? '[fila] processamento em BullMQ (Redis)'
