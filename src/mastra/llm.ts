@@ -64,7 +64,12 @@ export function modeloLLM(): LanguageModel {
         baseURL: normalizarEndpointAzure(AZURE_OPENAI_ENDPOINT),
         useDeploymentBasedUrls: false,
       });
-      return azure(AZURE_OPENAI_DEPLOYMENT);
+      // `.chat()` FORÇA o modelo chat/completions (/openai/v1/chat/completions).
+      // O default `azure(id)` no ai-sdk instalado resolve pra Responses API
+      // (_OpenAIResponsesLanguageModel -> /openai/v1/responses), que o Foundry
+      // REJEITA (APICallError "Invalid value: ''") — quebrava os Agentes
+      // Analise/Contexto em producao (lead nunca recebia observacao/analise).
+      return azure.chat(AZURE_OPENAI_DEPLOYMENT);
     }
 
     const azure = createAzure({
@@ -77,11 +82,15 @@ export function modeloLLM(): LanguageModel {
       // argumento como model id, o que quebra o caminho Azure (WR-01).
       useDeploymentBasedUrls: true,
     });
-    return azure(AZURE_OPENAI_DEPLOYMENT);
+    // `.chat()` como no caminho Foundry: força chat/completions em vez do
+    // default Responses API do ai-sdk (que quebra o payload no Azure).
+    return azure.chat(AZURE_OPENAI_DEPLOYMENT);
   }
 
   const openai = createOpenAI({ apiKey: OPENAI_API_KEY });
-  return openai(OPENAI_MODEL);
+  // `.chat()`: os 3 agentes assumem chat/completions — evita que o default
+  // `openai(id)` do ai-sdk instalado use a Responses API.
+  return openai.chat(OPENAI_MODEL);
 }
 
 /** Config ausente para o provider ativo — sem isso chamarLLM nao faz request (D-09). */
