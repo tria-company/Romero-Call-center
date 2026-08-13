@@ -37,6 +37,8 @@ export type GhlStage = keyof typeof GHL_STAGES;
 // Device token da Wavoip pro SDK do NAVEGADOR (PWA discador). E exposto
 // client-side por design (o SDK `new Wavoip({tokens:[...]})` precisa dele pra
 // abrir a call via WebRTC). Configure WAVOIP_DEVICE_TOKEN no .env.
+// Vira o FALLBACK GLOBAL do multi-device (Fase 07, DD-07-02 item 3) quando o
+// usuario nao tem device dedicado nem ha device de pool disponivel.
 export const WAVOIP_DEVICE_TOKEN = process.env.WAVOIP_DEVICE_TOKEN || '';
 
 if (!WAVOIP_DEVICE_TOKEN) {
@@ -46,6 +48,24 @@ if (!WAVOIP_DEVICE_TOKEN) {
       'painel Wavoip e coloque no .env como WAVOIP_DEVICE_TOKEN.',
   );
 }
+
+// ===== Multi-device Wavoip (DEVICE-01, Fase 07 Plano 01) =====
+//
+// Inventario + mapa dedicado por usuario, lidos por src/mastra/dispositivos.ts
+// (resolverConfigDoUsuario). Defaults vazios DE PROPOSITO (degradacao
+// graciosa — DD-07-02 item 3: sem nenhuma das duas, o discador volta ao
+// comportamento atual de 1 device via WAVOIP_DEVICE_TOKEN acima). NAO emitir
+// console.warn com o CONTEUDO destas envs (contem token) — o warn de boot
+// (sem valores) fica em dispositivos.ts.
+
+// Inventario de devices: "deviceId:token:numero,...". deviceId e rotulo
+// curto e estavel; token e o device token Wavoip; numero e o WhatsApp do
+// device (so-digitos, usado no plano 07-03 pro mapeamento reverso).
+export const WAVOIP_DEVICES = process.env.WAVOIP_DEVICES || '';
+
+// Device DEDICADO por usuario (DEVICE-01): "usuario:deviceId,...". Parsing
+// identico a DISCADOR_ASSIGNEES (operadores.ts).
+export const WAVOIP_USER_DEVICES = process.env.WAVOIP_USER_DEVICES || '';
 
 // ===== Transcricao da call (webhook Wavoip -> Deepgram -> nota no GHL) =====
 
