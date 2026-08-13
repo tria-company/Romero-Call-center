@@ -57,6 +57,8 @@ import {
 
 import { transcreverCallUrl } from './deepgram.ts';
 
+import { mascararTelefone } from './mascarar.ts';
+
 import {
   derivarAtendeu,
   derivarMotivoFalha,
@@ -226,8 +228,7 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
     }
   }
   if (!taskId) {
-    const telefone = dados.telefone;
-    const mascarado = telefone.length > 4 ? `${'*'.repeat(telefone.length - 4)}${telefone.slice(-4)}` : telefone;
+    const mascarado = mascararTelefone(dados.telefone);
     console.warn(`[processador] falha terminal sem Ligacao aberta correlacionavel (telefone=${mascarado})`);
     return;
   }

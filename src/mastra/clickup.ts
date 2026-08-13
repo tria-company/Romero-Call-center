@@ -21,6 +21,7 @@ import { adquirirToken } from './rate-limiter-clickup.ts';
 import { obterFilaCache, guardarFilaCache, obterLigacaoCache, guardarLigacaoCache } from './cache-fila.ts';
 import { mapearFilaLigacao } from './lote.ts';
 import type { ItemFila } from './lote.ts';
+import { mascararTelefone } from './mascarar.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
 
@@ -716,8 +717,7 @@ export async function criarLigacaoAvulsa(telefone: string): Promise<{ id: string
   }
   if (e164 === null) {
     // LGPD: nunca logar o telefone completo — só os últimos 4 dígitos.
-    const digitos = telefone.replace(/\D/g, '');
-    const mascarado = digitos.length > 4 ? `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}` : digitos;
+    const mascarado = mascararTelefone(telefone);
     console.warn(
       `[clickup] Ligação avulsa (${novaTask.id}) criada SEM o campo TELEFONE — telefone não normalizável p/ E.164 (${mascarado})`,
     );
