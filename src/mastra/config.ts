@@ -367,8 +367,11 @@ if (!REDIS_URL) {
 // sem console.warn quando há default. Sem REDIS_URL, fila.ts degrada para modo
 // inline (comportamento atual de 1 instância) — estas envs só têm efeito em modo bullmq.
 
-// Teto de tentativas por job antes de cair na DLQ (set `failed` do BullMQ) — FILA-03.
-export const FILA_ATTEMPTS = Number(process.env.FILA_ATTEMPTS) || 5;
+// Teto de 3 tentativas por job antes de cair na DLQ (set `failed` do BullMQ) — FILA-03.
+// 3 (não 5) alivia a pressão de 429 no storage do Wavoip (cada retry de RECORD re-baixa
+// a gravação) e limita quanto tempo uma Ligação fica "em processamento" antes da
+// finalização graciosa (finalizarRecordSemTranscricao) fechá-la. Override por env intacto.
+export const FILA_ATTEMPTS = Number(process.env.FILA_ATTEMPTS) || 3;
 
 // Delay base (ms) do backoff exponencial entre tentativas — FILA-03.
 export const FILA_BACKOFF_MS = Number(process.env.FILA_BACKOFF_MS) || 5000;

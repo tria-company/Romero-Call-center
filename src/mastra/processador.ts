@@ -468,3 +468,125 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // crash antes daqui nao deixa marca, permitindo re-rodar o job por inteiro.
   await marcarRecordProcessado(callId);
 }
+
+// ===== finalizarRecordSemTranscricao — desfecho gracioso quando os retries esgotam =====
+// (FILA-04, OPER-05; wired no worker.on('failed')/branch tentativasEsgotadas/job.name==='record')
+
+/**
+ * Desfecho GRACIOSO de um RECORD cuja transcricao esgotou as 3 tentativas do
+ * BullMQ (transcreverCallUrl devolveu null a cada retry -> processarRecordJob
+ * lancou -> tentativas esgotadas -> DLQ). Em vez de deixar a Ligacao ZUMBI
+ * presa em "em processamento" para sempre (observado em producao), FECHA a
+ * Ligacao (status complete), sinaliza NECESSITA_REVISAO=true + MOTIVO_FALHA e
+ * MANTEM a URL da gravacao gravada na Ligacao para reprocesso manual futuro.
+ *
+ * ADITIVA, nao substitui a auditoria: o worker so chama esta funcao DEPOIS de
+ * ja ter registrado o job na DLQ + disparado o alerta + marcado o evento cru
+ * como 'erro'. Aqui apenas fechamos a Ligacao alem desse registro.
+ *
+ * Mesmo estilo de processarRecordJob: cada passo loga-e-segue, nunca lanca
+ * (WR-03/D-P3-08); CR-02 crash-safe — recordJaProcessado no inicio (read-only)
+ * e marcarRecordProcessado SO no FIM (um crash no meio deixa reprocessavel).
+ *
+ * LGPD/WR-01: nenhum telefone/CPF/transcricao/payload em log — so ids/flags/
+ * status; telefone so aparece MASCARADO no caso de task nao resolvivel.
+ */
+export async function finalizarRecordSemTranscricao(dados: DadosJobRecord): Promise<void> {
+  const { whatsappCallId: callId, telefone, recordUrl, payload } = dados;
+
+  // CR-02: dedup CRASH-SAFE — mesmo check read-only do processarRecordJob.
+  // Pula reentrega de um job JA concluido sem reivindicar a marca (a marca so
+  // e setada no FIM, apos todo o efeito terminal).
+  if (await recordJaProcessado(callId)) return;
+
+  // D-P3-01: resolve a task da Ligacao exatamente como processarRecordJob —
+  // 1) map in-memory (task reportada em /api/discador/ligando), 2) fallback
+  // persistido no ClickUp (Ligacao aberta com o mesmo TELEFONE), 3) fallback
+  // Ligacao avulsa. Sem nenhuma delas nao ha task a fechar — a DLQ/alerta ja
+  // cobrem a auditoria; loga MASCARADO e retorna.
+  let taskId = await lerTaskAtiva(telefone, dados.deviceId);
+  if (!taskId) {
+    try {
+      taskId = await buscarLigacaoAbertaPorTelefone(telefone);
+    } catch (e) {
+      console.error('[processador] falha ao buscar Ligacao aberta por telefone (finalize sem transcricao):', e);
+    }
+  }
+  if (!taskId) {
+    try {
+      const avulsa = await criarLigacaoAvulsa(telefone);
+      taskId = avulsa.id;
+    } catch (e) {
+      console.error('[processador] falha ao criar Ligacao avulsa (finalize sem transcricao):', e);
+    }
+  }
+  if (!taskId) {
+    const mascarado = mascararTelefone(telefone);
+    console.warn(`[processador] finalize sem transcricao sem Ligacao correlacionavel (telefone=${mascarado})`);
+    return;
+  }
+
+  // Marca no field TRANSCRICAO o motivo — ajuda o operador que abrir a Ligacao
+  // marcada NECESSITA_REVISAO a saber que a gravacao existe e pode ser
+  // reprocessada. Loga-e-segue (o helper LANCA em falha de infra, WR-03).
+  try {
+    await gravarTranscricao(
+      taskId,
+      '(transcrição não obtida automaticamente após 3 tentativas — revisar manualmente)',
+    );
+  } catch (e) {
+    console.error('[processador] falha ao gravar transcricao (finalize sem transcricao):', e);
+  }
+
+  // HOUVE gravacao (teveGravacao=true -> atendeu=true) — so a transcricao
+  // falhou. Mantem urlGravacao na Ligacao para reprocesso manual futuro.
+  try {
+    await gravarMetadadosLigacao(taskId, {
+      atendeu: derivarAtendeu(payload, true),
+      fim: Date.now(),
+      duracao: derivarDuracao(payload),
+      urlGravacao: recordUrl,
+    });
+  } catch (e) {
+    console.error('[processador] falha ao gravar metadados (finalize sem transcricao):', e);
+  }
+
+  // Sinaliza revisao humana + o motivo objetivo da falha. Cada um loga-e-segue.
+  try {
+    await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
+  } catch (e) {
+    console.error('[processador] falha ao marcar NECESSITA_REVISAO (finalize sem transcricao):', e);
+  }
+  try {
+    await setCustomField(taskId, CAMPOS_LIGACOES.MOTIVO_FALHA, 'Transcrição não obtida após 3 tentativas');
+  } catch (e) {
+    console.error('[processador] falha ao gravar MOTIVO_FALHA (finalize sem transcricao):', e);
+  }
+
+  // Agente Contexto: consolida o lead (contadores/proximo contato; o LLM roda
+  // com este resumo) E fecha a Ligacao (status complete) — o passo que tira a
+  // task de "em processamento". atendeu:true (houve gravacao), sem aderencia
+  // (nao houve analise de script).
+  await consolidarEFecharLigacao(taskId, {
+    atendeu: true,
+    resumoAnalise:
+      'Ligação atendida, mas a transcrição automática falhou após 3 tentativas — sem análise de script.',
+    aderencia: null,
+    retorno: { necessario: false, data: null },
+  });
+
+  // CR-01/CR-02: simetria com a leitura acima — limpa tambem a chave COMPOSTA
+  // (deviceId|telefone) escrita por guardarTaskAtiva, senao ela vaza ate o TTL.
+  await limparTaskAtiva(telefone, dados.deviceId);
+
+  // Fecha o desfecho duravel do evento cru (Fase 2 — durabilidade).
+  try {
+    await marcarEventoWebhook(dados.eventoDuravelId, 'processado');
+  } catch (e) {
+    console.error('[processador] falha ao marcar evento record processado (finalize sem transcricao):', e);
+  }
+
+  // CR-02: SO AGORA (efeito terminal concluido) grava a marca duravel de dedup
+  // — POR ULTIMO. Um crash antes daqui nao deixa marca, permitindo re-rodar.
+  await marcarRecordProcessado(callId);
+}
