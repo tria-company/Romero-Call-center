@@ -22,6 +22,7 @@ import { obterFilaCache, guardarFilaCache, obterLigacaoCache, guardarLigacaoCach
 import { mapearFilaLigacao } from './lote.ts';
 import type { ItemFila } from './lote.ts';
 import { mascararTelefone } from './mascarar.ts';
+import { registrar429ClickUp } from './metricas.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
 
@@ -36,7 +37,12 @@ const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
  */
 async function fetchClickUp(url: string, options?: RequestInit, timeoutMs?: number): Promise<Response> {
   await adquirirToken();
-  return fetchTimeout(url, options, timeoutMs);
+  const res = await fetchTimeout(url, options, timeoutMs);
+  // D-06: conta o 429 REAL que ainda escapou do rate limiter proativo — so o
+  // incremento do contador (metricas.ts nunca lanca), sem alterar o fluxo de
+  // retorno nem logar URL/corpo (LGPD, ja evitado neste choke point).
+  if (res.status === 429) registrar429ClickUp();
+  return res;
 }
 
 // Mapa nome logico -> field_id na Lista 01 LEADS (1000320000002833). IDs
