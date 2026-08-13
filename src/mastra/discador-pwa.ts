@@ -20,11 +20,11 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v8 -> discador-v11): invalida o shell antigo nos
-// dispositivos já instalados como PWA após o reskin Liquid Glass (quick
-// 260812-o4u) e a tela de confirmação de voto no pós-ligação (quick
-// 260812-p5p). Mantém em sincronia com web/sw.js.
-export const DISCADOR_SW_JS = `const CACHE='discador-v11';
+// CACHE bump (discador-v11 -> discador-v12): invalida o shell antigo nos
+// dispositivos já instalados como PWA após o pool de devices com
+// lease/release (DEVICE-02, Fase 07 Plano 02 — app.js mudou). Mantém em
+// sincronia com web/sw.js.
+export const DISCADOR_SW_JS = `const CACHE='discador-v12';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -208,6 +208,10 @@ export const DISCADOR_APP_JS = `(function(){
   var timerInt=null, timerStart=0;
   var wakeLock=null, emChamada=false;
   var foiAtendida=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
+  // Multi-device pool (DEVICE-02): deviceModo aprendido uma vez via /config
+  // ('dedicado'|'pool'|'global'); leaseDeviceId guarda o device alocado na
+  // chamada corrente (so em modo pool) pra devolver ao fim.
+  var deviceModo=null, leaseDeviceId=null;
   function initials(s){var n=(s||'').trim();if(!n){return '#';}var p=n.split(' ').filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b).toUpperCase();}
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
@@ -293,15 +297,44 @@ export const DISCADOR_APP_JS = `(function(){
     });
   }
   function avancarFila(){filaIdx+=1;mostrarItemAtual();}
-  function garantirWavoip(){
-    if(wavoip){return Promise.resolve(wavoip);}
-    return api('/api/discador/config').then(function(res){return res.json();}).then(function(cfg){
-      wavoipToken=cfg.wavoipToken;if(!wavoipToken){throw new Error('sem token wavoip');}
-      return import('https://esm.sh/@wavoip/wavoip-api@2.6.3');
-    }).then(function(mod){
+  function instanciarWavoip(token){
+    return import('https://esm.sh/@wavoip/wavoip-api@2.6.3').then(function(mod){
       var W=mod.Wavoip||(mod.default&&mod.default.Wavoip)||mod.default||mod;
-      wavoip=new W({tokens:[wavoipToken]});return wavoip;
+      return new W({tokens:[token]});
     });
+  }
+  // Modo pool (DEVICE-02): lease de um device LIVRE no inicio da chamada —
+  // cada chamada pode receber um device diferente, entao NAO reusa o
+  // singleton 'wavoip' de dedicado/global. leaseDeviceId fica guardado pra
+  // endCallUI devolver o device ao pool no fim (liberarDeviceDaChamada).
+  function alocarDeviceELigar(){
+    return apiPost('/api/discador/dispositivo/lease',{}).then(function(res){
+      if(res.status===503){var e=new Error('sem device livre');e.semDeviceLivre=true;throw e;}
+      return res.json();
+    }).then(function(alocado){
+      leaseDeviceId=alocado.deviceId;
+      return instanciarWavoip(alocado.wavoipToken);
+    });
+  }
+  // Devolve o device de pool alocado na chamada corrente (best-effort,
+  // idempotente) — chamada de DENTRO de endCallUI, cobrindo TODOS os
+  // caminhos de termino (ended/unanswered/peerReject/hangup/erro de discagem).
+  function liberarDeviceDaChamada(){
+    if(!leaseDeviceId){return;}
+    var id=leaseDeviceId;leaseDeviceId=null;
+    apiPost('/api/discador/dispositivo/release',{deviceId:id}).catch(function(){});
+  }
+  function garantirWavoip(){
+    if((deviceModo==='dedicado'||deviceModo==='global')&&wavoip){return Promise.resolve(wavoip);}
+    if(deviceModo===null){
+      return api('/api/discador/config').then(function(res){return res.json();}).then(function(cfg){
+        deviceModo=cfg.modo;
+        if(deviceModo==='pool'){return alocarDeviceELigar();}
+        wavoipToken=cfg.wavoipToken;if(!wavoipToken){throw new Error('sem token wavoip');}
+        return instanciarWavoip(wavoipToken).then(function(w){wavoip=w;return wavoip;});
+      });
+    }
+    return alocarDeviceELigar();
   }
   function iniciarLigacao(lead){
     openCall(lead,'Pedindo microfone...');
@@ -329,6 +362,7 @@ export const DISCADOR_APP_JS = `(function(){
       setCallStatus('Chamando...');
       wireCallEvents(currentCall);
     }).catch(function(e){
+      if(e&&e.semDeviceLivre){setCallStatus('Sem número livre, tente em instantes');endCallUI();return;}
       var neg=(e&&(e.name==='NotAllowedError'||e.name==='SecurityError'));
       setCallStatus(neg?'Permita o microfone pra ligar':('Falha: '+((e&&e.message)?e.message:'erro')));
       endCallUI();
@@ -366,7 +400,7 @@ export const DISCADOR_APP_JS = `(function(){
   function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';$('call-overlay').style.display='flex';}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
-  function endCallUI(){emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;var atendida=foiAtendida,tid=chamadaTaskId;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else{$('call-overlay').style.display='none';}},1400);}
+  function endCallUI(){liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;var atendida=foiAtendida,tid=chamadaTaskId;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else{$('call-overlay').style.display='none';}},1400);}
   // Pos-ligacao (SO quando ATENDIDA): pergunta a confirmacao de voto dos
   // candidatos ainda nao preenchidos no lead (Lista 01) e grava. Se o lead ja
   // tem os dois definidos, ou nao ha lead resolvido, so fecha a overlay da
