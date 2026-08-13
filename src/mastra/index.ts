@@ -157,6 +157,17 @@ export const mastra = new Mastra({
 
       // ============ API DISCADOR ============
       {
+        // Healthcheck HTTP raso (D-06, INFRA-03): confirma so que o processo
+        // esta de pe, sem checar Redis/ClickUp/Supabase nem tocar estado-webhook.ts/
+        // fila.ts. Sem auth de proposito -- o Swarm/Traefik consultam sem sessao de
+        // operador. Um health PROFUNDO derrubaria as 2 replicas juntas se uma
+        // dependencia externa cair (o oposto da degradacao graciosa do projeto).
+        // Payload minimo por design (T-09-01): nunca versao/deps/stack/token.
+        path: '/api/discador/health',
+        method: 'GET',
+        handler: (c) => c.json({ status: 'ok' }),
+      },
+      {
         path: '/api/discador/login',
         method: 'POST',
         handler: async (c) => {
