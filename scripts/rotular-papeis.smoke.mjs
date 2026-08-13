@@ -50,11 +50,18 @@ function testarAtendenteFalante1() {
   );
 }
 
-// (c) 1 falante só → inalterado.
-function testarUmFalanteInalterado() {
-  const transcript = 'Falante 0: Olá, aqui é do gabinete do deputado Romero Albuquerque';
+// (c) 1 falante só → TEXTO CORRIDO sem rótulo (transmissão única), várias
+// linhas do mesmo falante viram um bloco contínuo.
+function testarUmFalanteTextoCorrido() {
+  const transcript = [
+    'Falante 0: Olá, aqui é do gabinete do deputado Romero Albuquerque.',
+    'Falante 0: Tudo bem com o senhor?',
+  ].join('\n');
   const out = rotularPapeis(transcript);
-  checar(out === transcript, `(c) deveria devolver o transcript inalterado: ${JSON.stringify(out)}`);
+  checar(
+    out === 'Olá, aqui é do gabinete do deputado Romero Albuquerque. Tudo bem com o senhor?',
+    `(c) deveria virar texto corrido sem rótulo: ${JSON.stringify(out)}`,
+  );
 }
 
 // (d) 2 falantes sem nenhuma keyword → inalterado (maior score === 0).
@@ -137,7 +144,7 @@ function testarNormalizacaoAcentoCaixa() {
 
 testarAtendenteFalante0();
 testarAtendenteFalante1();
-testarUmFalanteInalterado();
+testarUmFalanteTextoCorrido();
 testarSemKeywordInalterado();
 testarEmpateInalterado();
 testarTresFalantes();

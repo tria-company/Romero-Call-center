@@ -13,8 +13,9 @@
 // fallback baixa o audio da mesma record_url e re-POSTa os bytes COMPLETOS
 // (ArrayBuffer, nao stream), o que garante Content-Length deterministico.
 //
-// diarize + utterances = transcript rotulado por falante (call tem 2 pessoas:
-// o closer e o lead), formatado como "Falante N: ...\nFalante N: ...".
+// diarize + utterances = a IA do Deepgram separa os falantes pelo TOM DE VOZ
+// (call tem 2 pessoas: o closer e o lead), formatado como
+// "Falante N: ...\nFalante N: ...".
 //
 // A gravacao e MONO (MP3 Monaural) — nao ha separacao por canal, entao o
 // unico jeito de saber quem e quem e pos-processar os rotulos da
@@ -23,6 +24,10 @@
 // "Atendente") e rotula os demais como "Lead"/"Lead N". Critério
 // conservador — na duvida (poucas keywords, empate), mantem "Falante N"
 // intacto pra nunca inverter papeis por engano.
+//
+// Quando a diarizacao detecta UM UNICO falante (comum em mono curto/vozes
+// parecidas), `rotularPapeis` NAO repete "Falante 0:" em toda linha (parecia
+// erro) — devolve TEXTO CORRIDO contínuo, como uma transmissao unica.
 
 import { DEEPGRAM_API_KEY, DEEPGRAM_MODEL, DEEPGRAM_LANGUAGE } from './config.ts';
 import { fetchTimeout } from './http.ts';
@@ -94,10 +99,13 @@ const PESOS_KEYWORDS: Array<[string, number]> = [
  * demais viram "Lead" (2 falantes) ou "Lead 1", "Lead 2"... na ordem de
  * primeira aparição (3+ falantes). Pura e determinística — sem LLM.
  *
- * Critério conservador: se há menos de 2 falantes distintos, OU o maior
- * score é 0, OU há empate no topo do score, devolve o `transcript`
- * INALTERADO (nunca inverte papéis por engano). Linhas fora do padrão
- * `Falante N: texto` passam intocadas, mantendo posição/ordem.
+ * Com menos de 2 falantes distintos, devolve a transcrição como TEXTO CORRIDO
+ * (sem rótulos de falante) — evita a impressão de erro que "Falante 0"
+ * repetido em toda linha passava; a rotulagem Atendente/Lead só faz sentido
+ * com 2+ falantes. Critério conservador nos demais casos: se o maior score é
+ * 0 OU há empate no topo do score, devolve o `transcript` INALTERADO (nunca
+ * inverte papéis por engano). Linhas fora do padrão `Falante N: texto` passam
+ * intocadas, mantendo posição/ordem.
  */
 export function rotularPapeis(transcript: string): string {
   const linhas = transcript.split('\n');
@@ -115,7 +123,19 @@ export function rotularPapeis(transcript: string): string {
     textoPorFalante.get(n)!.push(texto);
   }
 
-  if (textoPorFalante.size < 2) return transcript;
+  if (textoPorFalante.size < 2) {
+    // 1 falante distinto (ou transcript plano sem rótulo): renderiza como
+    // TEXTO CORRIDO contínuo, SEM "Falante N:" — repetir "Falante 0" em toda
+    // linha passava impressão de erro pro operador/admin. A rotulagem
+    // Atendente/Lead só se aplica com 2+ falantes (abaixo).
+    return linhas
+      .map((l) => {
+        const m = l.match(LINHA_FALANTE_REGEX);
+        return m ? m[2] : l;
+      })
+      .filter(Boolean)
+      .join(' ');
+  }
 
   const scorePorFalante = new Map<string, number>();
   for (const [n, textos] of textoPorFalante) {
