@@ -41,10 +41,21 @@ jobs:
             # stack deploy nao detecta mudanca quando so a imagem 'latest' tem
             # novo conteudo (mesmo digest no spec). Por isso forcamos o service
             # update -- assim a task e recriada com a imagem nova.
+            # rc captura o exit code do deploy sem deixar o 'set -e' abortar
+            # antes do diagnostico abaixo -- precisa rodar SEMPRE, mesmo quando
+            # o rollout falha e o Swarm reverte sozinho (D-03/T-09-03).
+            rc=0
             if docker service ls --filter name=discador_discador --format '{{.Name}}' | grep -q discador_discador; then
-              docker service update --force --image discador-wavoip:latest discador_discador
+              docker service update --force --image discador-wavoip:latest discador_discador || rc=$?
             else
-              docker stack deploy --resolve-image=never -c ~/discador.yaml discador
+              docker stack deploy --resolve-image=never -c ~/discador.yaml discador || rc=$?
             fi
-            sleep 5
-            docker service ps discador_discador --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -5
+            # rolling update de 2 replicas em parallelism 1 + start-first +
+            # monitor (deploy/discador.swarm.yaml) demora mais que a 1 replica
+            # antiga -- 10s da mais folga antes do diagnostico abaixo.
+            sleep 10
+            # SEMPRE imprime o estado das tasks (2 replicas + eventuais tasks em
+            # rollback) -- auditabilidade do rollback automatico mesmo em falha.
+            docker service ps discador_discador --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -10
+            echo "[deploy] rollout rc=$rc"
+            exit "$rc"
