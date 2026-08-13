@@ -13,7 +13,8 @@
 // client-side por design (o SDK do navegador precisa dele), mas nunca em log
 // de servidor.
 
-import { WAVOIP_DEVICES, WAVOIP_USER_DEVICES, WAVOIP_DEVICE_TOKEN } from './config.ts';
+import Redis from 'ioredis';
+import { WAVOIP_DEVICES, WAVOIP_USER_DEVICES, WAVOIP_DEVICE_TOKEN, REDIS_URL, DEVICE_LEASE_TTL_MS } from './config.ts';
 
 export type ModoDevice = 'dedicado' | 'pool' | 'global';
 
@@ -123,4 +124,167 @@ export function resolverConfigDoUsuario(usuario: string): ConfigDevice {
     return { wavoipToken: null, deviceId: null, modo: 'pool' };
   }
   return { wavoipToken: WAVOIP_DEVICE_TOKEN, deviceId: null, modo: 'global' };
+}
+
+// ===== Pool com lease/release (DEVICE-02, Fase 07 Plano 02) =====
+//
+// Quando ha menos devices que atendentes, o atendente sem device dedicado
+// (resolverConfigDoUsuario acima -> modo:'pool') aloca um device LIVRE do
+// pool no inicio da chamada (lease) e devolve no fim (release). Espelha
+// estado-webhook.ts (DD-07-04): backend Redis-ou-memoria decidido UMA vez no
+// boot por REDIS_URL, cliente ioredis lazy singleton, SET ... 'PX' ttl 'NX'
+// atomico pro lease, NUNCA lanca pro chamador (Redis fora do ar degrada:
+// lease falha-fechado = "sem device livre", release = no-op best-effort).
+
+export interface DeviceAlocado {
+  deviceId: string;
+  wavoipToken: string;
+  leaseTtlMs: number;
+}
+
+const MODO_POOL: 'redis' | 'memoria' = REDIS_URL ? 'redis' : 'memoria';
+
+const PREFIXO_LEASE = 'wv:lease:';
+
+/** deviceIds do inventario que NAO estao dedicados a nenhum usuario (DD-07-06). */
+function deviceIdsDePool(): string[] {
+  const dedicadosSet = new Set(DEDICADOS.values());
+  const ids: string[] = [];
+  for (const deviceId of INVENTARIO.keys()) {
+    if (!dedicadosSet.has(deviceId)) ids.push(deviceId);
+  }
+  return ids;
+}
+
+// ----- Backend MEMORIA — Map<deviceId, {usuario, ts}> + poda preguicosa por TTL -----
+
+const leaseMem = new Map<string, { usuario: string; ts: number }>();
+
+function leaseVivoMem(deviceId: string): boolean {
+  const entrada = leaseMem.get(deviceId);
+  if (!entrada) return false;
+  if (Date.now() - entrada.ts > DEVICE_LEASE_TTL_MS) {
+    leaseMem.delete(deviceId); // poda preguicosa — TTL expirado, device volta sozinho ao pool
+    return false;
+  }
+  return true;
+}
+
+function alocarDeviceMem(usuario: string): DeviceAlocado | null {
+  for (const deviceId of deviceIdsDePool()) {
+    if (leaseVivoMem(deviceId)) continue;
+    const token = tokenDoDevice(deviceId);
+    if (!token) continue;
+    leaseMem.set(deviceId, { usuario, ts: Date.now() });
+    return { deviceId, wavoipToken: token, leaseTtlMs: DEVICE_LEASE_TTL_MS };
+  }
+  return null;
+}
+
+function liberarDeviceMem(deviceId: string, usuario?: string): void {
+  const entrada = leaseMem.get(deviceId);
+  if (!entrada) return;
+  if (usuario && entrada.usuario !== usuario) return; // T-07-05: nao libera lease de outro
+  leaseMem.delete(deviceId);
+}
+
+// ----- Backend REDIS — cliente lazy, TTL nativo, SET NX atomico (espelha estado-webhook.ts) -----
+
+let clientePool: Redis | null = null;
+
+function garantirClientePool(): Redis {
+  if (!clientePool) {
+    clientePool = new Redis(REDIS_URL, {
+      maxRetriesPerRequest: 2,
+      enableOfflineQueue: false,
+      connectTimeout: 5000,
+    });
+    // So para nao derrubar o processo com unhandled error — mensagem curta,
+    // NUNCA a REDIS_URL (pode embutir credencial).
+    clientePool.on('error', (e) => {
+      console.error('[dispositivos] erro de conexao Redis do pool (degradando):', e instanceof Error ? e.message : String(e));
+    });
+  }
+  return clientePool;
+}
+
+async function alocarDeviceRedis(usuario: string): Promise<DeviceAlocado | null> {
+  try {
+    const cliente = garantirClientePool();
+    for (const deviceId of deviceIdsDePool()) {
+      const token = tokenDoDevice(deviceId);
+      if (!token) continue;
+      const resultado = await cliente.set(PREFIXO_LEASE + deviceId, usuario, 'PX', DEVICE_LEASE_TTL_MS, 'NX');
+      if (resultado === 'OK') {
+        return { deviceId, wavoipToken: token, leaseTtlMs: DEVICE_LEASE_TTL_MS };
+      }
+    }
+    return null; // nenhum device livre — esgotamento (DD-07-09), NAO e erro
+  } catch (e) {
+    // Fail-fechado (diferente de estado-webhook.ts): melhor "tente de novo"
+    // do que entregar um device que talvez ja esteja leased por outro.
+    console.error('[dispositivos] falha ao alocar device do pool (degradando p/ sem-device-livre):', e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
+
+async function liberarDeviceRedis(deviceId: string, usuario?: string): Promise<void> {
+  try {
+    const cliente = garantirClientePool();
+    if (usuario) {
+      try {
+        const dono = await cliente.get(PREFIXO_LEASE + deviceId);
+        if (dono !== null && dono !== usuario) return; // T-07-05: nao libera lease de outro
+      } catch (e) {
+        // GET falhou — segue com o del best-effort (nao trava o release por
+        // causa de uma falha transiente na checagem de dono).
+        console.error('[dispositivos] falha ao checar dono do lease (seguindo com del best-effort):', e instanceof Error ? e.message : String(e));
+      }
+    }
+    await cliente.del(PREFIXO_LEASE + deviceId);
+  } catch (e) {
+    console.error('[dispositivos] falha ao liberar device do pool (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+// ----- Superficie publica — despacha para o backend escolhido no boot -----
+
+/**
+ * Aloca um device LIVRE do pool para `usuario` (lease). Retorna `null`
+ * quando o pool esta esgotado (o endpoint traduz em 503 — DD-07-09) OU em
+ * falha do Redis (fail-fechado — DD-07-04). Nunca lanca.
+ */
+export async function alocarDevice(usuario: string): Promise<DeviceAlocado | null> {
+  return MODO_POOL === 'redis' ? alocarDeviceRedis(usuario) : Promise.resolve(alocarDeviceMem(usuario));
+}
+
+/**
+ * Devolve `deviceId` ao pool. Se `usuario` for informado, so libera quando
+ * `usuario` e o dono do lease (T-07-05) — idempotente e best-effort, nunca
+ * lanca (release repetido/de device sem lease ativa e no-op).
+ */
+export async function liberarDevice(deviceId: string, usuario?: string): Promise<void> {
+  if (!deviceId) return;
+  return MODO_POOL === 'redis' ? liberarDeviceRedis(deviceId, usuario) : Promise.resolve(liberarDeviceMem(deviceId, usuario));
+}
+
+/** 'redis' ou 'memoria' — usado pelo smoke e pelo log de boot. */
+export function modoDevicePool(): 'redis' | 'memoria' {
+  return MODO_POOL;
+}
+
+/** Fecha o cliente Redis do pool (graceful shutdown) — no-op em modo memoria. */
+export async function fecharDevicePool(): Promise<void> {
+  if (clientePool) {
+    await clientePool.quit();
+    clientePool = null;
+  }
+}
+
+if (deviceIdsDePool().length > 0) {
+  console.log(
+    MODO_POOL === 'redis'
+      ? '[dispositivos] pool de devices em Redis (compartilhado)'
+      : '[dispositivos] pool de devices em memoria (1 instancia)',
+  );
 }

@@ -67,6 +67,13 @@ export const WAVOIP_DEVICES = process.env.WAVOIP_DEVICES || '';
 // identico a DISCADOR_ASSIGNEES (operadores.ts).
 export const WAVOIP_USER_DEVICES = process.env.WAVOIP_USER_DEVICES || '';
 
+// TTL (ms) da lease de um device do pool (DEVICE-02, Fase 07 Plano 02) — o
+// release explicito no fim da chamada e o caminho normal; o TTL e so o
+// backstop de crash (atendente caiu/travou com a call ativa). Default 2h
+// cobre com folga chamadas de 30-90min. Default sensato -> sem console.warn
+// (mesmo espirito de FILA_*).
+export const DEVICE_LEASE_TTL_MS = Number(process.env.DEVICE_LEASE_TTL_MS) || 7200000;
+
 // ===== Transcricao da call (webhook Wavoip -> Deepgram -> nota no GHL) =====
 
 // Token fail-closed do webhook Wavoip (/api/webhook/wavoip). Vem como ?token=xxx
