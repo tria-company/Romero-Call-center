@@ -146,6 +146,13 @@ const MODO_POOL: 'redis' | 'memoria' = REDIS_URL ? 'redis' : 'memoria';
 
 const PREFIXO_LEASE = 'wv:lease:';
 
+// WR-01: script de release atomico (padrao classico de lock com owner). So
+// deleta a chave do lease se o valor atual for exatamente este `usuario` —
+// tudo num unico round-trip, sem a janela GET->DEL onde o lease podia expirar
+// e ser re-adquirido por outro atendente entre os dois passos.
+const LUA_RELEASE =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+
 /** deviceIds do inventario que NAO estao dedicados a nenhum usuario (DD-07-06). */
 function deviceIdsDePool(): string[] {
   const dedicadosSet = new Set(DEDICADOS.values());
@@ -232,16 +239,17 @@ async function liberarDeviceRedis(deviceId: string, usuario?: string): Promise<v
   try {
     const cliente = garantirClientePool();
     if (usuario) {
-      try {
-        const dono = await cliente.get(PREFIXO_LEASE + deviceId);
-        if (dono !== null && dono !== usuario) return; // T-07-05: nao libera lease de outro
-      } catch (e) {
-        // GET falhou — segue com o del best-effort (nao trava o release por
-        // causa de uma falha transiente na checagem de dono).
-        console.error('[dispositivos] falha ao checar dono do lease (seguindo com del best-effort):', e instanceof Error ? e.message : String(e));
-      }
+      // WR-01/T-07-05: compare-and-delete ATOMICO via Lua — so deleta se o dono
+      // atual for este `usuario`, num unico round-trip. Elimina a corrida
+      // GET->DEL (entre os dois passos o lease podia expirar e ser re-adquirido
+      // por outro atendente, e o DEL entao liberava o lease do NOVO dono) e
+      // NUNCA deleta sem confirmar a posse: se o eval falhar (Redis transiente),
+      // cai no catch abaixo e degrada p/ no-op — nunca blind-delete.
+      await cliente.eval(LUA_RELEASE, 1, PREFIXO_LEASE + deviceId, usuario);
+    } else {
+      // Release owner-agnostico (sem `usuario`): DEL incondicional, como antes.
+      await cliente.del(PREFIXO_LEASE + deviceId);
     }
-    await cliente.del(PREFIXO_LEASE + deviceId);
   } catch (e) {
     console.error('[dispositivos] falha ao liberar device do pool (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
   }
