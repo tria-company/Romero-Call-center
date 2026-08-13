@@ -82,7 +82,7 @@ export const DISCADOR_HTML = `<!doctype html>
   .fila-item{position:relative;display:flex;align-items:center;gap:12px;border-radius:16px;padding:14px 16px;margin-bottom:12px;background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);border-top:1px solid var(--hair-top);border-left:1px solid var(--hair-side);border-right:1px solid var(--hair-side);border-bottom:1px solid rgba(255,255,255,.05);box-shadow:0 6px 22px rgba(2,6,16,.4)}
   .fila-item:active{transform:translateY(1px)}
   .fila-item .lig-info{flex:1;min-width:0}
-  .fila-ligar{flex:0 0 auto;width:auto;padding:11px 20px;font-size:14px}
+  .fila-item .fila-ligar{flex:0 0 auto;width:auto;padding:11px 20px;font-size:14px}
   /* login */
   #login-view{flex:1;display:flex;flex-direction:column;justify-content:center;padding:28px;gap:14px;max-width:420px;margin:0 auto;width:100%}
   #login-view .logo{width:66px;height:66px;margin:0 auto 8px;border-radius:20px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:30px;box-shadow:0 10px 30px rgba(0,123,255,.4)}
