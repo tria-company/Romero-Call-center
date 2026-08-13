@@ -29,16 +29,61 @@ services:
       - NODE_ENV=production
       - TZ=America/Sao_Paulo
 
+    ## healthcheck: raso por design (D-06) -- so confirma que o processo HTTP
+    ## responde em localhost:4111, sem checar Redis/ClickUp/Supabase. Um health
+    ## profundo derrubaria as 2 replicas JUNTAS se uma dependencia externa cair
+    ## (o oposto da degradacao graciosa ja implementada em cache/rate-limiter/
+    ## estado-webhook). wget (nao curl) porque node:22-alpine so tem busybox.
+    ## O path bate com a rota criada em src/mastra/index.ts (Task 1 deste plano).
+    ## DELIBERADAMENTE NAO ha HEALTHCHECK no Dockerfile: o worker (discador_worker)
+    ## usa a MESMA imagem mas nao expoe HTTP na 4111 -- um HEALTHCHECK no Dockerfile
+    ## marcaria o worker como unhealthy. O healthcheck fica escopado so a este
+    ## servico via o bloco abaixo.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:4111/api/discador/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
     deploy:
       mode: replicated
-      replicas: 1
+      replicas: 2 ## D-01: 2 replicas na mesma VPS (single-node) -- resiliencia
+      ## contra crash de PROCESSO (deploy travado, memory leak), nao contra queda
+      ## de host. Seguro sem perder correlacao/duplicar processamento porque o
+      ## estado da chamada ja e compartilhado via Redis (estado-webhook.ts, Fase
+      ## 05), o worker BullMQ e idempotente (Fase 06) e o rate limiter usa Lua
+      ## atomico multi-replica (Fase 08).
       placement:
         constraints:
-          - node.role == manager
+          - node.role == manager ## D-02: continua single-node, constraint inalterada
       resources:
         limits:
           cpus: "1"
           memory: 512M
+      ## update_config: rolling update zero-downtime real (SC2), nao so nominal.
+      ## parallelism 1 (D-04): troca 1 replica de cada vez -- com so 2 replicas
+      ## totais, sempre sobra pelo menos 1 da versao anterior atendendo enquanto a
+      ## nova e validada. order start-first: sobe a task nova ANTES de derrubar a
+      ## antiga (usa RAM extra por instante, a VPS ja foi dimensionada para isso).
+      ## delay 10s entre trocas; monitor 40s = janela de observacao da task nova,
+      ## maior que start_period (15s) + 1 intervalo de healthcheck (30s) ficaria
+      ## justo, mas o gate real de saude e o proprio Docker healthcheck (retries
+      ## 3 x interval 30s = ate 90s pra marcar unhealthy) -- monitor cobre o
+      ## primeiro sinal claro sem segurar o rollout por 90s a cada replica.
+      ## max_failure_ratio 0 + failure_action rollback (D-03): qualquer task nova
+      ## que nao fique saudavel reverte o servico sozinho pra versao anterior --
+      ## nenhuma replica quebrada fica no ar esperando intervencao manual.
+      update_config:
+        parallelism: 1
+        order: start-first
+        delay: 10s
+        monitor: 40s
+        max_failure_ratio: 0
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: start-first
       labels:
         - traefik.enable=true
         - traefik.http.routers.discador.rule=Host(`discador.${VPS_HOST_IP}.sslip.io`)
