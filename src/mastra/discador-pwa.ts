@@ -227,6 +227,7 @@ export const DISCADOR_APP_JS = `(function(){
   var timerInt=null, timerStart=0;
   var wakeLock=null, emChamada=false;
   var foiAtendida=false, desfechoEnviado=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
+  var previewAtualItem=null;
   // Multi-device pool (DEVICE-02): deviceModo aprendido uma vez via /config
   // ('dedicado'|'pool'|'global'); leaseDeviceId guarda o device alocado na
   // chamada corrente (so em modo pool) pra devolver ao fim. dedicadoDeviceId
@@ -286,7 +287,7 @@ export const DISCADOR_APP_JS = `(function(){
     var tel=document.createElement('div');tel.className='lig-tel';tel.textContent=item.telefone;
     info.appendChild(nome);info.appendChild(tel);
     var btn=document.createElement('button');btn.className='primary fila-ligar';btn.textContent='Ligar';
-    btn.onclick=function(){iniciarLigacao(item);};
+    btn.onclick=function(){abrirPreview(item);};
     row.appendChild(av);row.appendChild(info);row.appendChild(btn);
     return row;
   }
@@ -324,6 +325,49 @@ export const DISCADOR_APP_JS = `(function(){
   // silenciosamente — a task recem-desfechada some da lista (ou reaparece se
   // ficou na fila por nao-atendida/hangup antes de atender).
   function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';carregarFilaSilencioso();}
+  // Preview do lead antes de ligar (T-m3v): abre ao tocar "Ligar" na fila,
+  // mostra CONTEXTO (dossie nativo) + SCRIPT; a chamada so comeca ao tocar
+  // "Ligar" DENTRO do preview (delega pra iniciarLigacao existente).
+  function abrirPreview(item){
+    previewAtualItem=item;
+    var av=$('preview-avatar');if(av){av.textContent=initials(item.nome||item.telefone);}
+    $('preview-nome').textContent=item.nome||item.telefone;
+    $('preview-tel').textContent=item.telefone;
+    $('preview-contexto').textContent='Carregando contexto...';
+    $('preview-script').textContent='Carregando script...';
+    $('preview-overlay').style.display='block';
+    carregarContextoDoPreview(item.taskId);
+    carregarScriptDoPreview(item.taskId);
+  }
+  function fecharPreview(){$('preview-overlay').style.display='none';previewAtualItem=null;}
+  function carregarContextoDoPreview(taskId){
+    var el=$('preview-contexto');if(!el){return;}
+    api('/api/discador/contexto/'+encodeURIComponent(taskId)).then(function(res){
+      return res.json().catch(function(){return {};}).then(function(data){return {status:res.status,data:data};});
+    }).then(function(r){
+      if(!previewAtualItem||previewAtualItem.taskId!==taskId){return;} // preview trocou/fechou enquanto carregava
+      if(r.status!==200){el.textContent='Não foi possível carregar o contexto.';return;}
+      if(r.data.temLead&&r.data.contexto){el.textContent=r.data.contexto;}else{el.textContent='Sem contexto disponível para este lead.';}
+    }).catch(function(e){
+      if(e&&e.message==='401'){return;}
+      if(!previewAtualItem||previewAtualItem.taskId!==taskId){return;}
+      el.textContent='Não foi possível carregar o contexto.';
+    });
+  }
+  function carregarScriptDoPreview(taskId){
+    var el=$('preview-script');if(!el){return;}
+    api('/api/discador/ligacao/'+encodeURIComponent(taskId)).then(function(res){
+      return res.json().catch(function(){return {};}).then(function(data){return {status:res.status,data:data};});
+    }).then(function(r){
+      if(!previewAtualItem||previewAtualItem.taskId!==taskId){return;} // preview trocou/fechou enquanto carregava
+      if(r.status!==200||!r.data.ligacao){el.textContent='Não foi possível carregar o script.';return;}
+      el.textContent=r.data.ligacao.script||'(sem script)';
+    }).catch(function(e){
+      if(e&&e.message==='401'){return;}
+      if(!previewAtualItem||previewAtualItem.taskId!==taskId){return;}
+      el.textContent='Não foi possível carregar o script.';
+    });
+  }
   // Script no overlay da chamada (SCRIPT-IN-OVERLAY): fetch on-demand ao abrir a
   // chamada (nao mais por item da lista) — menos chamadas por poll.
   function carregarScriptDaChamada(taskId){
@@ -506,6 +550,8 @@ export const DISCADOR_APP_JS = `(function(){
     $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}setToken('');show('login');};
     $('reload-btn').onclick=carregarFila;
     $('hangup-btn').onclick=hangup;
+    $('preview-voltar').onclick=fecharPreview;
+    $('preview-ligar').onclick=function(){var it=previewAtualItem;fecharPreview();if(it){iniciarLigacao(it);}};
     // Poll ~15s da fila ao vivo (LIVE-QUEUE) — pulado durante chamada ativa (pollFila).
     filaPollInt=setInterval(pollFila,15000);
     var vo=$('voto-overlay');
