@@ -271,7 +271,9 @@ export function planejarIngestao(
  * lead — modelo das 6 seções extraído do board do Miro (04-CONTEXT.md
  * §domain). Cada fonte aceita `null`/ausente (fonte indisponível — erro/sem
  * escopo) ou um array/objeto vazio (fonte respondeu, sem registros); a
- * distinção entre os dois estados fica a cargo do caller.
+ * distinção entre os dois estados fica a cargo do caller. A Seção 4
+ * (Histórico de chamados) combina `ghlOportunidades` com as Ligações do
+ * discador na Lista 02 (`ligacoesRomeroCall`), consistente com o Miro.
  */
 export interface FontesDossie {
   /** Seções 1 (Perfil) e 2 (Síntese). */
@@ -280,6 +282,12 @@ export interface FontesDossie {
   ghlConversas: { resumo?: string; mensagens?: Array<{ texto: string; data: string }>; [chave: string]: unknown } | null;
   /** Seções 2 (Síntese) e 4 (Histórico de chamados). */
   ghlOportunidades: Array<{ titulo?: string; status?: string; data?: string; [chave: string]: unknown }> | null;
+  /**
+   * Seção 4 (Histórico de chamados) — Ligações do discador (Lista 02),
+   * consistente com o board do Miro (a Fase 3 alimenta a Lista 02; o dossiê
+   * incorpora esse histórico na Seção 4). Opcional/retrocompatível.
+   */
+  ligacoesRomeroCall?: Array<{ data?: string; atendeu?: boolean | string; aderencia?: number | string; resumoAnalise?: string; motivoFalha?: string; [chave: string]: unknown }> | null;
   /** Seção 1 (Perfil e classificação). */
   supabaseMilitante: Record<string, unknown> | null;
   /** Seção 5 (Follow-ups pendentes). */
@@ -348,7 +356,10 @@ function injetarFonte(linhas: string[], rotulo: string, valor: unknown): void {
  * ausente/indisponível ou respondeu vazia (D-P4-06 — a IA nunca inventa
  * conteúdo para seção sem fonte). As seções 3 e 6 incorporam o histórico
  * RomeroCall (observacaoConsolidada/ultimoResultado) quando presente
- * (D-P4-03). O `system` blinda contra prompt injection (T-04-02-PI): trata
+ * (D-P4-03); a Seção 4 (Histórico de chamados) incorpora, além das
+ * oportunidades GHL, as Ligações do discador (Lista 02) via
+ * `fontes.ligacoesRomeroCall` (consistente com o board do Miro).
+ * O `system` blinda contra prompt injection (T-04-02-PI): trata
  * todo conteúdo das fontes como DADO a resumir, jamais como instrução.
  */
 export function montarPromptDossie(fontes: FontesDossie): { system: string; prompt: string } {
@@ -383,6 +394,7 @@ export function montarPromptDossie(fontes: FontesDossie): { system: string; prom
 
   linhas.push('', '## 4. Histórico de chamados');
   injetarFonte(linhas, 'oportunidades GHL', fontes.ghlOportunidades);
+  injetarFonte(linhas, 'ligações RomeroCall (Lista 02)', fontes.ligacoesRomeroCall ?? null);
 
   linhas.push('', '## 5. Follow-ups e serviços prestados');
   injetarFonte(linhas, 'follow-ups pendentes (Supabase)', fontes.supabaseFollowUps);

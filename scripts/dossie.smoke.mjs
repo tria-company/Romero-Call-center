@@ -25,6 +25,7 @@ const FONTES_COMPLETAS = {
   ghlContato: { nome: 'Fulano de Tal', tags: ['militante', 'zona-sul'] },
   ghlConversas: { resumo: 'Conversa recente sobre agenda de eventos', mensagens: [{ texto: 'Oi, tudo bem?', data: '2026-08-01' }] },
   ghlOportunidades: [{ titulo: 'Chamado suporte', status: 'aberto', data: '2026-07-01' }],
+  ligacoesRomeroCall: [{ data: '2026-08-10', atendeu: true, aderencia: '8', resumoAnalise: 'Confirmou presença', motivoFalha: '' }],
   supabaseMilitante: { zona: '12', secao: '034' },
   supabaseFollowUps: [{ descricao: 'Ligar semana que vem', data: '2026-08-15' }],
   observacaoConsolidada: 'Lead engajado, já confirmou presença em 2 eventos anteriores.',
@@ -148,6 +149,34 @@ function testarTabelasComErroAparecemNoPrompt() {
   checar(prompt.includes('romero_db_resgate'), 'prompt com tabelasComErro deveria citar explicitamente o nome da tabela que falhou (degradação por tabela)');
 }
 
+// ===== (g) seção 4 — Ligações RomeroCall (Lista 02, quick 260813-pfm) =====
+
+function testarSecaoLigacoesRomeroCallPresente() {
+  const { prompt } = montarPromptDossie(FONTES_COMPLETAS);
+  const idx4 = prompt.indexOf('## 4. Histórico de chamados');
+  const idx5 = prompt.indexOf('## 5.');
+  checar(idx4 !== -1, 'prompt deveria conter a seção 4 (Histórico de chamados)');
+  const secao4 = idx4 !== -1 && idx5 !== -1 ? prompt.slice(idx4, idx5) : '';
+  checar(secao4.includes('Confirmou presença'), 'a seção 4 deveria conter o valor distintivo da fixture de ligações RomeroCall (Lista 02)');
+  checar(/lig/i.test(secao4) && /lista 02/i.test(secao4), 'a seção 4 deveria rotular a fonte de ligações RomeroCall (Lista 02)');
+}
+
+function testarSecaoLigacoesRomeroCallAusente() {
+  const fontes = { ...FONTES_COMPLETAS, ligacoesRomeroCall: null };
+  const { prompt } = montarPromptDossie(fontes);
+  checar(prompt.includes('sem dados de ligações RomeroCall'), 'prompt deveria injetar marcador de degradação para a seção 4 quando ligacoesRomeroCall é null');
+  checar(prompt.toLowerCase().includes('indisponível'), 'marcador de ligações RomeroCall ausente deveria dizer que a fonte está indisponível');
+  checar(!prompt.includes('Confirmou presença'), 'prompt NÃO deveria conter valor de outra fixture quando ligacoesRomeroCall está ausente');
+}
+
+function testarSecaoLigacoesRomeroCallVazia() {
+  const fontes = { ...FONTES_COMPLETAS, ligacoesRomeroCall: [] };
+  const { prompt } = montarPromptDossie(fontes);
+  checar(prompt.includes('sem dados de ligações RomeroCall'), 'prompt com ligacoesRomeroCall vazia deveria injetar marcador da seção 4');
+  checar(prompt.includes('respondeu sem registros'), 'ligacoesRomeroCall vazia deveria usar o marcador de "respondeu sem registros"');
+  checar(!prompt.includes('Confirmou presença'), 'prompt com ligacoesRomeroCall vazia NÃO deveria conter valor de outra fixture');
+}
+
 testarSeisSecoesComTodasAsFontes();
 testarDegradacaoQuandoFollowUpsAusente();
 testarDegradacaoQuandoContatoAusente();
@@ -162,6 +191,9 @@ testarVariantesTelefoneBrEntradaVazia();
 testarSecaoServicosPrestadosPresente();
 testarSecaoServicosPrestadosVaziaNaoInventa();
 testarTabelasComErroAparecemNoPrompt();
+testarSecaoLigacoesRomeroCallPresente();
+testarSecaoLigacoesRomeroCallAusente();
+testarSecaoLigacoesRomeroCallVazia();
 
 if (falhas.length > 0) {
   console.error('=== SMOKE FAIL ===');

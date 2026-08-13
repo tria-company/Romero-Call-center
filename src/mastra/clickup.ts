@@ -143,6 +143,12 @@ export interface CustomFieldClickUp {
   id: string;
   name?: string;
   value?: unknown;
+  /**
+   * Config do campo (drop_down): opções `{ id, orderindex, name }` — presente
+   * no GET da task. Usado por `lerAtendeu` para traduzir o valor lido de um
+   * drop_down (que a API devolve como orderindex/id da opção) em boolean.
+   */
+  type_config?: { options?: Array<{ id?: string; orderindex?: number; name?: string }> };
 }
 
 export interface TaskClickUp {
@@ -841,6 +847,108 @@ export async function resolverLeadDaLigacao(taskLigacaoId: string): Promise<stri
   const task = await lerTask(taskLigacaoId);
   if (!task) return null;
   return resolverLeadPelaTask(task);
+}
+
+/**
+ * Traduz o valor do drop_down ATENDEU (Lista 02) em boolean, de forma
+ * TOLERANTE ao formato de leitura: hoje o campo só é ESCRITO (setCustomField
+ * grava o UUID da opção via OPCOES_LIGACOES), nunca lido — e o GET da task
+ * pode devolver drop_down como o `orderindex` (inteiro), o `id` da opção
+ * (UUID) ou o `name`. Resolve nesta ordem: UUID direto contra
+ * OPCOES_LIGACOES.ATENDEU.sim/.nao → senão casa contra `type_config.options`
+ * (por orderindex/id/name) e mapeia a opção casada. Indeterminado/ausente →
+ * `false` (nunca lança). Sem PII/log (LGPD).
+ */
+function lerAtendeu(task: TaskClickUp): boolean {
+  const cf = task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.ATENDEU);
+  const raw = cf?.value;
+  if (raw === null || raw === undefined || raw === '') return false;
+  const opcoes = OPCOES_LIGACOES[CAMPOS_LIGACOES.ATENDEU];
+  const rawStr = String(raw);
+  // Caso 1: veio o UUID da opção diretamente (formato que setCustomField grava).
+  if (rawStr === opcoes.sim) return true;
+  if (rawStr === opcoes.nao) return false;
+  // Caso 2: veio orderindex (inteiro), id ou name — resolve via type_config.options.
+  const opcao = cf?.type_config?.options?.find(
+    (o) => String(o.orderindex) === rawStr || o.id === rawStr || o.name === rawStr,
+  );
+  if (opcao) {
+    if (opcao.id === opcoes.sim) return true;
+    if (opcao.id === opcoes.nao) return false;
+    const nome = String(opcao.name ?? '').trim().toLowerCase();
+    if (nome === 'sim') return true;
+    if (nome === 'não' || nome === 'nao') return false;
+  }
+  return false;
+}
+
+/**
+ * Lista as Ligações da Lista 02 vinculadas a UM lead (direção lead→ligações,
+ * inversa de `resolverLeadPelaTask`) — alimenta a Seção 4 "Histórico de
+ * chamados" do dossiê (quick 260813-pfm, consistente com o board do Miro).
+ *
+ * Estratégia: pagina TODA a Lista 02 com `includeClosed: true` (o histórico
+ * de ligações está em tasks FECHADAS, espalhadas por várias páginas — não
+ * basta a página 0, diferente de `buscarLigacaoAbertaPorTelefone`).
+ * `listarTasks` LANÇA em falha de infra (WR-03) — deixamos propagar (o caller
+ * degrada por fonte). Casa a Ligação ao lead quando `LEAD_REL` (array; item
+ * `{ id }` ou id direto) contém `leadTaskId`, OU (fallback) `telefonesIguais`
+ * no TELEFONE. Ordena por data (INICIO, epoch ms) DESC — ausentes por último
+ * — e limita a `CAP` itens. LGPD/WR-01: NUNCA loga telefone/CPF/transcrição.
+ */
+export async function buscarLigacoesDoLead(
+  leadTaskId: string,
+  telefone: string,
+): Promise<Array<{ data: string; atendeu: boolean; aderencia: string; resumoAnalise: string; motivoFalha: string }>> {
+  const CAP = 10;
+
+  // Pagina a Lista 02 inteira COM as fechadas (mesmo shape de lerTodasAsTasks).
+  const todas: TaskClickUp[] = [];
+  let page = 0;
+  let lastPage = false;
+  while (!lastPage) {
+    const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
+    todas.push(...resultado.tasks);
+    lastPage = resultado.lastPage;
+    page += 1;
+  }
+
+  const campo = (task: TaskClickUp, id: string): unknown =>
+    task.custom_fields?.find((c) => c.id === id)?.value;
+
+  const casaLead = (task: TaskClickUp): boolean => {
+    const leadRel = campo(task, CAMPOS_LIGACOES.LEAD_REL);
+    if (Array.isArray(leadRel)) {
+      const casa = leadRel.some((item) => {
+        const id = item && typeof item === 'object' ? (item as { id?: string }).id : item;
+        return id !== undefined && id !== null && String(id) === leadTaskId;
+      });
+      if (casa) return true;
+    }
+    // Fallback por telefone — só quando temos um telefone não-vazio para
+    // comparar (evita casar tasks de TELEFONE vazio contra um telefone vazio).
+    return telefone ? telefonesIguais(campo(task, CAMPOS_LIGACOES.TELEFONE), telefone) : false;
+  };
+
+  const paraString = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
+
+  const ligacoes = todas.filter(casaLead).map((task) => ({
+    data: paraString(campo(task, CAMPOS_LIGACOES.INICIO)),
+    atendeu: lerAtendeu(task),
+    aderencia: paraString(campo(task, CAMPOS_LIGACOES.ADERENCIA_SCRIPT)),
+    resumoAnalise: paraString(campo(task, CAMPOS_LIGACOES.ANALISE_IA)),
+    motivoFalha: paraString(campo(task, CAMPOS_LIGACOES.MOTIVO_FALHA)),
+  }));
+
+  // Ordena por data (INICIO, epoch ms) DESC — mais recente primeiro; ausentes
+  // (data vazia / não-numérica) por último.
+  ligacoes.sort((a, b) => {
+    const na = a.data !== '' && Number.isFinite(Number(a.data)) ? Number(a.data) : -Infinity;
+    const nb = b.data !== '' && Number.isFinite(Number(b.data)) ? Number(b.data) : -Infinity;
+    return nb - na;
+  });
+
+  return ligacoes.slice(0, CAP);
 }
 
 /**

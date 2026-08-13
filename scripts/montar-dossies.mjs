@@ -36,6 +36,7 @@ import {
   listarTasks,
   lerTask,
   atualizarTask,
+  buscarLigacoesDoLead,
   CAMPOS_LEADS,
   CLICKUP_LIST_LEADS,
 } from '../src/mastra/clickup.ts';
@@ -108,7 +109,12 @@ function secoesDegradadas(fontes) {
   const rotulos = [];
   if (fonteVaziaOuAusente(fontes.ghlContato)) rotulos.push('contato GHL');
   if (fonteVaziaOuAusente(fontes.supabaseMilitante)) rotulos.push('militante Supabase');
-  if (fonteVaziaOuAusente(fontes.ghlOportunidades)) rotulos.push('oportunidades GHL');
+  // Seção 4 (Histórico de chamados) combina oportunidades GHL + Ligações da
+  // Lista 02 (quick 260813-pfm) — só conta como degradada quando AMBAS estão
+  // vazias/ausentes.
+  if (fonteVaziaOuAusente(fontes.ghlOportunidades) && fonteVaziaOuAusente(fontes.ligacoesRomeroCall)) {
+    rotulos.push('histórico de chamados');
+  }
   if (fonteVaziaOuAusente(fontes.ghlConversas)) rotulos.push('conversas GHL');
   if (fonteVaziaOuAusente(fontes.supabaseFollowUps)) rotulos.push('follow-ups Supabase');
   if (fonteVaziaOuAusente(fontes.servicosPrestados)) rotulos.push('serviços prestados');
@@ -210,10 +216,23 @@ async function montarDossieDoLead(lead, taskLead, identificador) {
     console.warn(`  [aviso] serviços prestados Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // Seção 4 (Histórico de chamados): as Ligações do discador (Lista 02),
+  // consistente com o board do Miro (quick 260813-pfm). buscarLigacoesDoLead
+  // LANÇA em falha de infra (WR-03) — degrada por fonte (null + aviso
+  // mascarado), sem abortar o dossiê deste lead (D-P4-06). `identificador` já
+  // mascara o telefone — não logar PII.
+  let ligacoesRomeroCall = null;
+  try {
+    ligacoesRomeroCall = await buscarLigacoesDoLead(lead.taskId, lead.telefone);
+  } catch (e) {
+    console.warn(`  [aviso] ligações RomeroCall (Lista 02) indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const fontes = {
     ghlContato,
     ghlConversas,
     ghlOportunidades,
+    ligacoesRomeroCall,
     supabaseMilitante,
     supabaseFollowUps,
     servicosPrestados,
