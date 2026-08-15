@@ -411,6 +411,70 @@ export async function listarStatusLista(listId: string): Promise<string[]> {
   return statuses.map((s) => String(s?.status || '')).filter(Boolean);
 }
 
+/** Membro da workspace ClickUp (D-03) — id sempre String (a API devolve numero). */
+export interface MembroClickUp {
+  id: string;
+  nome: string;
+  email: string;
+}
+
+/**
+ * PURA (sem I/O): achata `GET /team` (`{ teams: [{ members: [{ user: {
+ * id, username, email } }] }] }`) em uma lista de membros, mapeando
+ * `user.id`->id (String), `user.username`->nome, `user.email`->email, e
+ * dedupa por `id`. Entrada ausente/malformada -> `[]` (NUNCA lança — molde
+ * "PURA, nunca lança" para funções de mapeamento, D-03).
+ */
+export function mapearMembrosTeam(data: unknown): MembroClickUp[] {
+  const teams = (data as { teams?: unknown })?.teams;
+  if (!Array.isArray(teams)) return [];
+  const vistos = new Map<string, MembroClickUp>();
+  for (const team of teams) {
+    const members = (team as { members?: unknown })?.members;
+    if (!Array.isArray(members)) continue;
+    for (const membro of members) {
+      const user = (membro as { user?: unknown })?.user as
+        | { id?: unknown; username?: unknown; email?: unknown }
+        | undefined;
+      if (!user || user.id === undefined || user.id === null) continue;
+      const id = String(user.id);
+      if (vistos.has(id)) continue;
+      vistos.set(id, {
+        id,
+        nome: typeof user.username === 'string' ? user.username : '',
+        email: typeof user.email === 'string' ? user.email : '',
+      });
+    }
+  }
+  return [...vistos.values()];
+}
+
+/**
+ * Lista os membros da workspace ClickUp (D-03, fonte do dropdown de
+ * vínculo `clickup_member_id` na tela de gestão de operadores). Thin
+ * wrapper sobre `GET /team` — mesmo molde de `listarStatusLista` (single
+ * GET, sem paginação). Token ausente e falha de rede/HTTP LANÇAM (WR-03)
+ * — nunca retorna lista vazia pra mascarar erro. LGPD: loga só a
+ * CONTAGEM de membros, nunca email/nome em massa.
+ */
+export async function listarMembrosWorkspace(): Promise<MembroClickUp[]> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para listar membros da workspace');
+  }
+  let res: Response;
+  try {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/team`, { headers: headers() });
+  } catch (e) {
+    throw new Error(`[clickup] falha de rede ao listar membros da workspace: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /team falhou (${res.status})`);
+  }
+  const membros = mapearMembrosTeam(await res.json());
+  console.log(`[clickup] listarMembrosWorkspace: ${membros.length} membro(s)`);
+  return membros;
+}
+
 /**
  * Busca a fila de Ligações (Lista 02) do operador logado (LOTE-04 — o
  * discador substitui o GHL QUALIFICADO por esta fila). Filtra por assignee
