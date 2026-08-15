@@ -11,6 +11,11 @@ import {
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
 import { verificarCredenciais, emitirToken, verificarToken, tokenDoHeader } from './discador-auth';
+// Seed idempotente (USER-05) + snapshot em memoria de discador_usuarios
+// (Fase 11 D-01/D-02) — disparados 1x no boot abaixo; verificarCredenciais
+// (discador-auth.ts) e assigneeDoOperador/resolverConfigDoUsuario
+// (operadores.ts/dispositivos.ts) leem do store a partir daqui.
+import { semearUsuariosSeVazio, recarregarUsuarios } from './usuarios.ts';
 
 // Lista de leads qualificados (GHL, pipeline COMERCIAL USI) — legado, ver nota
 // na rota /api/discador/qualificados abaixo.
@@ -124,6 +129,12 @@ console.log(
   '[webhook] processamento ' + (modoFila() === 'bullmq' ? 'assíncrono (fila BullMQ)' : 'inline (1 instância)'),
 );
 
+// Boot (Fase 11, USER-05/D-02): seed idempotente de discador_usuarios (so
+// importa do env se a tabela estiver vazia) + aquece o snapshot em memoria
+// usado por operadores.ts/dispositivos.ts. Fire-and-forget nao-fatal — nunca
+// derruba o boot do processo; usuarios.ts ja loga sucesso/falha internamente.
+void semearUsuariosSeVazio().then(() => recarregarUsuarios()).catch(() => {});
+
 /**
  * Servidor do Discador Wavoip. Serve o PWA (frontend) e a API minima que ele
  * consome: login, lista de qualificados e o token do device Wavoip. A ligacao
@@ -200,7 +211,17 @@ export const mastra = new Mastra({
             const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
             const usuario = String(body.usuario || '');
             const senha = String(body.senha || '');
-            if (!verificarCredenciais(usuario, senha)) {
+            let credenciaisValidas: boolean;
+            try {
+              credenciaisValidas = await verificarCredenciais(usuario, senha);
+            } catch (e) {
+              // Fail-closed (T-11-03-D1): falha de infra do store (Postgres fora
+              // do ar/config ausente) NUNCA vira "credencial valida" — 503
+              // distinto do 401 de credencial errada.
+              console.error('[discador] store indisponivel no login:', e instanceof Error ? e.message : String(e));
+              return c.json({ status: 'indisponivel' }, 503);
+            }
+            if (!credenciaisValidas) {
               return c.json({ status: 'invalido' }, 401);
             }
             return c.json({ token: emitirToken(usuario) });

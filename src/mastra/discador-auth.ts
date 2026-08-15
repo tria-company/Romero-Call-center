@@ -1,30 +1,13 @@
-// Auth do PWA Discador (login por closer). v1: usuarios em env DISCADOR_USERS,
-// senha guardada como SHA-256 hex. Token de sessao = HMAC assinado (sem estado
-// no servidor). Seed default admin/admin pra comecar — TROCAR em producao.
-import { createHash, createHmac, timingSafeEqual } from 'crypto';
-
-function sha256(s: string): string {
-  return createHash('sha256').update(s).digest('hex');
-}
-
-// DISCADOR_USERS: "user1:sha256hex,user2:sha256hex". Default: admin/admin.
-function carregarUsuarios(): Map<string, string> {
-  const raw = process.env.DISCADOR_USERS || `admin:${sha256('admin')}`;
-  const m = new Map<string, string>();
-  for (const par of raw.split(',')) {
-    const i = par.indexOf(':');
-    if (i === -1) continue;
-    const user = par.slice(0, i).trim().toLowerCase();
-    const hash = par.slice(i + 1).trim().toLowerCase();
-    if (user && hash) m.set(user, hash);
-  }
-  return m;
-}
-const USUARIOS = carregarUsuarios();
-
-if (!process.env.DISCADOR_USERS) {
-  console.warn('[discador-auth] DISCADOR_USERS nao configurado — usando seed admin/admin (INSEGURO, trocar em prod).');
-}
+// Auth do PWA Discador (login por closer). A fonte de credenciais agora e o
+// Postgres (tabela discador_usuarios, Fase 11 D-01/D-02) — nao mais o env
+// DISCADOR_USERS. verificarCredenciais despacha por algoritmo (scrypt novo
+// vs sha256-legado importado do seed) e faz upgrade-on-login do legado pra
+// scrypt (D-08). Token de sessao = HMAC assinado (sem estado no servidor),
+// payload permanece `usuario|exp` (sem papel — o gate de gestor le o papel
+// do store por request, Fase 11 Plano 04, pra revogacao imediata).
+import { createHmac, timingSafeEqual } from 'crypto';
+import { buscarUsuario, atualizarSenha } from './usuarios.ts';
+import { verificarSenhaScrypt, verificarSenhaLegada } from './senha.ts';
 
 const SESSION_SECRET = process.env.DISCADOR_SESSION_SECRET || 'discador-secret-trocar-em-prod';
 if (!process.env.DISCADOR_SESSION_SECRET) {
@@ -32,22 +15,36 @@ if (!process.env.DISCADOR_SESSION_SECRET) {
 }
 const TTL_MS = 12 * 60 * 60 * 1000; // sessao de 12h
 
-function compararHex(aHex: string, bHex: string): boolean {
-  try {
-    const a = Buffer.from(aHex, 'hex');
-    const b = Buffer.from(bHex, 'hex');
-    return a.length === b.length && timingSafeEqual(a, b);
-  } catch {
-    return false;
+/**
+ * Valida usuario+senha lendo do store (Postgres). Fail-closed: qualquer throw
+ * de infra (config ausente/rede/HTTP) de `buscarUsuario` PROPAGA pro chamador
+ * — nunca degrada pra "credencial valida" (T-11-03-D1). Usuario inexistente
+ * ou senha errada -> false (401), nunca excecao.
+ *
+ * Dispatch por `senha_algo`: 'scrypt' (caminho novo, D-08) verifica direto;
+ * 'sha256-legado' (importado do seed, Fase 11 Plano 02) verifica pelo
+ * caminho legado e, em sucesso, faz upgrade-on-login best-effort pra scrypt
+ * — falha do upgrade NUNCA derruba o login (T-11-03-T1).
+ *
+ * LGPD: NUNCA logar `senha`/hash/salt.
+ */
+export async function verificarCredenciais(usuario: string, senha: string): Promise<boolean> {
+  const reg = await buscarUsuario(usuario.trim().toLowerCase());
+  if (!reg) return false;
+  if (reg.senha_algo === 'scrypt') {
+    return verificarSenhaScrypt(senha, reg.senha_hash, reg.senha_salt);
   }
-}
-
-/** Valida usuario+senha contra o store (timing-safe). */
-export function verificarCredenciais(usuario: string, senha: string): boolean {
-  const u = (usuario || '').trim().toLowerCase();
-  const esperado = USUARIOS.get(u);
-  if (!esperado) return false;
-  return compararHex(esperado, sha256(senha || ''));
+  // 'sha256-legado'
+  const ok = verificarSenhaLegada(senha, reg.senha_hash);
+  if (ok) {
+    try {
+      await atualizarSenha(reg.id, senha);
+    } catch {
+      // upgrade nunca derruba o login (T-11-03-T1) — o proximo login legado
+      // bem-sucedido tenta de novo.
+    }
+  }
+  return ok;
 }
 
 /** Emite token de sessao: base64url("user|exp").hmac. */
