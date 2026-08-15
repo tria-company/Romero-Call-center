@@ -1,64 +1,180 @@
 #!/usr/bin/env node
 // scripts/gerar-lote.mjs
 //
-// Runner impuro da skill "gerar-lote-diario" (LOTE-02/03, Fase 02 Plano 02;
-// Dossiê 360 DOSS-01, Fase 04 Plano 04): lê a Lista 01 (LEADS), prioriza
-// (src/mastra/lote.ts), monta o Dossiê 360° de cada lead (GHL + Supabase +
-// histórico RomeroCall, D-P4-01/04) e grava na descrição do lead, gera um
-// roteiro estruturado por lead via LLM (Agente Script, agora nascendo do
-// Gancho do dossiê — D-P4-02) e cria uma task por lead na Lista 02
-// (LIGACOES) com o script na descrição, vínculo ao lead
-// (LEAD_REL/ID_LEAD/TELEFONE) e assignee do operador — de forma idempotente
-// (D-P2-03): pula lead que já tem Ligação ABERTA referenciando-o.
+// Runner impuro da skill "gerar-lote-diario", ClickUp-only (Quick 260815-hea,
+// decisões travadas D1-D6): a Lista 01 (LEADS) já vem preenchida à mão pelo
+// gestor; este runner faz SELEÇÃO EXPLÍCITA (um dos 3 modos abaixo) ->
+// DISTRIBUI em round-robin entre os operadores da rodada (D6) -> cria uma
+// Ligação por lead na Lista 02 (LIGACOES) com o roteiro que o gestor escreveu
+// num arquivo .md (D3). Não lê nenhuma fonte externa, não gera nada por conta
+// própria: nem prioriza, nem escreve na descrição do lead (D2 — o dossiê é
+// read-only, quem digita é o gestor).
 //
 // Uso:
-//   node --env-file=.env --experimental-strip-types scripts/gerar-lote.mjs [--tamanho N] [--dry-run]
+//   node --env-file=.env --experimental-strip-types scripts/gerar-lote.mjs \
+//     (--telefones "<lista>" | --tag [nome] | --tamanho N) \
+//     --script <caminho.md> [--operadores nome1,nome2,...] [--dry-run]
 //
-// Backend plugável (D-P2-02): a implementação abaixo é REST, via clickup.ts
-// (token .env, já provado na workspace 9014971829) — o default executável
-// desta fase. O MCP do ClickUp fica documentado no SKILL.md como alternativa
-// futura (NÃO implementada aqui): só entra se o usuário conectar essa
-// workspace ao conector MCP do claude.ai. O ponto de extensão é a interface
-// `BackendLote` (src/mastra/lote.ts) — este runner implementa esse contrato
-// inline com clickup.ts abaixo (ligacoesAbertasDoLead/criarLigacao).
+// Modos de seleção (D4, exatamente UM é obrigatório):
+//   --telefones "<lista>"  casa cada telefone colado (vírgula/espaço/quebra
+//                          de linha) contra a Lista 01, via filtrarLeadsPorTelefones.
+//   --tag [nome]           puxa só os leads marcados com a tag do ClickUp
+//                          (default "lote-hoje" ou LOTE_TAG_DEFAULT).
+//   --tamanho N            pega os primeiros N leads em ordem de lista (sem
+//                          scoring/priorização — sem N usa LOTE_TAMANHO_DEFAULT).
 //
-// LGPD (T-02-02-I / T-04-04-I1): logs só imprimem contagens/ids/nome —
-// telefone MASCARADO, CPF NUNCA aparece em log (nem mascarado — o dossiê
-// passa a manipular CPF como chave de identidade Supabase, D-P4-08), nunca o
-// token do ClickUp/Supabase.
+// --script <caminho.md> é OBRIGATÓRIA: o texto do arquivo vira a description
+// de TODAS as Ligações criadas nesta execução (D3, script único do dia).
+//
+// --operadores nome1,nome2,... distribui as Ligações em round-robin entre os
+// operadores da rodada (D6); sem a flag, cai no fallback single-operator
+// LOTE_OPERADOR_DEFAULT. Se QUALQUER operador não resolver o memberId (via
+// DISCADOR_ASSIGNEES), a execução real PARA ANTES DE ESCREVER; em --dry-run
+// segue com um assignee de exemplo '0' só para o preview.
+//
+// Backend REST direto (via clickup.ts, token .env) — mesmo choke point de
+// escrita usado pelo resto do projeto (D-07: custom fields sempre por field-id).
+//
+// LGPD: logs só imprimem contagens/nome/nome-do-operador — telefone SEMPRE
+// mascarado (mascararTelefone), nunca CPF (a skill não lê/escreve o CPF do
+// lead — dossiê é read-only), token do ClickUp nunca aparece em log/erro.
 
+import { readFileSync } from 'node:fs';
 import {
   listarTasks,
   criarTask,
-  atualizarTask,
   setCustomField,
   CLICKUP_LIST_LEADS,
   CLICKUP_LIST_LIGACOES,
   CAMPOS_LEADS,
   CAMPOS_LIGACOES,
 } from '../src/mastra/clickup.ts';
-import { chamarLLM } from '../src/mastra/llm.ts';
 import {
   parseLeadDaTask,
-  selecionarLoteElegivel,
-  montarPromptScript,
   montarTaskLigacao,
   deveCriar,
+  filtrarLeadsPorTelefones,
+  filtrarTasksPorTag,
+  selecionarPorQuantidade,
+  distribuirRoundRobin,
 } from '../src/mastra/lote.ts';
-import { montarPromptDossie } from '../src/mastra/dossie.ts';
-import { buscarMilitante, listarFollowUps, listarServicosPrestados } from '../src/mastra/supabase.ts';
-import { buscarContactIdPorTelefone, buscarConversasWhatsApp, buscarOportunidades } from '../src/mastra/ghl.ts';
 import { assigneeDoOperador } from '../src/mastra/operadores.ts';
-import { LOTE_LIMITE_TENTATIVAS, LOTE_TAMANHO_DEFAULT, SUPABASE_COL_ID } from '../src/mastra/config.ts';
+import { LOTE_TAMANHO_DEFAULT } from '../src/mastra/config.ts';
 import { mascararTelefone } from '../src/mastra/mascarar.ts';
 
 const DRY_RUN = process.argv.includes('--dry-run');
+const LOTE_TAG_DEFAULT = process.env.LOTE_TAG_DEFAULT || 'lote-hoje';
 
-function lerTamanhoArgv() {
-  const idx = process.argv.indexOf('--tamanho');
-  if (idx === -1) return LOTE_TAMANHO_DEFAULT;
-  const valor = Number(process.argv[idx + 1]);
-  return Number.isFinite(valor) && valor > 0 ? valor : LOTE_TAMANHO_DEFAULT;
+/** Presença de uma flag booleana/com-valor-opcional em process.argv. */
+function flagPresente(nome) {
+  return process.argv.includes(nome);
+}
+
+/** Valor explícito de uma flag (undefined se a flag não veio, ou veio "bare" seguida de outra flag/fim). */
+function lerFlagValor(nome) {
+  const idx = process.argv.indexOf(nome);
+  if (idx === -1) return undefined;
+  const valor = process.argv[idx + 1];
+  if (valor === undefined || valor.startsWith('--')) return undefined;
+  return valor;
+}
+
+function numeroPositivoOuNulo(valor) {
+  const n = Number(valor);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Quebra a lista de telefones colados por vírgula, espaço ou quebra de linha. */
+function parseTelefonesColados(raw) {
+  return raw
+    .split(/[\s,]+/)
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Resolve o modo de seleção (D4, exatamente UM obrigatório) e os parâmetros
+ * necessários. LANÇA (falha-claro, antes de tocar o ClickUp) se nenhum modo
+ * ou mais de um modo foi passado, ou se --telefones veio sem nenhum telefone.
+ */
+function resolverModoSelecao() {
+  const temTelefones = flagPresente('--telefones');
+  const temTag = flagPresente('--tag');
+  const temTamanho = flagPresente('--tamanho');
+  const ativos = [temTelefones, temTag, temTamanho].filter(Boolean).length;
+
+  if (ativos !== 1) {
+    throw new Error(
+      '[gerar-lote] escolha EXATAMENTE um modo de seleção: --telefones "<lista>", --tag [nome] ou --tamanho N ' +
+        `(recebido: ${ativos} modo(s)).`,
+    );
+  }
+
+  if (temTelefones) {
+    const raw = lerFlagValor('--telefones');
+    const telefonesColados = raw ? parseTelefonesColados(raw) : [];
+    if (telefonesColados.length === 0) {
+      throw new Error('[gerar-lote] --telefones veio sem nenhum telefone — passe uma lista separada por vírgula/espaço.');
+    }
+    return { modo: 'telefones', telefonesColados };
+  }
+
+  if (temTag) {
+    const tagNome = lerFlagValor('--tag') || LOTE_TAG_DEFAULT;
+    return { modo: 'tag', tagNome };
+  }
+
+  const tamanho = numeroPositivoOuNulo(lerFlagValor('--tamanho')) ?? LOTE_TAMANHO_DEFAULT;
+  return { modo: 'tamanho', tamanho };
+}
+
+/** Lê o arquivo .md do roteiro (D3) — LANÇA claro se ausente/vazio, antes de tocar o ClickUp. */
+function lerScriptDoArquivo() {
+  const caminho = lerFlagValor('--script');
+  if (!caminho) {
+    throw new Error('[gerar-lote] --script <caminho.md> é obrigatório — o roteiro que o gestor escreveu para esta rodada.');
+  }
+  let conteudo;
+  try {
+    conteudo = readFileSync(caminho, 'utf8');
+  } catch (e) {
+    throw new Error(`[gerar-lote] não foi possível ler o arquivo de script "${caminho}": ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!conteudo.trim()) {
+    throw new Error(`[gerar-lote] o arquivo de script "${caminho}" está vazio — escreva o roteiro antes de rodar o lote.`);
+  }
+  return conteudo;
+}
+
+/**
+ * Resolve a lista de operadores da rodada (D6): `--operadores nome1,nome2,...`
+ * ou o fallback single-operator `LOTE_OPERADOR_DEFAULT` sem a flag. Cada nome
+ * resolve para memberId via `assigneeDoOperador`. GUARD: se QUALQUER nome não
+ * resolver, em execução real LANÇA (para antes de escrever); em --dry-run
+ * segue com assignee de exemplo '0' só para os não resolvidos (preview).
+ */
+function resolverOperadores() {
+  const raw = lerFlagValor('--operadores');
+  let nomes = raw
+    ? raw.split(',').map((v) => v.trim()).filter(Boolean)
+    : [];
+  if (nomes.length === 0) nomes = [process.env.LOTE_OPERADOR_DEFAULT || ''];
+
+  const resolvidos = nomes.map((nome) => ({ nome, assigneeId: assigneeDoOperador(nome) }));
+  const naoResolvidos = resolvidos.filter((op) => !op.assigneeId).map((op) => op.nome || '(vazio)');
+
+  if (naoResolvidos.length > 0) {
+    const mensagem =
+      `[gerar-lote] não foi possível resolver o memberId do(s) operador(es): ${naoResolvidos.join(', ')} — ` +
+      'configure DISCADOR_ASSIGNEES ("usuario:memberId,...") no .env.';
+    if (DRY_RUN) {
+      console.warn(`${mensagem}\n(preview segue com assignee de exemplo '0' para os não resolvidos — nada será escrito.)`);
+      return resolvidos.map((op) => ({ nome: op.nome, assigneeId: op.assigneeId ?? '0' }));
+    }
+    throw new Error(mensagem);
+  }
+
+  return resolvidos;
 }
 
 /** Pagina uma lista inteira do ClickUp (listarTasks LANÇA em falha — WR-03, nunca fila vazia silenciosa). */
@@ -75,236 +191,69 @@ async function lerTodasAsTasks(listId, opts = {}) {
   return todas;
 }
 
-/**
- * Lê um custom field bruto de uma TaskClickUp por field-id (D-07) — usado só
- * para ler CPF/ID_SUPABASE/OBSERVACAO_CONSOLIDADA/ULTIMO_RESULTADO da própria
- * task do lead já carregada (histórico RomeroCall, seções 3/6 do dossiê —
- * D-P4-03). CPF NUNCA é logado por este runner — só usado como chave de
- * identidade para o lookup no Supabase (D-P4-08).
- */
-function valorCampoTask(task, fieldId) {
-  const campo = task?.custom_fields?.find((c) => c.id === fieldId);
-  const v = campo?.value;
-  return v === null || v === undefined ? '' : String(v);
-}
-
-/** `true` se o valor está ausente/vazio (mesmo racional de statusFonte em dossie.ts, sem importá-lo — só para o log de diagnóstico do dry-run). */
-function fonteVaziaOuAusente(valor) {
-  if (valor === null || valor === undefined) return true;
-  if (Array.isArray(valor)) return valor.length === 0;
-  if (typeof valor === 'string') return valor.trim() === '';
-  if (typeof valor === 'object') return Object.keys(valor).length === 0;
-  return false;
-}
-
-/** Lista os rótulos das seções do dossiê que ficaram degradadas (sem dado) — só para o log do --dry-run, nunca imprime CPF/PII. */
-function secoesDegradadas(fontes) {
-  const rotulos = [];
-  if (fonteVaziaOuAusente(fontes.ghlContato)) rotulos.push('contato GHL');
-  if (fonteVaziaOuAusente(fontes.supabaseMilitante)) rotulos.push('militante Supabase');
-  if (fonteVaziaOuAusente(fontes.ghlOportunidades)) rotulos.push('oportunidades GHL');
-  if (fonteVaziaOuAusente(fontes.ghlConversas)) rotulos.push('conversas GHL');
-  if (fonteVaziaOuAusente(fontes.supabaseFollowUps)) rotulos.push('follow-ups Supabase');
-  if (fonteVaziaOuAusente(fontes.servicosPrestados)) rotulos.push('serviços prestados');
-  if (fonteVaziaOuAusente(fontes.observacaoConsolidada) && fonteVaziaOuAusente(fontes.ultimoResultado)) {
-    rotulos.push('histórico RomeroCall');
-  }
-  return rotulos;
-}
-
-/**
- * Reúne as fontes do dossiê de UM lead (GHL + Supabase + histórico
- * RomeroCall, D-P4-04), monta o dossiê via Agente Contexto
- * (`montarPromptDossie` + `chamarLLM`) e grava na descrição da task do lead
- * na Lista 01 (D-P4-01, sobrescreve SEMPRE — D-P4-05). Roda ANTES do
- * `montarPromptScript` para o roteiro poder nascer do Gancho (D-P4-02).
- *
- * Cada leitura Supabase (buscarMilitante/listarFollowUps — LANÇA, WR-03) é
- * isolada em try/catch local: on-throw, a seção correspondente vira `null`
- * (degradação explícita — D-P4-06), sem abortar a montagem do dossiê deste
- * lead. As leituras GHL de enriquecimento (buscarConversasWhatsApp/
- * buscarOportunidades) já degradam sozinhas (nunca lançam — ghl.ts).
- *
- * `ghlContato` (seção 1/Perfil) é montado a partir do próprio `lead` (nome/
- * telefone), que já reflete o GHL via ID_LEAD_GHL — este runner não chama um
- * endpoint dedicado de "contato" (não existe hoje em ghl.ts; fora do escopo
- * desta fatia).
- *
- * Em `--dry-run`, monta o dossiê em memória (loga tamanho + seções
- * degradadas) mas NÃO grava (`atualizarTask`).
- */
-async function montarDossieDoLead(lead, taskLead, identificador) {
-  const cpf = valorCampoTask(taskLead, CAMPOS_LEADS.CPF);
-  const idSupabase = valorCampoTask(taskLead, CAMPOS_LEADS.ID_SUPABASE);
-  const observacaoConsolidada = valorCampoTask(taskLead, CAMPOS_LEADS.OBSERVACAO_CONSOLIDADA);
-  const ultimoResultado = valorCampoTask(taskLead, CAMPOS_LEADS.ULTIMO_RESULTADO);
-
-  // GHL: resolve o contactId uma vez (D-P4-12); sem contactId, conversas/
-  // oportunidades ficam indisponíveis (null) — não há como tentar a leitura.
-  const contactId = await buscarContactIdPorTelefone(lead.telefone);
-  const ghlContato = lead.nome ? { nome: lead.nome, telefone: lead.telefone } : null;
-  let ghlConversas = null;
-  let ghlOportunidades = null;
-  if (contactId) {
-    const mensagens = await buscarConversasWhatsApp(contactId);
-    ghlConversas = mensagens.length > 0 ? { mensagens } : {};
-    ghlOportunidades = await buscarOportunidades(contactId);
-  }
-
-  // Supabase: LANÇA em falha de config/infra (WR-03) — converte o throw na
-  // degradação de seção que o dossiê exige (D-P4-06), sem abortar o lead.
-  const chaveSupabase = {
-    idSupabase: idSupabase || undefined,
-    cpf: cpf || undefined,
-    telefone: lead.telefone || undefined,
-  };
-
-  let supabaseMilitante = null;
-  try {
-    supabaseMilitante = await buscarMilitante(chaveSupabase);
-  } catch (e) {
-    console.warn(`  [aviso] militante Supabase indisponível para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // refMilitante (CR-02, 04-VERIFICATION.md): a FK correta pra filtrar a seção 5
-  // (follow-ups) é o id DO MILITANTE — nunca id/cpf/telefone do lead misturados.
-  // Fonte primária: a linha real retornada por buscarMilitante (SUPABASE_COL_ID);
-  // fallback: o ID_SUPABASE já lido da task do lead (todo lead ingerido tem um).
-  // Sem nenhum dos dois, listarFollowUps LANÇA "referência do militante ausente"
-  // — o try/catch abaixo converte isso em seção 5 degradada (D-P4-06), NUNCA em
-  // dado de outra pessoa.
-  const refMilitante = supabaseMilitante?.[SUPABASE_COL_ID]
-    ? String(supabaseMilitante[SUPABASE_COL_ID])
-    : idSupabase || undefined;
-
-  let supabaseFollowUps = null;
-  try {
-    supabaseFollowUps = await listarFollowUps({ refMilitante });
-  } catch (e) {
-    console.warn(`  [aviso] follow-ups Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // Serviços prestados (seção 5, quick 260811-l7k): lê TODAS as tabelas
-  // romero_db_* (SUPABASE_TABLES_SERVICOS) por telefone (variantes BR) +
-  // refMilitante (mesmo id de identidade já usado pelos follow-ups acima —
-  // sem introduzir nova chave). Degradação por tabela já vem embutida em
-  // tabelasComErro; on-throw (config ausente, WR-03) a fonte inteira degrada
-  // sem abortar o dossiê deste lead (D-P4-06).
-  let servicosPrestados = null;
-  let tabelasComErro = null;
-  try {
-    const resultadoServicos = await listarServicosPrestados({ telefone: lead.telefone, idContato: refMilitante });
-    servicosPrestados = resultadoServicos.servicos;
-    tabelasComErro = resultadoServicos.tabelasComErro.length > 0 ? resultadoServicos.tabelasComErro : null;
-  } catch (e) {
-    console.warn(`  [aviso] serviços prestados Supabase indisponíveis para ${identificador}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  const fontes = {
-    ghlContato,
-    ghlConversas,
-    ghlOportunidades,
-    supabaseMilitante,
-    supabaseFollowUps,
-    servicosPrestados,
-    tabelasComErro,
-    observacaoConsolidada: observacaoConsolidada || null,
-    ultimoResultado: ultimoResultado || null,
-  };
-
-  const { system, prompt } = montarPromptDossie(fontes);
-  const dossieMarkdown = await chamarLLM(prompt, system);
-
-  if (DRY_RUN) {
-    const degradadas = secoesDegradadas(fontes);
-    console.log(
-      `  [dry-run] dossiê de ${identificador} montado em memória (${dossieMarkdown.length} caractere(s)); ` +
-        `seções degradadas: ${degradadas.length ? degradadas.join(', ') : 'nenhuma'}.`,
-    );
-  } else {
-    // D-P4-01/05: grava as 6 seções na descrição da task do lead — sempre
-    // sobrescreve (remontado a cada rodada do lote, nunca faz merge parcial).
-    await atualizarTask(lead.taskId, { description: dossieMarkdown });
-  }
-
-  return dossieMarkdown;
-}
-
 async function main() {
-  const tamanho = lerTamanhoArgv();
-  console.log('=== Gerar lote diário (RomeroCall — skill gerar-lote-diario, LOTE-02/03) ===');
-  if (DRY_RUN) console.log('(modo --dry-run: nada será escrito no ClickUp — só gera os scripts em memória)');
+  console.log('=== Gerar lote diário (RomeroCall — skill gerar-lote-diario, ClickUp-only) ===');
+  if (DRY_RUN) console.log('(modo --dry-run: nada será escrito no ClickUp — só imprime o preview)');
 
+  // Passo 1: resolver modo de seleção + ler o arquivo de script + resolver a
+  // lista de operadores — tudo isso ANTES de tocar o ClickUp (falha-claro
+  // barato, sem gastar uma chamada de rede à toa).
+  const selecao = resolverModoSelecao();
+  const scriptDoArquivo = lerScriptDoArquivo();
+  const operadores = resolverOperadores();
+  console.log(
+    `Modo de seleção: ${selecao.modo}. Operador(es) da rodada: ${operadores.map((o) => o.nome || '(vazio)').join(', ')}.`,
+  );
+
+  // Passo 2: ler a Lista 01 LEADS paginada.
   console.log(`Lendo Lista 01 LEADS (lista ${CLICKUP_LIST_LEADS})...`);
   const tasksLeads = await lerTodasAsTasks(CLICKUP_LIST_LEADS);
   console.log(`  ${tasksLeads.length} lead(s) lido(s) da Lista 01 (contagem apenas, sem PII).`);
 
-  // Mapa taskId -> TaskClickUp bruta (Lista 01 já carregada) — usado só pelo
-  // passo de dossiê pra ler CPF/ID_SUPABASE/OBSERVACAO_CONSOLIDADA/
-  // ULTIMO_RESULTADO por field-id (D-P4-03), sem reler a task da API.
-  const mapaTasksLeads = new Map(tasksLeads.map((task) => [task.id, task]));
-
-  const leads = tasksLeads.map((task) => parseLeadDaTask(task, CAMPOS_LEADS));
-  const lote = selecionarLoteElegivel(leads, {
-    hoje: new Date(),
-    limiteTentativas: LOTE_LIMITE_TENTATIVAS,
-    tamanho,
-  });
-  console.log(`Lote priorizado: ${lote.length} lead(s) elegível(is) (tamanho máx. ${tamanho}).`);
-
+  // Passo 4 (adiantado para servir de insumo ao modo "quantidade"): ler as
+  // Ligações ABERTAS da Lista 02 para o dedupe (D5, universal aos 3 modos).
   console.log(`Lendo Ligações ABERTAS da Lista 02 (lista ${CLICKUP_LIST_LIGACOES}) para o dedupe...`);
   const ligacoesAbertas = await lerTodasAsTasks(CLICKUP_LIST_LIGACOES, { includeClosed: false });
   console.log(`  ${ligacoesAbertas.length} Ligação(ões) aberta(s) encontrada(s).`);
 
-  const usuarioOperador = process.env.LOTE_OPERADOR_DEFAULT || '';
-  let assigneeId = assigneeDoOperador(usuarioOperador);
-  if (!assigneeId) {
-    const mensagem =
-      `[gerar-lote] não foi possível resolver o assignee do operador "${usuarioOperador || '(vazio)'}" — ` +
-      'configure LOTE_OPERADOR_DEFAULT e DISCADOR_ASSIGNEES ("usuario:memberId,...") no .env.';
-    if (DRY_RUN) {
-      console.warn(`${mensagem}\n(preview segue com um assignee de exemplo — nada será escrito.)`);
-      assigneeId = '0';
-    } else {
-      throw new Error(mensagem);
-    }
+  // Passo 3: aplicar o modo de seleção escolhido para obter os LeadLote candidatos.
+  let candidatos;
+  if (selecao.modo === 'telefones') {
+    const leads = tasksLeads.map((task) => parseLeadDaTask(task, CAMPOS_LEADS));
+    candidatos = filtrarLeadsPorTelefones(leads, selecao.telefonesColados);
+  } else if (selecao.modo === 'tag') {
+    const tasksFiltradas = filtrarTasksPorTag(tasksLeads, selecao.tagNome);
+    candidatos = tasksFiltradas.map((task) => parseLeadDaTask(task, CAMPOS_LEADS));
+  } else {
+    const leads = tasksLeads.map((task) => parseLeadDaTask(task, CAMPOS_LEADS));
+    candidatos = selecionarPorQuantidade(leads, selecao.tamanho, ligacoesAbertas, CAMPOS_LIGACOES.ID_LEAD);
   }
+  console.log(`Seleção "${selecao.modo}": ${candidatos.length} lead(s) candidato(s).`);
 
-  const elegiveisParaCriar = lote.filter((lead) => deveCriar(lead, ligacoesAbertas, CAMPOS_LIGACOES.ID_LEAD));
-  const puladosPorDedupe = lote.length - elegiveisParaCriar.length;
+  // Passo 5: dedupe universal (D5/deveCriar) — para o modo "quantidade" já
+  // veio deduplicado (selecionarPorQuantidade reusa deveCriar internamente);
+  // para "telefones"/"tag" é aqui que o dedupe efetivamente acontece.
+  const elegiveisParaCriar = candidatos.filter((lead) => deveCriar(lead, ligacoesAbertas, CAMPOS_LIGACOES.ID_LEAD));
+  const puladosPorDedupe = candidatos.length - elegiveisParaCriar.length;
   console.log(
-    `A processar: ${elegiveisParaCriar.length} lead(s) novo(s) (${puladosPorDedupe} pulado(s) — já tem Ligação aberta, dedupe D-P2-03).`,
+    `A processar: ${elegiveisParaCriar.length} lead(s) novo(s) (${puladosPorDedupe} pulado(s) — já tem Ligação aberta, dedupe D5).`,
   );
+
+  // Passo 6: distribuir os leads elegíveis entre os operadores da rodada (D6).
+  const pares = distribuirRoundRobin(elegiveisParaCriar, operadores);
 
   let criadas = 0;
   let falhas = 0;
 
-  for (const lead of elegiveisParaCriar) {
+  for (const { lead, operador } of pares) {
     const identificador = `${lead.nome || '(sem nome)'} (${mascararTelefone(lead.telefone)})`;
     try {
-      // Passo de dossiê (D-P4-04): roda ANTES do script, monta e grava as 6
-      // seções na descrição do lead (D-P4-01/05). Falha na montagem/gravação
-      // NÃO aborta o lead — o script segue sendo gerado sem dossiê (D-P4-06,
-      // padrão Fase 2 de nunca abortar o lote inteiro por um lead).
-      let dossieMarkdown;
-      try {
-        dossieMarkdown = await montarDossieDoLead(lead, mapaTasksLeads.get(lead.taskId), identificador);
-      } catch (e) {
-        console.warn(
-          `  [aviso] falha ao montar/gravar o dossiê de ${identificador}: ${e instanceof Error ? e.message : String(e)} ` +
-            '(o script seguirá sem dossiê — D-P4-06).',
-        );
-      }
-
-      const { system, prompt } = montarPromptScript(lead, dossieMarkdown);
-      const script = await chamarLLM(prompt, system);
-
       if (DRY_RUN) {
-        console.log(`\n[dry-run] ${identificador} — roteiro gerado (${script.length} caractere(s)), nada escrito.`);
+        console.log(`  [dry-run] ${identificador} -> operador "${operador.nome}"; Ligação seria criada com o script do arquivo, nada escrito.`);
         continue;
       }
 
-      const payload = montarTaskLigacao(lead, script, assigneeId, CAMPOS_LIGACOES);
+      const payload = montarTaskLigacao(lead, scriptDoArquivo, operador.assigneeId, CAMPOS_LIGACOES);
       const novaTask = await criarTask(CLICKUP_LIST_LIGACOES, payload);
       if (!novaTask?.id) {
         throw new Error('criarTask retornou sem id — não dá para vincular LEAD_REL');
@@ -321,13 +270,13 @@ async function main() {
         );
       }
 
-      console.log(`  Ligação criada para ${identificador} -> task ${novaTask.id}`);
+      console.log(`  Ligação criada para ${identificador} (operador "${operador.nome}") -> task ${novaTask.id}`);
       criadas += 1;
     } catch (e) {
       // T-02-02-E: nunca colapsar erro em sucesso silencioso — reporta e conta a falha.
       falhas += 1;
       console.error(
-        `  [erro] falha ao gerar/criar Ligação para ${identificador}: ${e instanceof Error ? e.message : String(e)}`,
+        `  [erro] falha ao criar Ligação para ${identificador} (operador "${operador.nome}"): ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   }
