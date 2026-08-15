@@ -340,6 +340,15 @@ export const SUPABASE_TABLES_SERVICOS: string[] = process.env.SUPABASE_TABLES_SE
 // inline, sem rede de segurança) — NUNCA quebra o webhook.
 export const SUPABASE_TABLE_WEBHOOK_EVENTOS = process.env.SUPABASE_TABLE_WEBHOOK_EVENTOS || 'webhook_eventos';
 
+// ===== Gestão de usuários — store de operadores (Fase 11, gestao-de-usuarios) =====
+//
+// Tabela no Supabase que guarda os operadores do discador (login, hash de senha, papel,
+// vínculo opcional com ClickUp/Wavoip) — substitui os mapas env (DISCADOR_USERS/
+// DISCADOR_ASSIGNEES/WAVOIP_USER_DEVICES) como fonte viva, lida no login e na tela de
+// gestão de usuários do painel admin. Default sensato ('discador_usuarios'), sem
+// console.warn (mesmo espírito de SUPABASE_TABLE_WEBHOOK_EVENTOS).
+export const SUPABASE_TABLE_USUARIOS = process.env.SUPABASE_TABLE_USUARIOS || 'discador_usuarios';
+
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook
