@@ -15,7 +15,18 @@ import { verificarCredenciais, emitirToken, verificarToken, tokenDoHeader } from
 // (Fase 11 D-01/D-02) — disparados 1x no boot abaixo; verificarCredenciais
 // (discador-auth.ts) e assigneeDoOperador/resolverConfigDoUsuario
 // (operadores.ts/dispositivos.ts) leem do store a partir daqui.
-import { semearUsuariosSeVazio, recarregarUsuarios } from './usuarios.ts';
+// CRUD de operadores (Fase 11 Plano 04) — consumido pelas rotas
+// /api/admin/usuarios* do painel admin, todas atras do gate de gestor.
+import {
+  semearUsuariosSeVazio,
+  recarregarUsuarios,
+  listarUsuarios,
+  criarUsuario,
+  atualizarUsuario,
+  atualizarSenha,
+  removerUsuario,
+  buscarUsuario,
+} from './usuarios.ts';
 
 // Lista de leads qualificados (GHL, pipeline COMERCIAL USI) — legado, ver nota
 // na rota /api/discador/qualificados abaixo.
@@ -40,6 +51,7 @@ import {
   lerStatusVotoLead,
   lerContextoLead,
   validarLigacaoDoOperador,
+  listarMembrosWorkspace,
 } from './clickup';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
@@ -106,7 +118,7 @@ import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts'
 // deviceIdPorNumero (Fase 07 Plano 03): mapa reverso numero->deviceId, usado
 // pelo branch CALL do webhook pra derivar o deviceId de origem da chamada
 // (payload.caller, DD-07-10).
-import { resolverConfigDoUsuario, alocarDevice, liberarDevice, deviceIdPorNumero } from './dispositivos.ts';
+import { resolverConfigDoUsuario, alocarDevice, liberarDevice, deviceIdPorNumero, inventarioPublico } from './dispositivos.ts';
 
 /**
  * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
@@ -134,6 +146,26 @@ console.log(
 // usado por operadores.ts/dispositivos.ts. Fire-and-forget nao-fatal — nunca
 // derruba o boot do processo; usuarios.ts ja loga sucesso/falha internamente.
 void semearUsuariosSeVazio().then(() => recarregarUsuarios()).catch(() => {});
+
+/**
+ * Gate de gestor (Fase 11 Plano 04, USER-03 — a peca de seguranca central da
+ * fase; T-11-04-E1/S1): resolve a sessao (`verificarToken` a partir do
+ * header Authorization) e, se valida, le o PAPEL FRESCO do store por
+ * request (`buscarUsuario`) — nunca do token/body/query do cliente
+ * (T-11-04-S1). Retorna `{ status: 401 }` sem sessao, `{ status: 403 }` sem
+ * papel 'gestor', ou `{ status: 200, usuario }` liberado. Sem analogo no
+ * codigo (todo gate existente hoje e binario autenticado/nao-autenticado) —
+ * logica nova, PATTERNS.md "No Analog Found".
+ */
+async function sessaoGestor(c: { req: { header: (nome: string) => string | undefined } }): Promise<
+  { status: 401 } | { status: 403 } | { status: 200; usuario: string }
+> {
+  const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+  if (!sess) return { status: 401 };
+  const reg = await buscarUsuario(sess.usuario);
+  if (!reg || reg.papel !== 'gestor') return { status: 403 };
+  return { status: 200, usuario: sess.usuario };
+}
 
 /**
  * Servidor do Discador Wavoip. Serve o PWA (frontend) e a API minima que ele
@@ -617,6 +649,144 @@ export const mastra = new Mastra({
               contagem429: METRICAS_429_ALERTA,
             },
           });
+        },
+      },
+
+      // ============ GESTAO DE OPERADORES (painel admin) — Fase 11 Plano 04 ============
+      // TODA rota abaixo passa pelo gate de gestor (sessaoGestor): 401 sem sessao valida,
+      // 403 sem papel 'gestor' (T-11-04-E1) — resolvido ANTES de qualquer efeito. Nenhuma
+      // resposta inclui senha_hash/senha_salt (T-11-04-I1).
+      {
+        // Lista os operadores (shape publico, sem hash) para a tela de gestao.
+        path: '/api/admin/usuarios',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const usuarios = await listarUsuarios();
+            return c.json({ usuarios });
+          } catch (e) {
+            console.error('[admin] erro ao listar usuarios:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar usuarios' }, 502);
+          }
+        },
+      },
+      {
+        // Cria um operador novo. D-07: a senha inicial e definida pelo gestor
+        // (nao ha fluxo de convite/self-signup).
+        path: '/api/admin/usuarios',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const usuario = String(body.usuario || '').trim();
+          const senha = String(body.senha || '');
+          const papel = body.papel;
+          if (!usuario || !senha || (papel !== 'gestor' && papel !== 'atendente')) {
+            return c.json({ erro: 'Campos usuario/senha/papel (gestor|atendente) sao obrigatorios' }, 400);
+          }
+          try {
+            const criado = await criarUsuario({
+              usuario,
+              senha,
+              papel,
+              clickup_member_id: body.clickup_member_id != null ? String(body.clickup_member_id) : null,
+              wavoip_device_id: body.wavoip_device_id != null ? String(body.wavoip_device_id) : null,
+            });
+            await recarregarUsuarios();
+            return c.json({ usuario: criado }, 201);
+          } catch (e) {
+            console.error('[admin] erro ao criar usuario:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao criar usuario' }, 502);
+          }
+        },
+      },
+      {
+        // Atualiza papel/vinculos e/ou reseta a senha (D-07: reset do gestor) de um operador.
+        path: '/api/admin/usuarios/:id',
+        method: 'PATCH',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          try {
+            if (typeof body.senha === 'string' && body.senha) {
+              await atualizarSenha(id, body.senha);
+            }
+            const campos: Record<string, unknown> = {};
+            if (body.papel === 'gestor' || body.papel === 'atendente') campos.papel = body.papel;
+            if ('clickup_member_id' in body) campos.clickup_member_id = body.clickup_member_id != null ? String(body.clickup_member_id) : null;
+            if ('wavoip_device_id' in body) campos.wavoip_device_id = body.wavoip_device_id != null ? String(body.wavoip_device_id) : null;
+            if (Object.keys(campos).length > 0) {
+              await atualizarUsuario(id, campos as Parameters<typeof atualizarUsuario>[1]);
+            }
+            await recarregarUsuarios();
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            console.error('[admin] erro ao atualizar usuario:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao atualizar usuario' }, 502);
+          }
+        },
+      },
+      {
+        // Remove um operador. Guarda anti-lockout (T-11-04-D1): recusa remover
+        // o UNICO gestor restante.
+        path: '/api/admin/usuarios/:id',
+        method: 'DELETE',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          try {
+            const usuarios = await listarUsuarios();
+            const alvo = usuarios.find((u) => u.id === id);
+            const gestores = usuarios.filter((u) => u.papel === 'gestor');
+            if (alvo && alvo.papel === 'gestor' && gestores.length <= 1) {
+              return c.json({ erro: 'Nao e possivel remover o unico gestor' }, 409);
+            }
+            await removerUsuario(id);
+            await recarregarUsuarios();
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            console.error('[admin] erro ao remover usuario:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao remover usuario' }, 502);
+          }
+        },
+      },
+      {
+        // Dropdown de membros ClickUp (D-03) para o vinculo clickup_member_id.
+        path: '/api/admin/clickup-membros',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const membros = await listarMembrosWorkspace();
+            return c.json({ membros });
+          } catch (e) {
+            console.error('[admin] erro ao listar membros ClickUp:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar membros ClickUp' }, 502);
+          }
+        },
+      },
+      {
+        // Dropdown de devices Wavoip (D-04) para o vinculo wavoip_device_id —
+        // deviceId+numero SOMENTE, nunca o token (T-11-03-I1).
+        path: '/api/admin/devices',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const devices = inventarioPublico();
+            return c.json({ devices });
+          } catch (e) {
+            console.error('[admin] erro ao listar devices:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar devices' }, 500);
+          }
         },
       },
 
