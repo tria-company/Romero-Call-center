@@ -44,6 +44,10 @@ export interface TaskLike {
   id: string;
   name?: string;
   custom_fields?: CustomFieldLike[];
+  // Tags nativas da task (API do ClickUp já devolve `tags` no GET da lista —
+  // o tipo só não declarava). Usado por `filtrarTasksPorTag` (D4 "seleção no
+  // ClickUp", Quick 260815-hea).
+  tags?: Array<{ name?: string }>;
 }
 
 /** Payload aceito por `criarTask` (clickup.ts) — espelhado aqui para `montarTaskLigacao`
@@ -275,6 +279,102 @@ export function deveCriar(lead: LeadLote, ligacoesAbertas: TaskLike[], idLeadFie
     return campo?.value !== undefined && campo?.value !== null && String(campo.value) === chave;
   });
   return !jaTemLigacaoAberta;
+}
+
+// ===== Seleção explícita + distribuição por operador (D4/D6, Quick 260815-hea) =====
+//
+// Substitui a priorização automática (`selecionarLoteElegivel`, ainda
+// exportada acima para retrocompatibilidade de outros smokes) por 3 modos de
+// seleção ditados pelo gestor + o round-robin de operadores da rodada. Puro e
+// determinístico — mesma restrição de zero imports do resto do módulo.
+
+/** Reduz um valor qualquer aos dígitos (0-9), descartando tudo o mais. */
+function digitosSomente(valor: unknown): string {
+  return String(valor ?? '').replace(/\D/g, '');
+}
+
+/** Remove um único prefixo `55` líder (DDI Brasil), se presente. */
+function semPrefixo55(digitos: string): string {
+  return digitos.startsWith('55') ? digitos.slice(2) : digitos;
+}
+
+/**
+ * Compara dois telefones por dígitos, tolerante a um prefixo DDI `55` líder
+ * de qualquer um dos dois lados (D4 "telefones colados": o gestor pode colar
+ * com ou sem DDI, e a Lista 01 pode ter gravado o telefone com ou sem `55`).
+ * Puro — sem I/O, não loga nenhum dos dois valores.
+ */
+export function mesmoTelefone(a: unknown, b: string): boolean {
+  const da = digitosSomente(a);
+  const db = digitosSomente(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  return semPrefixo55(da) === semPrefixo55(db);
+}
+
+/**
+ * Modo de seleção "telefones colados" (D4): casa cada telefone colado pelo
+ * gestor contra `lead.telefone` via `mesmoTelefone` (tolerante a DDI 55).
+ * Preserva a ordem de `telefones` (ordem de colagem do gestor); telefone sem
+ * match correspondente é simplesmente ignorado (não cria lead do nada).
+ */
+export function filtrarLeadsPorTelefones(leads: LeadLote[], telefones: string[]): LeadLote[] {
+  const resultado: LeadLote[] = [];
+  for (const telefone of telefones) {
+    const lead = leads.find((l) => mesmoTelefone(l.telefone, telefone));
+    if (lead) resultado.push(lead);
+  }
+  return resultado;
+}
+
+/**
+ * Modo de seleção "seleção no ClickUp" (D4): retorna só as tasks cujo array
+ * nativo `tags` contém uma tag com `name` igual a `tagNome` (case-insensitive
+ * — o gestor pode digitar a tag com case diferente no ClickUp). Opera sobre
+ * `TaskLike` bruta (ANTES de `parseLeadDaTask`), pois `tags` é nativo da task,
+ * não um custom field.
+ */
+export function filtrarTasksPorTag(tasks: TaskLike[], tagNome: string): TaskLike[] {
+  const alvo = tagNome.trim().toLowerCase();
+  return tasks.filter((task) => (task.tags ?? []).some((tag) => (tag?.name ?? '').trim().toLowerCase() === alvo));
+}
+
+/**
+ * Modo de seleção "quantidade N" (D4): pega os primeiros `n` leads EM ORDEM
+ * DE LISTA (sem scoring/`proximoContato` — essa priorização automática saiu
+ * do fluxo), pulando quem já tem Ligação ABERTA (reusa `deveCriar`, mesmo
+ * dedupe D5 dos outros 2 modos). Corta em `n` DEPOIS do filtro de dedupe —
+ * o gestor pede "N leads NOVOS", não "N leads brutos dos quais alguns são
+ * pulados".
+ */
+export function selecionarPorQuantidade(
+  leads: LeadLote[],
+  n: number,
+  ligacoesAbertas: TaskLike[],
+  idLeadFieldId: string,
+): LeadLote[] {
+  const resultado: LeadLote[] = [];
+  for (const lead of leads) {
+    if (resultado.length >= n) break;
+    if (!deveCriar(lead, ligacoesAbertas, idLeadFieldId)) continue;
+    resultado.push(lead);
+  }
+  return resultado;
+}
+
+/**
+ * Distribui os leads elegíveis em round-robin entre os operadores da rodada
+ * (D6): `lead[i]` casa com `operadores[i % operadores.length]`, preservando a
+ * ordem de seleção — determinístico. Genérico em `T` (o runner passa objetos
+ * `{ nome, assigneeId }`, os smokes podem passar string simples). Lista de
+ * operadores vazia LANÇA (defensivo — o runner garante não-vazio antes de
+ * chamar, via o fallback `LOTE_OPERADOR_DEFAULT` ou o guard de D6).
+ */
+export function distribuirRoundRobin<T>(leads: LeadLote[], operadores: T[]): Array<{ lead: LeadLote; operador: T }> {
+  if (!operadores || operadores.length === 0) {
+    throw new Error('distribuirRoundRobin: lista de operadores vazia — nada para distribuir');
+  }
+  return leads.map((lead, i) => ({ lead, operador: operadores[i % operadores.length] }));
 }
 
 // ===== Fila do discador — Lista 02 do operador logado (LOTE-04/05, Fase 02 Plano 03) =====

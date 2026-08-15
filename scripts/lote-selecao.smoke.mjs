@@ -10,7 +10,14 @@
 //
 // Uso: node --experimental-strip-types scripts/lote-selecao.smoke.mjs
 
-import { parseLeadDaTask, selecionarLoteElegivel } from '../src/mastra/lote.ts';
+import {
+  parseLeadDaTask,
+  selecionarLoteElegivel,
+  filtrarLeadsPorTelefones,
+  filtrarTasksPorTag,
+  selecionarPorQuantidade,
+  distribuirRoundRobin,
+} from '../src/mastra/lote.ts';
 
 const falhas = [];
 
@@ -178,11 +185,107 @@ function testarParseLeadDaTask() {
   );
 }
 
+// ===== Novos helpers de seleção explícita + round-robin (D4/D6, Quick 260815-hea) =====
+
+function testarFiltrarLeadsPorTelefones() {
+  const leadSemDDI = leadFixture({ taskId: 'sem-ddi', telefone: '11999999999' });
+  const leadComDDI = leadFixture({ taskId: 'com-ddi', telefone: '5511988887777' });
+  const leads = [leadSemDDI, leadComDDI];
+
+  // '11900000000' não casa com nenhum lead -> ignorado (ordem de entrada preservada).
+  // '11999999999' casa direto com leadSemDDI.
+  // '11988887777' casa com leadComDDI SÓ por tolerância ao DDI 55 líder.
+  const telefonesColados = ['11900000000', '11999999999', '11988887777'];
+  const resultado = filtrarLeadsPorTelefones(leads, telefonesColados);
+  const ids = resultado.map((l) => l.taskId);
+  checar(
+    JSON.stringify(ids) === JSON.stringify(['sem-ddi', 'com-ddi']),
+    `filtrarLeadsPorTelefones: esperado ['sem-ddi','com-ddi'], recebido ${JSON.stringify(ids)}`,
+  );
+}
+
+function testarFiltrarTasksPorTag() {
+  const taskComTagCaseDiferente = { id: 'task-1', tags: [{ name: 'Lote-Hoje' }] };
+  const taskComOutraTag = { id: 'task-2', tags: [{ name: 'outro' }] };
+  const taskSemTag = { id: 'task-3', tags: [] };
+  const taskComVariasTags = { id: 'task-4', tags: [{ name: 'lote-hoje' }, { name: 'vip' }] };
+  const tasks = [taskComTagCaseDiferente, taskComOutraTag, taskSemTag, taskComVariasTags];
+
+  const resultado = filtrarTasksPorTag(tasks, 'lote-hoje');
+  const ids = resultado.map((t) => t.id);
+  checar(
+    JSON.stringify(ids) === JSON.stringify(['task-1', 'task-4']),
+    `filtrarTasksPorTag: esperado ['task-1','task-4'], recebido ${JSON.stringify(ids)}`,
+  );
+}
+
+const ID_LEAD_LIGACOES_FIXTURE = 'field-id-lead-ligacoes';
+
+const leadQ1 = leadFixture({ taskId: 'q1', idLead: 'lead-q1' });
+const leadQ2 = leadFixture({ taskId: 'q2', idLead: 'lead-q2' }); // já tem Ligação aberta -> pulado
+const leadQ3 = leadFixture({ taskId: 'q3', idLead: 'lead-q3' });
+const leadQ4 = leadFixture({ taskId: 'q4', idLead: 'lead-q4' });
+const leadQ5 = leadFixture({ taskId: 'q5', idLead: 'lead-q5' });
+
+function testarSelecionarPorQuantidade() {
+  const ligacoesAbertas = [
+    { id: 'lig-q2', custom_fields: [{ id: ID_LEAD_LIGACOES_FIXTURE, value: 'lead-q2' }] },
+  ];
+  const resultado = selecionarPorQuantidade(
+    [leadQ1, leadQ2, leadQ3, leadQ4, leadQ5],
+    3,
+    ligacoesAbertas,
+    ID_LEAD_LIGACOES_FIXTURE,
+  );
+  const ids = resultado.map((l) => l.taskId);
+  checar(
+    JSON.stringify(ids) === JSON.stringify(['q1', 'q3', 'q4']),
+    `selecionarPorQuantidade: esperado ['q1','q3','q4'] (q2 pulado por dedupe), recebido ${JSON.stringify(ids)}`,
+  );
+}
+
+function testarDistribuirRoundRobin() {
+  // 5 leads, 2 operadores -> ciclagem [op0, op1, op0, op1, op0] na ordem de entrada.
+  const leadsCinco = [leadQ1, leadQ2, leadQ3, leadQ4, leadQ5];
+  const pares = distribuirRoundRobin(leadsCinco, ['op0', 'op1']);
+  const operadoresAtribuidos = pares.map((p) => p.operador);
+  checar(
+    JSON.stringify(operadoresAtribuidos) === JSON.stringify(['op0', 'op1', 'op0', 'op1', 'op0']),
+    `distribuirRoundRobin (5 leads/2 operadores): esperado ['op0','op1','op0','op1','op0'], recebido ${JSON.stringify(operadoresAtribuidos)}`,
+  );
+  checar(
+    pares.every((p, i) => p.lead.taskId === leadsCinco[i].taskId),
+    'distribuirRoundRobin: ordem dos leads deveria ser preservada',
+  );
+
+  // Caso identidade: N leads, N operadores -> lead[i] <-> operadores[i].
+  const leadsDois = [leadQ1, leadQ2];
+  const paresIdentidade = distribuirRoundRobin(leadsDois, ['opA', 'opB']);
+  const operadoresIdentidade = paresIdentidade.map((p) => p.operador);
+  checar(
+    JSON.stringify(operadoresIdentidade) === JSON.stringify(['opA', 'opB']),
+    `distribuirRoundRobin (caso identidade): esperado ['opA','opB'], recebido ${JSON.stringify(operadoresIdentidade)}`,
+  );
+
+  // Lista de operadores vazia -> LANÇA (defensivo, D6).
+  let lancou = false;
+  try {
+    distribuirRoundRobin(leadsDois, []);
+  } catch {
+    lancou = true;
+  }
+  checar(lancou, 'distribuirRoundRobin: deveria LANÇAR com lista de operadores vazia');
+}
+
 testarExclusaoPorData();
 testarExclusaoPorTentativas();
 testarOrdenacao();
 testarCorteTamanho();
 testarParseLeadDaTask();
+testarFiltrarLeadsPorTelefones();
+testarFiltrarTasksPorTag();
+testarSelecionarPorQuantidade();
+testarDistribuirRoundRobin();
 
 if (falhas.length > 0) {
   console.error('=== SMOKE FAIL ===');
