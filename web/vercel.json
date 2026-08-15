@@ -3,6 +3,14 @@
     {
       "source": "/api/:path*",
       "destination": "http://85.155.178.244:4111/api/:path*"
+    },
+    {
+      "source": "/admin",
+      "destination": "http://85.155.178.244:4111/admin"
+    },
+    {
+      "source": "/admin/:path*",
+      "destination": "http://85.155.178.244:4111/admin/:path*"
     }
   ]
 }
