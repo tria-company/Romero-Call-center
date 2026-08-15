@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { exigirRomero } from "@/lib/autorizacao";
 
 /**
  * Token do CALL CENTER — login automático sem senha no navegador.
@@ -29,6 +30,9 @@ const BASE = (process.env.CALLCENTER_URL ?? "https://romero-call-center.vercel.a
 );
 
 export async function POST() {
+  const gate = await exigirRomero();
+  if (!gate.ok) return gate.resposta;
+
   const usuario = process.env.CALLCENTER_USUARIO;
   const senha = process.env.CALLCENTER_SENHA;
 
