@@ -1,5 +1,5 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { COOKIE_SESSAO, lerSessao } from "@/lib/sessao";
+import { NextResponse } from "next/server";
+import { exigirRomero } from "@/lib/autorizacao";
 import { BASE_DISCADOR, obterTokenDiscador, type ItemFilaReal } from "@/lib/discador-servidor";
 
 /**
@@ -17,11 +17,9 @@ import { BASE_DISCADOR, obterTokenDiscador, type ItemFilaReal } from "@/lib/disc
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(req: NextRequest) {
-  const sessao = await lerSessao(req.cookies.get(COOKIE_SESSAO)?.value);
-  if (!sessao) {
-    return NextResponse.json({ erro: "Sem sessão." }, { status: 401 });
-  }
+export async function GET() {
+  const gate = await exigirRomero();
+  if (!gate.ok) return gate.resposta;
 
   if (!process.env.CALLCENTER_USUARIO || !process.env.CALLCENTER_SENHA) {
     return NextResponse.json({ erro: "Call center não configurado." }, { status: 503 });
