@@ -20,10 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v17 -> discador-v18): propaga o fix "uma-por-vez" da fila
-// (renderiza so o proximo lead, itens[0]) a todos os navegadores — o /app.js e cache-first,
-// entao so um bump de versao do cache forca o re-download. Mantém em sincronia com web/sw.js.
-export const DISCADOR_SW_JS = `const CACHE='discador-v18';
+// CACHE bump (discador-v18 -> discador-v19): propagar o reskin Central Animal do
+// operador — /app.js e cache-first, so um bump de versao forca o re-download.
+// Mantém em sincronia com web/sw.js.
+export const DISCADOR_SW_JS = `const CACHE='discador-v19';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
