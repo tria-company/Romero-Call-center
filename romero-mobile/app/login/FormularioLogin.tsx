@@ -71,14 +71,13 @@ export function FormularioLogin() {
 
         <form onSubmit={enviar} style={{ marginTop: 22, display: "grid", gap: 12 }}>
           <div>
-            <div className="flabel">E-mail</div>
+            <div className="flabel">Usuário</div>
             <input
               className="field"
               value={usuario}
               onChange={(e) => setUsuario(e.target.value)}
               type="text"
-              inputMode="email"
-              placeholder="admin@admin.com"
+              placeholder="usuário"
               autoComplete="username"
               autoCapitalize="none"
               autoCorrect="off"
