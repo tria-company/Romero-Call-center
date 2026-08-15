@@ -1,152 +1,136 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import {
-  MOTIVO_CLASSE,
-  MOTIVO_LABEL,
-  iniciais,
-  marcarItemFila,
-  useBanco,
-  useFila,
-  useIndicadores,
-  type ItemFila,
-  type Lead,
-} from "@/lib/db";
-import { fmtDuracaoCurta, fmtInt } from "@/lib/format";
-import { vibrar } from "@/lib/contato";
-import { Esqueleto, Vhead } from "./blocos";
+// Só o helper PURO de iniciais — direto do schema, NÃO do barrel `@/lib/db`
+// (que arrasta o store localStorage). A Fila agora vive fora do localStorage.
+import { iniciais } from "@/lib/db/schema";
+import type { ItemFilaReal } from "@/lib/discador-servidor";
+import { useFilaReal } from "@/lib/fila-real";
+import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
+import { Autobox, Esqueleto, Vhead } from "./blocos";
 
 /* TELA 02 · FILA DE HOJE
-   Ordenada pelo motor: retorno de entrega vem antes de aniversário, primeiro
-   contato e reaquecimento. */
+   Fonte: a fila REAL do discador (Ligações abertas do dia do Romero), servida
+   por /api/mobile/fila. Sem localStorage, sem selo de motivo (o backend não
+   manda), sem marcar-feito: quando a Ligação recebe desfecho ela some no
+   próximo fetch. O visual (Vhead, qbar, cards `.task`) segue o mockup. */
 
 export function Fila() {
-  const banco = useBanco();
-  const { itens, feitas, total } = useFila();
-  const ind = useIndicadores();
-  const router = useRouter();
-  const [mostrarFeitas, setMostrarFeitas] = React.useState(false);
-  const [largura, setLargura] = React.useState(0);
+  const { itens, carregando, erro, semMapeamento, recarregar } = useFilaReal();
 
-  const pct = total > 0 ? (feitas / total) * 100 : 0;
+  /* Token do call center, buscado ao MONTAR e não ao tocar em "Ligar": o
+     bloqueador de pop-ups só deixa `window.open` passar dentro do gesto, e um
+     `await` no meio já o invalida. Com o token pronto, o toque abre a aba
+     síncrono. Sem token, abre a URL nua e o operador digita a senha. */
+  const [tokenCC, setTokenCC] = React.useState<string | null>(null);
 
-  // a barra sobe do zero depois da montagem, como no mockup
   React.useEffect(() => {
-    const t = setTimeout(() => setLargura(pct), 260);
-    return () => clearTimeout(t);
-  }, [pct]);
+    let vivo = true;
+    fetch("/api/callcenter/token", { method: "POST" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (vivo) setTokenCC(d?.token ?? null);
+      })
+      .catch(() => {
+        /* call center fora do ar: o botão degrada para login manual */
+      });
+    return () => {
+      vivo = false;
+    };
+  }, []);
 
-  if (!banco || !ind) return <Esqueleto alturas={[64, 78, 86, 86, 86, 86]} />;
+  // Chamado no gesto do toque — NÃO async, para o `window.open` ser síncrono.
+  // TODO Fase B: deep-link por lead exige mudar o hash do discador (fora de
+  // escopo) — hoje abre a MESMA fila do topo.
+  // NÃO registrar interação: os leads são remotos (não estão no store local);
+  // o registro fica para a Fase B.
+  function ligar(_item: ItemFilaReal) {
+    vibrar();
+    window.open(urlCallCenter(tokenCC), "_blank", "noopener,noreferrer");
+  }
 
-  const porId = new Map(banco.leads.map((l) => [l.id, l]));
-  const visiveis = mostrarFeitas ? itens : itens.filter((i) => !i.feito);
+  if (carregando) return <Esqueleto alturas={[64, 86, 86, 86]} />;
+
+  if (erro) {
+    return (
+      <div className="view">
+        <Vhead titulo="Fila de hoje" sub="ordenada pelo sistema" live="ao vivo" />
+        <div className="empty">
+          <b>Não deu para carregar</b>
+          <button
+            type="button"
+            className="seg"
+            style={{ marginTop: 10 }}
+            onClick={recarregar}
+          >
+            toque para tentar de novo
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="view">
       <Vhead titulo="Fila de hoje" sub="ordenada pelo sistema" live="ao vivo" />
 
-      <div className="qbar">
-        <div className="qtop">
-          <b>
-            {fmtInt(feitas)} / {fmtInt(total)}
-          </b>
-          <span>
-            {total - feitas > 0
-              ? `faltam ${fmtInt(total - feitas)} · ~${fmtDuracaoCurta(ind.minutosRestantes)}`
-              : "fila zerada hoje"}
-          </span>
-        </div>
-        <div className="track">
-          <i style={{ width: `${largura}%` }} />
-        </div>
-      </div>
-
-      <div className="row" style={{ padding: "2px 2px 0" }}>
-        <span className="dim2" style={{ fontSize: 11, flex: 1 }}>
-          {mostrarFeitas ? "mostrando tudo" : `${fmtInt(feitas)} feitas escondidas`}
-        </span>
-        <button
-          type="button"
-          className="seg"
-          aria-pressed={mostrarFeitas}
-          style={{ padding: "6px 11px", fontSize: 11 }}
-          onClick={() => setMostrarFeitas((v) => !v)}
-        >
-          {mostrarFeitas ? "Esconder feitas" : "Ver feitas"}
-        </button>
-      </div>
-
-      {visiveis.length === 0 ? (
-        <div className="empty">
-          <b>Fila zerada</b>
-          Você falou com todo mundo que o sistema separou para hoje.
-        </div>
+      {semMapeamento ? (
+        <Autobox tom="warn" titulo="Fila não configurada">
+          Configure o mapeamento do operador no discador (painel /admin do call center).
+        </Autobox>
       ) : (
-        visiveis.map((item, i) => (
-          <ItemDaFila
-            key={item.id}
-            item={item}
-            lead={porId.get(item.leadId)}
-            indice={i}
-            onAbrir={() => router.push(`/base/${item.leadId}?de=fila`)}
-            onAlternar={() => {
-              vibrar(12);
-              void marcarItemFila(item.id, !item.feito);
-            }}
-          />
-        ))
+        <>
+          <div className="qbar">
+            <div className="qtop">
+              <b>{itens.length}</b>
+              <span>{itens.length > 0 ? "ligações na fila hoje" : "fila zerada hoje"}</span>
+            </div>
+          </div>
+
+          {itens.length === 0 ? (
+            <div className="empty">
+              <b>Fila zerada</b>
+              Você falou com todo mundo que o sistema separou para hoje.
+            </div>
+          ) : (
+            itens.map((item, i) => (
+              <CardFila key={item.taskId} item={item} indice={i} onLigar={ligar} />
+            ))
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function ItemDaFila({
+function CardFila({
   item,
-  lead,
   indice,
-  onAbrir,
-  onAlternar,
+  onLigar,
 }: {
-  item: ItemFila;
-  lead?: Lead;
+  item: ItemFilaReal;
   indice: number;
-  onAbrir: () => void;
-  onAlternar: () => void;
+  onLigar: (item: ItemFilaReal) => void;
 }) {
-  if (!lead) return null;
-  // "quente" é só o retorno de entrega em aberto: é a única linha que perde
-  // valor se esperar — o apoiador acabou de receber algo do gabinete.
-  const quente = item.motivo === "retorno" && !item.feito;
-
   return (
     <div
-      className={`task${quente ? " hot" : ""}${item.feito ? " feita" : ""}`}
-      style={{ animation: `reveal-up 380ms var(--ease-out-soft) ${Math.min(indice, 8) * 40}ms backwards` }}
+      className="task"
+      style={{
+        animation: `reveal-up 380ms var(--ease-out-soft) ${Math.min(indice, 8) * 40}ms backwards`,
+      }}
     >
-      <button
-        type="button"
-        onClick={onAlternar}
-        className="av"
-        aria-label={item.feito ? "Reabrir contato" : "Marcar como feito"}
-        aria-pressed={item.feito}
-        style={{ cursor: "pointer" }}
-      >
-        {item.feito ? "✓" : iniciais(lead.nome)}
-      </button>
+      <div className="av">{iniciais(item.nome)}</div>
 
-      <button
-        type="button"
-        onClick={onAbrir}
-        style={{ flex: 1, minWidth: 0, textAlign: "left" }}
-      >
-        <div className="tn trunc">{lead.nome}</div>
-        <div className="tm trunc">{item.detalhe}</div>
-        <div className={`why ${MOTIVO_CLASSE[item.motivo]}`}>{MOTIVO_LABEL[item.motivo]}</div>
-      </button>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="tn trunc">{item.nome}</div>
+        {/* Telefone exibido ao operador autorizado — nunca logar (LGPD). */}
+        <div className="tm trunc">{fmtTelefone(item.telefone)}</div>
+      </div>
 
-      <button type="button" onClick={onAbrir} className="go" aria-label="Abrir perfil">
-        ›
+      {/* Ação primária = Ligar. NÃO navega para /base/:id (fictício até Fase B).
+          TODO Fase B: abrir a ficha do lead. */}
+      <button type="button" onClick={() => onLigar(item)} className="go" aria-label="Ligar">
+        Ligar
       </button>
     </div>
   );
