@@ -143,7 +143,7 @@ export const DISCADOR_HTML = `<!doctype html>
 <body>
 <div class="wrap">
   <div id="login-view" style="display:none">
-    <div class="logo">\u{1F4DE}</div>
+    <div class="logo"><svg viewBox="0 0 48 48" fill="#04122a" width="40" height="40" aria-hidden="true"><ellipse cx="8.8" cy="17.4" rx="4.3" ry="5.4" transform="rotate(-24 8.8 17.4)"/><ellipse cx="39.2" cy="17.4" rx="4.3" ry="5.4" transform="rotate(24 39.2 17.4)"/><ellipse cx="18.6" cy="10.6" rx="4.6" ry="6" transform="rotate(-8 18.6 10.6)"/><ellipse cx="29.4" cy="10.6" rx="4.6" ry="6" transform="rotate(8 29.4 10.6)"/><path d="M24 24.6c7.1 0 12.9 5.3 12.9 11.2 0 4.2-3.4 6.8-7.6 6.8-2 0-3.5-.6-5.3-.6s-3.3.6-5.3.6c-4.2 0-7.6-2.6-7.6-6.8C11.1 29.9 16.9 24.6 24 24.6Z"/></svg></div>
     <h2>Discador USI</h2>
     <p class="sub">Fila de ligações do dia — RomeroCall</p>
     <input id="u" class="field" placeholder="Usuário" autocapitalize="none" autocomplete="username">
