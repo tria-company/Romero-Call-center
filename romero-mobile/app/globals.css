@@ -1,0 +1,1933 @@
+@import "tailwindcss";
+@import "./motion.css";
+
+/* ══════════════════════════════════════════════════════════════════════════
+   DESIGN SYSTEM — Central Animal · Romero & Andreza
+
+   Portado de `ROMERO/interfaces-mobile-central-animal.html`: mesma paleta e
+   MESMOS NOMES DE CLASSE (.m, .ig, .cand, .rocket, .task, .qbar, .lblk, .tl,
+   .seg, .act, .cta, .autobox, .prof, .pet, .tag). Manter os nomes é de
+   propósito — é o que garante que a tela seja a mesma coisa que o mockup, e
+   não uma releitura dele.
+
+   DIFERENÇA DELIBERADA: o mockup fixa tudo em px porque desenha telas dentro
+   de um aparelho de 340px. Num app de verdade a mesma tela roda de 320px a um
+   rail de 720px, e px fixo fica minúsculo nas telas grandes. Aqui a tipografia
+   e as medidas são FLUIDAS (`clamp` + `cqi`), ancoradas na largura da COLUNA
+   de conteúdo — não da janela, que no desktop inclui o rail.
+
+   O que é do app e não do mockup está marcado com "▸ app".
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  color-scheme: dark;
+
+  --bg-0: #04122a;
+  --bg-1: #0a2547;
+  --bg-2: #0e3260;
+
+  --card: rgba(255, 255, 255, 0.055);
+  --card-2: rgba(255, 255, 255, 0.085);
+  --line: rgba(255, 255, 255, 0.1);
+  --line-2: rgba(255, 255, 255, 0.16);
+
+  --ink: #ffffff;
+  --dim: #93aacb;
+  --dim-2: #6e86a8;
+
+  --romero: #3d8bff;
+  --andreza: #f5c43d;
+  --go: #34d07f;
+  --alert: #ff6b6b;
+  --wa: #25d366;
+
+  /* ── ▸ app: ESCALA FLUIDA ───────────────────────────────────────────────
+     1cqi = 1% da largura da coluna de conteúdo (`.view` é o container).
+     Coluna ~364px no celular, ~676px no desktop: o mínimo do clamp vale no
+     celular, o máximo trava antes de a fonte ficar desproporcional.
+     Os nomes são por PAPEL, não por tamanho — trocar um valor aqui reajusta a
+     tela inteira sem caçar px espalhado. */
+  --t-micro: clamp(10.5px, 2.9cqi, 13px);    /* rótulos maiúsculos, selos     */
+  --t-cap: clamp(12.5px, 3.4cqi, 15px);      /* legendas e apoios            */
+  --t-body: clamp(14px, 3.8cqi, 17px);       /* texto corrido de lista       */
+  --t-strong: clamp(15.5px, 4.3cqi, 19px);   /* nome dentro de card          */
+  --t-lead: clamp(20px, 5.7cqi, 27px);       /* nome grande / título de card */
+  --t-title: clamp(23.5px, 6.4cqi, 32px);    /* título de tela               */
+  --t-num: clamp(23.5px, 6.6cqi, 32px);      /* número de métrica            */
+  --t-numbig: clamp(27px, 7.7cqi, 36px);     /* número do candidato          */
+
+  /* medidas que precisam crescer junto com o texto */
+  --sz-av: clamp(40px, 11cqi, 52px);
+  --sz-pav: clamp(56px, 15cqi, 74px);
+  --sz-iga: clamp(34px, 9cqi, 44px);
+  --sz-rocket: clamp(46px, 12.5cqi, 62px);
+
+  --gap-v: clamp(9px, 2.5cqi, 14px);
+  --gap-head: clamp(14px, 4cqi, 26px);
+
+  /* ── ▸ app: chrome ───────────────────────────────────────────────────── */
+  --tabbar-h: 62px;
+  --tabbar-h-min: 50px;
+  --tabbar-gap: 12px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --rail-w: 0px;
+  /* vw e não cqi: é o padding do próprio container, não dá para medir-se */
+  --pad-x: clamp(14px, 4vw, 24px);
+
+  /* ── ▸ app: raios e movimento ────────────────────────────────────────── */
+  --r-sm: 11px;
+  --r: 14px;
+  --r-md: 16px;
+  --r-lg: 18px;
+  --r-xl: 22px;
+
+  --dur-fast: 140ms;
+  --dur: 260ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+  --ease-out: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-out-soft: cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-rocket: cubic-bezier(0.2, 0.75, 0.25, 1);
+
+  --shadow: 0 18px 44px -18px rgba(2, 10, 26, 0.8);
+  --shadow-lg: 0 30px 70px -20px rgba(0, 0, 0, 0.72);
+  --overlay: rgba(2, 10, 26, 0.62);
+
+  /* ── Compatibilidade: nomes que a BARRA DE NAVEGAÇÃO lê ──────────────────
+     A navegação é a única peça preservada do sistema anterior (foi o pedido).
+     Em vez de reescrevê-la, os tokens que ela usa apontam para a paleta nova. */
+  --panel: #0a2547;
+  --border: var(--line);
+  --muted: var(--dim-2);
+  --accent1: var(--romero);
+  --accentText: var(--romero);
+  --accentSoft: rgba(61, 139, 255, 0.16);
+  --crit: var(--alert);
+  --radius-pill: 999px;
+  --radius-xl: var(--r-xl);
+  --chrome-bg: rgba(4, 18, 42, 0.72);
+  --chrome-blur: saturate(180%) blur(20px);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RESET — precisa viver em @layer base.
+
+   ARMADILHA JÁ PAGA (três vezes): CSS sem camada vence CSS em camada, sempre.
+   Com `* { padding: 0 }` fora de camada, ele anulava o padding de TODA classe
+   de @layer components — inclusive o gutter do `.view`, e as telas encostavam
+   nas bordas. Com `button { background: none }` fora de camada, `.act`, `.cta`
+   e `.seg` perdiam o fundo e viravam texto solto.
+
+   A ordem do Tailwind v4 é theme → base → components → utilities: daqui o
+   reset perde para as classes e ganha dos elementos, que é o esperado.
+   ══════════════════════════════════════════════════════════════════════════ */
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* O preflight do Tailwind faz `svg { display: block }`, o que joga ícone no
+     meio de texto para a linha de baixo. Em flex o display é blockificado de
+     qualquer forma, então voltar para inline-block é seguro. */
+  svg {
+    display: inline-block;
+    vertical-align: -0.125em;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 800;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
+
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--romero);
+  }
+}
+
+html {
+  min-height: 100%;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+  /* o mesmo fundo em três camadas do mockup */
+  background:
+    radial-gradient(1100px 700px at 12% -8%, #123a6b 0%, transparent 58%),
+    radial-gradient(900px 600px at 92% 4%, #0b2f5c 0%, transparent 52%),
+    linear-gradient(178deg, var(--bg-0) 0%, var(--bg-1) 55%, #061b36 100%);
+  background-attachment: fixed;
+}
+
+body {
+  background: transparent;
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  min-height: 100dvh;
+  overscroll-behavior-y: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@layer components {
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ▸ app — casca: a "view" do mockup vira o corpo rolável da rota
+   ══════════════════════════════════════════════════════════════════════════ */
+.app-main {
+  min-height: 100dvh;
+  padding-left: var(--rail-w);
+}
+.view {
+  /* container da escala fluida: todo `cqi` acima se mede por esta largura */
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-v);
+  /* o rodapé reserva a barra INTEIRA: altura + o respiro dela até a borda */
+  padding: calc(var(--safe-t) + 14px) var(--pad-x)
+    calc(var(--tabbar-h) + var(--tabbar-gap) * 2 + var(--safe-b) + 10px);
+  max-width: 620px;
+  margin-inline: auto;
+  min-height: 100dvh;
+}
+.grow {
+  flex: 1;
+  min-height: 8px;
+}
+
+/* ── cabeçalho da tela ─────────────────────────────────────────────────── */
+.vhead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding: 2px 2px 0;
+  gap: 12px;
+  /* respiro entre o cabeçalho e o conteúdo: o `gap` do .view sozinho colava
+     o primeiro cartão no título */
+  margin-bottom: calc(var(--gap-head) - var(--gap-v));
+}
+.vhead h1,
+.vhead h2 {
+  font-size: var(--t-title);
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.12;
+}
+.vhead .sub {
+  font-size: var(--t-cap);
+  color: var(--dim-2);
+  margin-top: 4px;
+}
+.vhead .live {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--t-cap);
+  color: var(--go);
+  font-weight: 600;
+  flex: none;
+}
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--go);
+  box-shadow: 0 0 0 0 rgba(52, 208, 127, 0.55);
+  animation: pulse-ring 2.4s infinite;
+  flex: none;
+}
+
+/* ── voltar ────────────────────────────────────────────────────────────── */
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-cap);
+  font-weight: 700;
+  color: var(--dim-2);
+  padding: 6px 10px 6px 4px;
+  margin-left: -4px;
+  border-radius: var(--r-sm);
+  align-self: flex-start;
+  transition: color var(--dur-fast) linear;
+}
+.back:active {
+  color: var(--ink);
+}
+
+/* ── cartões de métrica ────────────────────────────────────────────────── */
+.mrow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-v);
+}
+.m {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: clamp(11px, 3.2cqi, 18px) clamp(13px, 3.6cqi, 20px);
+  text-align: left;
+  display: block;
+  width: 100%;
+  transition: background var(--dur-fast) linear, border-color var(--dur-fast) linear,
+    transform 120ms var(--ease-out);
+}
+.m.full {
+  grid-column: 1 / -1;
+}
+a.m:active,
+button.m:active {
+  transform: scale(0.985);
+  background: var(--card-2);
+}
+.m .mv {
+  font-size: var(--t-num);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.m .ml {
+  font-size: var(--t-micro);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim-2);
+  font-weight: 700;
+  margin-top: 7px;
+  line-height: 1.3;
+}
+.m .md {
+  font-size: var(--t-cap);
+  color: var(--go);
+  font-weight: 700;
+  margin-top: 5px;
+}
+.m .md.warn {
+  color: var(--alert);
+}
+
+/* ── faixa do instagram ────────────────────────────────────────────────── */
+.igrow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-v);
+}
+.ig {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: clamp(9px, 2.6cqi, 14px) clamp(10px, 2.8cqi, 15px);
+  display: flex;
+  gap: clamp(7px, 2.2cqi, 12px);
+  align-items: center;
+  min-width: 0;
+}
+.ig .iga {
+  width: var(--sz-iga);
+  height: var(--sz-iga);
+  border-radius: 50%;
+  flex: none;
+  background-size: cover;
+  background-position: center 22%;
+  position: relative;
+}
+.ig .iga::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 1.6px solid transparent;
+}
+.ig.r .iga::after {
+  border-color: var(--romero);
+}
+.ig.a .iga::after {
+  border-color: var(--andreza);
+}
+.igh {
+  font-size: clamp(9.5px, 2.6cqi, 12px);
+  color: var(--dim-2);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.igv {
+  font-size: var(--t-lead);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.igd {
+  font-size: clamp(10px, 2.8cqi, 12.5px);
+  color: var(--go);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* ── cartão de candidato + foguete (elemento assinatura) ───────────────── */
+.cand {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: clamp(11px, 3.2cqi, 18px) clamp(13px, 3.6cqi, 20px);
+  display: flex;
+  gap: clamp(10px, 3cqi, 16px);
+  /* As duas urnas ABSORVEM a sobra vertical da tela — é o que o mockup faz
+     (`flex:1`) e o que evita um vão morto entre o último card e a barra.
+     Crescer aqui, e não em outro bloco, é de propósito: quanto mais alta a
+     coluna-foguete, mais legível fica o quanto falta para a meta.
+     O teto é baixo: acima dele o card cresce mais que o texto e o ganho de
+     tela vira vazio interno. */
+  flex: 1 1 auto;
+  min-height: clamp(192px, 51cqi, 264px);
+  max-height: clamp(252px, 66cqi, 322px);
+}
+.cand .who {
+  font-size: var(--t-micro);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim-2);
+  font-weight: 700;
+}
+.cand .nm {
+  font-size: var(--t-lead);
+  font-weight: 800;
+  font-style: italic;
+  letter-spacing: -0.02em;
+  margin-top: 3px;
+}
+.cand.r .nm {
+  color: var(--romero);
+}
+.cand.a .nm {
+  color: var(--andreza);
+}
+.cand .num {
+  display: inline-block;
+  font-size: var(--t-body);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  border-radius: 6px;
+  padding: 3px 9px;
+  margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.cand.r .num {
+  background: rgba(61, 139, 255, 0.18);
+  color: var(--romero);
+}
+.cand.a .num {
+  background: rgba(245, 196, 61, 0.18);
+  color: var(--andreza);
+}
+/* Coluna de texto. Bloco simples, e não flex-column: transformada em flex, a
+   pílula do número e a de hoje eram blockificadas e esticavam de ponta a
+   ponta do card. O texto fica no topo mesmo — empurrar os números para a base
+   só troca um vão no fim por um vão no meio. */
+.cand > .cand-main {
+  flex: 1;
+  min-width: 0;
+}
+.cand .big {
+  font-size: var(--t-numbig);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  margin-top: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.cand .goal {
+  font-size: var(--t-cap);
+  color: var(--dim);
+  margin-top: 6px;
+  line-height: 1.45;
+}
+.cand .goal b {
+  color: var(--ink);
+}
+.cand .today {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+  background: rgba(52, 208, 127, 0.13);
+  border: 1px solid rgba(52, 208, 127, 0.3);
+  border-radius: 20px;
+  padding: 5px 11px;
+  font-size: var(--t-cap);
+  font-weight: 700;
+  color: var(--go);
+}
+
+.rocket {
+  flex: none;
+  width: var(--sz-rocket);
+  border-radius: 999px;
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+}
+.rocket .fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0;
+  transition: height 1.7s var(--ease-rocket);
+  border-radius: 0 0 999px 999px;
+}
+.cand.r .rocket .fill {
+  background: linear-gradient(180deg, #5aa0ff, #1f5fc4);
+}
+.cand.a .rocket .fill {
+  background: linear-gradient(180deg, #ffd75e, #c99512);
+}
+.rocket .ship {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, 50%);
+  bottom: 0;
+  font-size: clamp(21px, 5.8cqi, 28px);
+  line-height: 1;
+  transition: bottom 1.7s var(--ease-rocket);
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5));
+}
+.rocket .tick {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* ── blocos de lista ───────────────────────────────────────────────────── */
+.lblk {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: clamp(12px, 3.4cqi, 18px) clamp(13px, 3.6cqi, 20px);
+}
+.lttl {
+  font-size: var(--t-micro);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim-2);
+  font-weight: 700;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.lrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: clamp(7px, 2cqi, 11px) 0;
+  font-size: var(--t-body);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  width: 100%;
+  text-align: left;
+}
+.lrow:last-child {
+  border-bottom: none;
+}
+.lrow .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--go);
+  flex: none;
+}
+.lrow .dot.am {
+  background: var(--andreza);
+}
+.lrow .dot.rd {
+  background: var(--alert);
+}
+.lrow .nm {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  min-width: 0;
+}
+.lrow .tm {
+  font-size: var(--t-cap);
+  color: var(--dim-2);
+  flex: none;
+}
+
+/* ── fila de tarefas ───────────────────────────────────────────────────── */
+.task {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: clamp(12px, 3.4cqi, 18px) clamp(13px, 3.6cqi, 20px);
+  display: flex;
+  gap: clamp(11px, 3cqi, 16px);
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  transition: background var(--dur-fast) linear, border-color var(--dur-fast) linear,
+    transform 120ms var(--ease-out), opacity var(--dur) var(--ease);
+}
+.task:active {
+  transform: scale(0.985);
+}
+.task.hot {
+  border-color: rgba(255, 107, 107, 0.4);
+  background: rgba(255, 107, 107, 0.07);
+}
+.task.feita {
+  opacity: 0.45;
+}
+.task .av {
+  width: var(--sz-av);
+  height: var(--sz-av);
+  border-radius: 13px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--t-strong);
+  font-weight: 800;
+  background: rgba(61, 139, 255, 0.18);
+  color: #8fbeff;
+}
+.task.hot .av {
+  background: rgba(255, 107, 107, 0.18);
+  color: #ffa3a3;
+}
+.task .tn {
+  font-size: var(--t-strong);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.task.feita .tn {
+  text-decoration: line-through;
+}
+.task .tm {
+  font-size: var(--t-cap);
+  color: var(--dim-2);
+  margin-top: 3px;
+}
+.task .why {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: var(--t-micro);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 3px 8px;
+}
+.why.ret {
+  background: rgba(255, 107, 107, 0.16);
+  color: #ff9b9b;
+}
+.why.ani {
+  background: rgba(245, 196, 61, 0.16);
+  color: #ffd96b;
+}
+.why.pri {
+  background: rgba(52, 208, 127, 0.15);
+  color: #6fe3a9;
+}
+.why.rea {
+  background: rgba(147, 170, 203, 0.15);
+  color: var(--dim);
+}
+.task .go {
+  flex: none;
+  width: clamp(26px, 7cqi, 34px);
+  height: clamp(26px, 7cqi, 34px);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--t-body);
+  color: var(--dim);
+}
+
+/* ── progresso da fila ─────────────────────────────────────────────────── */
+.qbar {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: clamp(13px, 3.6cqi, 19px) clamp(14px, 3.9cqi, 21px);
+}
+.qtop {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+.qtop b {
+  font-size: var(--t-num);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.qtop span {
+  font-size: var(--t-cap);
+  color: var(--dim-2);
+}
+.track {
+  height: clamp(7px, 2cqi, 10px);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.09);
+  margin-top: 11px;
+  overflow: hidden;
+}
+.track i {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #3d8bff, #5ad6a8);
+  width: 0;
+  transition: width 1.5s var(--ease-rocket);
+}
+
+/* ── perfil do lead ────────────────────────────────────────────────────── */
+.prof {
+  display: flex;
+  gap: clamp(12px, 3.4cqi, 18px);
+  align-items: center;
+  padding: 2px;
+}
+.prof .pav {
+  width: var(--sz-pav);
+  height: var(--sz-pav);
+  border-radius: var(--r-lg);
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--t-lead);
+  font-weight: 800;
+  background: linear-gradient(150deg, #3d8bff, #1b4fa0);
+  color: #fff;
+}
+.prof .pn {
+  font-size: var(--t-lead);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.prof .pm {
+  font-size: var(--t-cap);
+  color: var(--dim);
+  margin-top: 4px;
+}
+.tags {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.tag {
+  font-size: var(--t-micro);
+  font-weight: 700;
+  border-radius: 20px;
+  padding: 5px 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--dim);
+}
+.tag.t3 {
+  background: rgba(245, 196, 61, 0.16);
+  color: var(--andreza);
+}
+.tag.pe {
+  background: rgba(61, 139, 255, 0.16);
+  color: #8fbeff;
+}
+.tag.ok {
+  background: rgba(52, 208, 127, 0.14);
+  color: var(--go);
+}
+.pet {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  padding: clamp(12px, 3.4cqi, 18px) clamp(13px, 3.6cqi, 20px);
+  display: flex;
+  gap: 11px;
+  align-items: center;
+}
+.pet .ic {
+  font-size: clamp(20px, 5.5cqi, 27px);
+  flex: none;
+}
+.pet .pt {
+  font-size: var(--t-strong);
+  font-weight: 700;
+}
+.pet .ps {
+  font-size: var(--t-cap);
+  color: var(--dim-2);
+  margin-top: 3px;
+}
+.pet .st {
+  margin-left: auto;
+  font-size: var(--t-micro);
+  font-weight: 700;
+  color: var(--go);
+  background: rgba(52, 208, 127, 0.14);
+  border-radius: 20px;
+  padding: 5px 10px;
+  flex: none;
+}
+.pet .st.obito {
+  color: var(--dim-2);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* ── linha do tempo ────────────────────────────────────────────────────── */
+.tl {
+  position: relative;
+  padding-left: clamp(20px, 5.5cqi, 28px);
+}
+.tl::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: linear-gradient(180deg, var(--romero), rgba(61, 139, 255, 0.08));
+}
+.tli {
+  position: relative;
+  padding-bottom: clamp(14px, 4cqi, 22px);
+}
+.tli::before {
+  content: "";
+  position: absolute;
+  left: calc(clamp(20px, 5.5cqi, 28px) * -1 + 1px);
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg-1);
+  border: 2.5px solid var(--romero);
+}
+.tli.gold::before {
+  border-color: var(--andreza);
+}
+.tli.mute::before {
+  border-color: var(--dim-2);
+}
+.tld {
+  font-size: var(--t-micro);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim-2);
+  font-weight: 700;
+}
+.tlt {
+  font-size: var(--t-body);
+  font-weight: 700;
+  margin-top: 4px;
+}
+.tls {
+  font-size: var(--t-cap);
+  color: var(--dim);
+  margin-top: 4px;
+  line-height: 1.45;
+}
+.tlbadge {
+  display: inline-block;
+  font-size: var(--t-micro);
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 3px 7px;
+  margin-top: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--dim);
+}
+.tlbadge.seen {
+  background: rgba(52, 208, 127, 0.14);
+  color: var(--go);
+}
+.tlbadge.no {
+  background: rgba(255, 107, 107, 0.14);
+  color: #ff9b9b;
+}
+
+/* ── formulário em botões ──────────────────────────────────────────────── */
+.flabel {
+  font-size: var(--t-micro);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim-2);
+  font-weight: 700;
+  margin-bottom: 9px;
+}
+.segs {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.seg {
+  font-size: var(--t-cap);
+  font-weight: 600;
+  border-radius: var(--r-sm);
+  padding: clamp(9px, 2.6cqi, 13px) clamp(13px, 3.6cqi, 18px);
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid var(--line);
+  color: var(--dim);
+  transition: background var(--dur-fast) linear, color var(--dur-fast) linear,
+    border-color var(--dur-fast) linear, transform 120ms var(--ease-out);
+}
+.seg:active {
+  transform: scale(0.96);
+}
+.seg.on {
+  background: var(--romero);
+  border-color: var(--romero);
+  color: #04122a;
+  font-weight: 800;
+}
+.seg.p1 {
+  background: var(--alert);
+  border-color: var(--alert);
+  color: #2a0808;
+  font-weight: 800;
+}
+.field {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: clamp(11px, 3.2cqi, 15px) clamp(13px, 3.6cqi, 17px);
+  color: var(--ink);
+  width: 100%;
+  display: block;
+  /* nunca abaixo de 16px: menos que isso e o iOS dá zoom ao focar o campo */
+  font-size: clamp(16px, 4cqi, 18px);
+}
+.field::placeholder {
+  color: var(--dim-2);
+}
+.field:focus {
+  outline: none;
+  border-color: var(--romero);
+}
+textarea.field {
+  resize: vertical;
+  min-height: 72px;
+  line-height: 1.5;
+}
+/* leitura estática (o mockup mostra o valor já preenchido) */
+.field.ro {
+  font-size: var(--t-body);
+  color: var(--dim);
+}
+
+.autobox {
+  background: rgba(52, 208, 127, 0.09);
+  border: 1px solid rgba(52, 208, 127, 0.28);
+  border-radius: var(--r);
+  padding: clamp(12px, 3.4cqi, 17px) clamp(13px, 3.6cqi, 19px);
+}
+.autobox.info {
+  background: rgba(61, 139, 255, 0.09);
+  border-color: rgba(61, 139, 255, 0.28);
+}
+.autobox.warn {
+  background: rgba(255, 107, 107, 0.09);
+  border-color: rgba(255, 107, 107, 0.28);
+}
+.autobox .at {
+  font-size: var(--t-cap);
+  font-weight: 800;
+  color: var(--go);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.autobox.info .at {
+  color: #8fbeff;
+}
+.autobox.warn .at {
+  color: #ff9b9b;
+}
+.autobox .ab {
+  font-size: var(--t-cap);
+  color: #b8d8c7;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.autobox.info .ab {
+  color: #bcd2ef;
+}
+.autobox.warn .ab {
+  color: #edc5c5;
+}
+
+/* ── ações ─────────────────────────────────────────────────────────────── */
+/* `.acts` alinhava os TRÊS canais do mockup lado a lado. Hoje são DOIS
+   (WhatsApp e Ligar) — o Vídeo saiu a pedido e `.act.vd` ficou sem uso, mas
+   segue aqui como vocabulário do mockup. */
+.acts {
+  display: flex;
+  gap: 9px;
+  flex: none;
+}
+.act {
+  flex: 1;
+  text-align: center;
+  border-radius: var(--r);
+  padding: clamp(12px, 3.4cqi, 16px) 0;
+  font-size: var(--t-cap);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  transition: transform 120ms var(--ease-out), filter var(--dur-fast) linear;
+}
+.act:active {
+  transform: scale(0.97);
+}
+.act .ai {
+  display: block;
+  font-size: clamp(16px, 4.4cqi, 21px);
+  margin-bottom: 5px;
+}
+.act.wa {
+  background: var(--wa);
+  color: #053420;
+}
+.act.vd {
+  background: var(--romero);
+  color: #04122a;
+}
+.act.cl {
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+}
+.act:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.cta {
+  flex: none;
+  width: 100%;
+  border-radius: 15px;
+  padding: clamp(14px, 4cqi, 19px);
+  text-align: center;
+  font-size: var(--t-body);
+  font-weight: 800;
+  background: linear-gradient(90deg, #3d8bff, #2bb6a0);
+  color: #04122a;
+  transition: transform 120ms var(--ease-out), filter var(--dur-fast) linear;
+}
+.cta:active {
+  transform: scale(0.985);
+}
+.cta.red {
+  background: linear-gradient(90deg, #ff7b7b, #e24545);
+  color: #2a0808;
+}
+.cta.ghost {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+}
+.cta:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* ── ▸ app: instalar o PWA ─────────────────────────────────────────────── */
+.inst {
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 2.8cqi, 14px);
+  background: rgba(61, 139, 255, 0.09);
+  border: 1px solid rgba(61, 139, 255, 0.28);
+  border-radius: var(--r);
+  padding: clamp(11px, 3cqi, 15px) clamp(12px, 3.2cqi, 16px);
+}
+.inst .ii {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: clamp(34px, 9.2cqi, 42px);
+  height: clamp(34px, 9.2cqi, 42px);
+  border-radius: 12px;
+  background: linear-gradient(135deg, #3d8bff, #2bb6a0);
+  color: #04122a;
+}
+.inst .it {
+  font-size: var(--t-cap);
+  font-weight: 800;
+  color: var(--ink);
+}
+.inst .is {
+  font-size: var(--t-micro);
+  color: var(--dim-2);
+  line-height: 1.45;
+  margin-top: 2px;
+}
+.inst .ib {
+  flex: none;
+  border-radius: 999px;
+  padding: clamp(9px, 2.4cqi, 12px) clamp(13px, 3.4cqi, 17px);
+  font-size: var(--t-cap);
+  font-weight: 800;
+  background: linear-gradient(90deg, #3d8bff, #2bb6a0);
+  color: #04122a;
+  transition: transform 120ms var(--ease-out);
+}
+.inst .ib:active {
+  transform: scale(0.96);
+}
+.inst .ix {
+  flex: none;
+  padding: 4px;
+  color: var(--dim-2);
+}
+
+/* ── utilitários ───────────────────────────────────────────────────────── */
+.dim {
+  color: var(--dim);
+}
+.dim2 {
+  color: var(--dim-2);
+}
+.num {
+  font-variant-numeric: tabular-nums;
+}
+.trunc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-v);
+}
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.scroll-x {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding-inline: var(--pad-x);
+  margin-inline: calc(var(--pad-x) * -1);
+}
+.scroll-x > * {
+  flex: none;
+}
+.empty {
+  padding: 38px 18px;
+  text-align: center;
+  color: var(--dim-2);
+  font-size: var(--t-cap);
+  line-height: 1.55;
+}
+.empty b {
+  display: block;
+  color: var(--ink);
+  font-size: var(--t-strong);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.skel {
+  background: linear-gradient(100deg, var(--card) 30%, var(--card-2) 50%, var(--card) 70%);
+  background-size: 220% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+  border-radius: var(--r-sm);
+}
+
+/* ── compat da barra de navegação (única peça preservada) ──────────────── */
+.ds-chrome {
+  background: var(--chrome-bg);
+  -webkit-backdrop-filter: var(--chrome-blur);
+  backdrop-filter: var(--chrome-blur);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .ds-chrome {
+    background: var(--panel);
+  }
+}
+.ds-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.ds-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 19px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim-2);
+  background: rgba(255, 255, 255, 0.09);
+}
+.ds-count-hot {
+  color: #fff;
+  background: var(--alert);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   CENTRAL DE CAMPANHA — portado de `ROMERO/central-campanha-romero.html`
+
+   Mesma regra do primeiro mockup: MESMOS NOMES DE CLASSE. A diferença é que
+   este segundo chega com nomes que o app já usa para outra coisa — `.row` é
+   flex aqui e grid lá, `.stack` é coluna aqui e barra empilhada lá, `.seg` é
+   botão de formulário aqui e alternador lá. Por isso TUDO vive dentro de
+   `.cc`: o escopo é o que deixa os dois vocabulários conviverem sem um apagar
+   o outro, e é mais barato que renomear metade de uma tela.
+
+   Duas adaptações deliberadas:
+
+   1. A PALETA CLARA DO MOCKUP VIRA TOKEN LOCAL. Os nomes são os de lá
+      (--surface, --accent, --good…) porque a marcação e os `style=` inline os
+      citam; os VALORES apontam para a paleta do app. Trocar o bloco abaixo por
+      cores claras devolve o mockup ao pé da letra, se um dia for o pedido.
+   2. SÓ EXISTE A LARGURA DE CELULAR. O mockup desenha a mesma tela em duas —
+      no desktop alguns cartões viram 2 ou 3 colunas. Aqui `.row` é sempre uma
+      coluna, que foi o pedido e é como as outras telas já se comportam.
+
+   `.cc` é o ENVOLTÓRIO da seção dentro do Início, e não a `.view` da tela — a
+   Central de Campanha deixou de ser rota. Duas consequências: ela precisa da
+   própria coluna flex (a `.view` não a empresta mais a estes filhos), e o
+   escopo dos tokens abaixo passa a valer SÓ para o bloco de campanha, sem
+   tocar nos cartões do Início que ficam acima. O container das consultas
+   `@container` e das unidades `cqi` continua sendo a `.view`, que é quem tem
+   `container-type` — por isso as medidas não mudaram de referência.
+   ══════════════════════════════════════════════════════════════════════════ */
+.cc {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-v);
+  /* A campanha é outra OPERAÇÃO, não a continuação das urnas — e o leitor
+     precisa ver isso antes de ler o primeiro número. Com o respiro de cartão
+     (~15px) a emenda ficava igual a qualquer outra costura da coluna; aqui a
+     folga é o dobro, que é o que faz o cabeçalho abrir seção em vez de parecer
+     legenda do card de cima. */
+  margin-top: calc(var(--gap-head) + var(--gap-v));
+
+  --surface: var(--card);
+  --surface-2: var(--card-2);
+  --muted: var(--dim);
+  --faint: var(--dim-2);
+  --accent: var(--romero);
+  --accent-ink: #b9d4ff;
+  --accent-bg: rgba(61, 139, 255, 0.18);
+  /* no mockup a segunda urna é roxa; aqui ela é a cor da Andreza, que é a
+     mesma em toda tela do app — duas cores para a mesma pessoa confundiria */
+  --accent2: var(--andreza);
+  --good: var(--go);
+  --good-bg: rgba(52, 208, 127, 0.15);
+  --warn: #ffc663;
+  --warn-bg: rgba(255, 198, 99, 0.15);
+  --crit-bg: rgba(255, 107, 107, 0.15);
+  --gold: #f5c43d;
+  --silver: #b7c3d4;
+  --bronze: #d0894f;
+  --grid: rgba(255, 255, 255, 0.09);
+  --track: rgba(255, 255, 255, 0.1);
+}
+
+/* ── topo ──────────────────────────────────────────────────────────────── */
+/* filho DIRETO: `.top` também é o modificador das linhas de pódio do ranking
+   (`.rrow.top`), e o mockup carrega essa colisão. Aqui o combinador separa os
+   dois em vez de deixar `justify-content` e `gap` do cabeçalho vazarem para
+   dentro da lista. */
+.cc > .top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 0;
+}
+/* h2 porque o h1 da página é o cumprimento do Início; o h1 fica listado para o
+   caso de a campanha voltar a ser tela própria */
+.cc .brand h1,
+.cc .brand h2 {
+  font-size: var(--t-lead);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.cc .brand .sub {
+  font-size: var(--t-cap);
+  color: var(--muted);
+  margin-top: 3px;
+}
+.cc .top-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.cc .chip {
+  font-size: clamp(11px, 3cqi, 13px);
+  font-weight: 600;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.cc .chip.live {
+  background: var(--good-bg);
+  color: var(--good);
+  border-color: transparent;
+}
+.cc .chip.live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--good);
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: middle;
+  /* o mesmo pulso do indicador ao vivo das outras telas */
+  box-shadow: 0 0 0 0 rgba(52, 208, 127, 0.55);
+  animation: pulse-ring 2.4s infinite;
+}
+.cc .chip.demo {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-color: transparent;
+}
+.cc .seg {
+  display: inline-flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 2px;
+  /* zera o que o `.seg` de formulário do app traz */
+  font-size: inherit;
+  color: inherit;
+}
+.cc .seg span {
+  font-size: clamp(11.5px, 3.1cqi, 13.5px);
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 7px;
+}
+.cc .seg span.on {
+  background: var(--card-2);
+  color: var(--ink);
+}
+.cc .diasep {
+  margin: -4px 0 2px;
+}
+
+/* ── cartão ────────────────────────────────────────────────────────────── */
+.cc .card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: clamp(13px, 3.7cqi, 19px);
+}
+.cc .eyebrow {
+  font-size: var(--t-micro);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 9px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.35;
+}
+.cc .val {
+  font-size: clamp(29px, 7.9cqi, 36px);
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+.cc .lab {
+  font-size: var(--t-cap);
+  color: var(--muted);
+  margin-top: 5px;
+  line-height: 1.45;
+}
+.cc .valrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* o alinhamento é pela LINHA DE BASE: um respiro no topo empurraria o texto
+   pequeno para baixo do número grande em vez de alinhá-lo */
+.cc .valrow .lab {
+  margin-top: 0;
+}
+.cc .pill {
+  font-size: clamp(11px, 3cqi, 13px);
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex: none;
+}
+.cc .pill.good {
+  background: var(--good-bg);
+  color: var(--good);
+}
+.cc .pill.warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.cc .pill.crit {
+  background: var(--crit-bg);
+  color: var(--crit);
+}
+.cc .pill.acc {
+  background: var(--accent-bg);
+  color: var(--accent-ink);
+}
+.cc .up {
+  color: var(--good);
+}
+.cc .down {
+  color: var(--crit);
+}
+.cc .tabnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── barra de progresso com marcador de ritmo ──────────────────────────── */
+.cc .progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+  margin-top: 10px;
+  position: relative;
+}
+.cc .progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 1.7s var(--ease-rocket);
+}
+.cc .progress.g > span {
+  background: var(--good);
+}
+.cc .progress.p > span {
+  background: var(--accent2);
+}
+.cc .progress .mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--ink);
+  opacity: 0.45;
+}
+.cc .marca {
+  margin-top: 6px;
+}
+.cc .aviso {
+  margin-top: 8px;
+}
+.cc .gap8 {
+  height: 8px;
+}
+
+/* ── trinca de números sob o cartão ────────────────────────────────────── */
+.cc .metrow {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.cc .metrow > div {
+  flex: 1;
+  min-width: 84px;
+}
+.cc .metrow .mv {
+  font-size: clamp(16px, 4.4cqi, 19px);
+  font-weight: 700;
+  line-height: 1.2;
+}
+.cc .metrow .ml {
+  font-size: clamp(11px, 3cqi, 13px);
+  color: var(--faint);
+  line-height: 1.35;
+}
+
+/* ── gráficos ──────────────────────────────────────────────────────────── */
+.cc .chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+/* 14 e não os 9 do mockup: 9 unidades de um viewBox de 640 dentro de uma
+   coluna de celular dão 4,6px de tela, que ninguém lê. Ver o comentário do
+   componente — é a mesma "diferença deliberada" da escala fluida. */
+.cc .axis {
+  font-size: 14px;
+  fill: var(--faint);
+}
+.cc .glin {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+.cc .clegend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: var(--t-cap);
+  color: var(--muted);
+  margin-top: 8px;
+}
+.cc .clegend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+/* No mockup estas duas pastilhas são a cor cheia com `opacity` — o cartão de
+   lá é branco, e baixar a opacidade CLAREIA. Aqui o cartão é quase preto: a
+   mesma opacidade escurece em direção ao fundo, e a pastilha da projeção saía
+   mais fraca que a de "meta ideal", invertendo a hierarquia que o gráfico
+   desenha (projeção é traço cheio de --accent; meta ideal é --faint apagado).
+   Misturar com a cor de fundo OPACA em vez de usar opacidade resolve. */
+.cc .clegend i.proj {
+  background: color-mix(in srgb, var(--accent) 70%, var(--bg-1));
+}
+.cc .clegend i.lig {
+  background: color-mix(in srgb, var(--accent) 40%, var(--bg-1));
+}
+.cc .trend {
+  margin-bottom: 10px;
+}
+.cc .trend:last-child {
+  margin-bottom: 0;
+}
+.cc .trend-h {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: var(--t-cap);
+}
+.cc .trend-h .lab {
+  margin: 0;
+}
+.cc .trend-h strong {
+  font-size: var(--t-cap);
+  font-weight: 700;
+}
+.cc .spark {
+  width: 100%;
+  height: 30px;
+  display: block;
+}
+
+/* ── tabela do comparativo ─────────────────────────────────────────────── */
+.cc table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-cap);
+}
+.cc td {
+  padding: 7px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.cc td:first-child {
+  text-align: left;
+  color: var(--muted);
+}
+.cc tr:last-child td {
+  border-bottom: none;
+}
+
+/* ── barra horizontal rotulada ─────────────────────────────────────────── */
+.cc .cbar {
+  display: grid;
+  grid-template-columns: clamp(72px, 21cqi, 96px) 1fr clamp(48px, 14cqi, 62px);
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+/* `margin: 0` zera o `margin-top: 11px` do `.track` GLOBAL (o medidor da Fila).
+   Escopo não protege contra isso: `.cc .cbar .track` só vence propriedade por
+   propriedade, e o que ele não declara continua vindo da regra de fora. Como o
+   `.cbar` é grid com `align-items:center`, os 11px entravam no alinhamento e
+   desciam a barra ~5,5px em relação ao rótulo e ao número. Mesma neutralização
+   que `.cc .seg` e `.cc .valrow .lab` já fazem. */
+.cc .cbar .track {
+  height: 9px;
+  margin: 0;
+  background: var(--track);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.cc .cbar .track > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+.cc .cbar .lbl {
+  font-size: var(--t-cap);
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc .cbar .n {
+  font-size: var(--t-cap);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── barra empilhada da intenção de voto ───────────────────────────────── */
+.cc .stack {
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 700;
+  color: #04122a;
+}
+.cc .stack > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.cc .intlab {
+  margin: 10px 0 4px;
+}
+.cc .intlab.primeiro {
+  margin-top: 0;
+}
+
+/* ── ranking ───────────────────────────────────────────────────────────── */
+.cc .rk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.cc .rk-title {
+  font-size: var(--t-strong);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+.cc .rk-sub {
+  font-size: clamp(11.5px, 3.1cqi, 13.5px);
+  color: var(--faint);
+  font-weight: 500;
+}
+.cc .legenda {
+  margin-top: 8px;
+  line-height: 1.5;
+}
+.cc .sortwrap {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: clamp(11.5px, 3.1cqi, 13.5px);
+  color: var(--muted);
+}
+.cc select.sort {
+  font-family: inherit;
+  font-size: var(--t-cap);
+  font-weight: 600;
+  color: var(--ink);
+  background-color: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 30px 7px 11px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4l4 4 4-4' fill='none' stroke='%236e86a8' stroke-width='1.6' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+/* a lista nativa do sistema é clara; sem isto o texto some no fundo branco */
+.cc select.sort option {
+  background: var(--bg-1);
+  color: var(--ink);
+}
+.cc .rlist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* O mockup rola a lista dentro do cartão. No toque isso é um rolável dentro de
+   outro — o gesto fica preso e as últimas linhas viram sorte. A altura máxima
+   só vale onde existe ponteiro e espaço: no rail.
+
+   A REGRA MORA NO @media DO RAIL, no fim do arquivo, e não aqui. Com
+   `@container (min-width: 560px)` ela ligava 292px cedo demais: a caixa de
+   conteúdo da `.view` (620 − 48) cruza 560px já com ~608px de janela, então
+   iPad em pé, tablet Android e iPhone deitado — todos sem rail — ganhavam
+   justamente o rolável aninhado que o parágrafo acima diz evitar. */
+.cc .rrow {
+  display: grid;
+  grid-template-columns: 24px 38px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 11px;
+}
+.cc .rrow.top {
+  background: linear-gradient(90deg, var(--surface-2), transparent);
+}
+.cc .rk {
+  color: var(--faint);
+  font-weight: 700;
+  font-size: var(--t-cap);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.cc .medal {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+  color: #04122a;
+  margin: 0 auto;
+}
+.cc .m1 {
+  background: var(--gold);
+}
+.cc .m2 {
+  background: var(--silver);
+}
+.cc .m3 {
+  background: var(--bronze);
+}
+.cc .avwrap {
+  position: relative;
+  width: 38px;
+  height: 38px;
+}
+.cc .avph {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  display: block;
+}
+/* `aro` e não `ring`, que é o nome no mockup: `ring` é UTILITÁRIO do Tailwind
+   v4 (`box-shadow: 0 0 0 1px #fff`), o scanner o gera só de vê-lo na marcação,
+   e @layer utilities vence @layer components — o pódio saía com um quadrado
+   branco em volta do retrato. Nome do mockup que colide com utilitário do
+   Tailwind precisa ser traduzido, não escapado. */
+.cc .avwrap.aro::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--gold);
+}
+.cc .avwrap.aro.s2::after {
+  border-color: var(--silver);
+}
+.cc .avwrap.aro.s3::after {
+  border-color: var(--bronze);
+}
+.cc .rinfo {
+  min-width: 0;
+}
+.cc .rn {
+  font-weight: 650;
+  font-size: var(--t-cap);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc .rs {
+  font-size: clamp(11px, 3cqi, 13px);
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc .rstat {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 4px;
+  vertical-align: middle;
+  flex: none;
+}
+.cc .rmet {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-end;
+}
+.cc .rbig {
+  text-align: right;
+  min-width: 74px;
+}
+.cc .rbig b {
+  font-size: clamp(17px, 4.7cqi, 20px);
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  display: block;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.cc .rbig small {
+  font-size: clamp(10px, 2.7cqi, 12px);
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.cc .rsm {
+  display: flex;
+  gap: 10px;
+  font-size: clamp(11.5px, 3.1cqi, 13.5px);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.cc .rsm b {
+  color: var(--ink);
+  font-weight: 600;
+}
+/* na coluna estreita só sobra o número da métrica ordenada — as outras três
+   não cabem sem espremer o nome, que é o que identifica a linha */
+@container (max-width: 560px) {
+  .cc .rsm {
+    display: none;
+  }
+}
+
+} /* @layer components */
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Barras de rolagem horizontais — esconder PRECISA ficar fora de @layer:
+   CSS sem camada vence CSS em camada, e o `*::-webkit-scrollbar` acima é sem
+   camada. Dentro da camada, toda tira rolável ganhava uma barrinha desenhada
+   por cima dos chips.
+   ══════════════════════════════════════════════════════════════════════════ */
+.scroll-x {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scroll-x::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ≥900px — a barra vira rail lateral.
+   FORA de @layer pelo mesmo motivo acima: o :root base é sem camada.
+   ══════════════════════════════════════════════════════════════════════════ */
+@media (min-width: 900px) {
+  :root {
+    --rail-w: 232px;
+  }
+  .view {
+    max-width: 760px;
+    padding-bottom: 52px;
+  }
+  /* o rolável interno do ranking: só onde há rail, que é onde há ponteiro.
+     Mesma condição que CRIA o rail, e não uma aproximação por largura de
+     container — as duas fronteiras não coincidem. */
+  .cc .rlist {
+    max-height: 520px;
+    overflow: auto;
+  }
+}

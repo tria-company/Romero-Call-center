@@ -1,0 +1,146 @@
+"use client";
+
+import * as React from "react";
+import {
+  METRICAS_RANKING,
+  METRICA_LABEL,
+  METRICA_UNIDADE,
+  ordenarRanking,
+  tomAderencia,
+  type MetricaRanking,
+  type Telefonista,
+} from "@/lib/campanha";
+import { fmtInt, fmtMinSeg } from "@/lib/format";
+import { COR, Retrato } from "./CampanhaGraficos";
+
+/* Ranking dos telefonistas — a ÚNICA parte cliente da Central de Campanha.
+   O resto da tela é número fixo e renderiza no servidor; aqui existe estado
+   (a métrica escolhida) e por isso este arquivo é separado.
+
+   Componente cliente ainda passa pelo servidor na primeira pintura, então a
+   ordenação inicial (por votos) já sai pronta do HTML: a lista não se
+   reorganiza sozinha quando o JavaScript chega. */
+
+/** As métricas que acompanham o número grande, fora a que está ordenando. */
+const SECUNDARIAS: MetricaRanking[] = ["conv", "ader", "tsec", "votos"];
+
+function valorMetrica(o: Telefonista, k: MetricaRanking): string {
+  switch (k) {
+    case "votos":
+      return fmtInt(o.votos);
+    case "conv":
+      return `${o.conv}%`;
+    case "lig":
+      return fmtInt(o.lig);
+    case "ader":
+      return `${o.ader}%`;
+    case "tsec":
+      return fmtMinSeg(o.tsec);
+    case "ligh":
+      return o.ligh.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  }
+}
+
+export function Ranking({
+  telefonistas,
+  equipeTotal,
+}: {
+  telefonistas: readonly Telefonista[];
+  equipeTotal: number;
+}) {
+  const [por, setPor] = React.useState<MetricaRanking>("votos");
+  const linhas = React.useMemo(() => ordenarRanking(telefonistas, por), [telefonistas, por]);
+
+  return (
+    <div className="card">
+      <div className="rk-head">
+        <div>
+          <div className="rk-title">Ranking dos telefonistas</div>
+          <div className="rk-sub">
+            {equipeTotal > 0
+              ? `${fmtInt(equipeTotal)} colaboradores`
+              : `${telefonistas.length} com ligação registrada`}
+          </div>
+        </div>
+        <label className="sortwrap">
+          Ordenar por
+          <select
+            className="sort"
+            value={por}
+            onChange={(e) => setPor(e.target.value as MetricaRanking)}
+          >
+            {METRICAS_RANKING.map((k) => (
+              <option key={k} value={k}>
+                {METRICA_LABEL[k]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="rlist">
+        {linhas.length === 0 ? (
+          <div className="rk-sub" style={{ padding: "14px 0", opacity: 0.7 }}>
+            Nenhuma ligação registrada ainda — o ranking se preenche conforme a
+            operação roda.
+          </div>
+        ) : (
+          linhas.map((o, idx) => (
+            <LinhaRanking key={o.id} o={o} posicao={idx + 1} por={por} />
+          ))
+        )}
+      </div>
+
+      <div className="rk-sub legenda">
+        ● verde aderência ≥80% · ● âmbar 70–79% · ● vermelho &lt;70% (treino)
+      </div>
+    </div>
+  );
+}
+
+function LinhaRanking({
+  o,
+  posicao,
+  por,
+}: {
+  o: Telefonista;
+  posicao: number;
+  por: MetricaRanking;
+}) {
+  const podio = posicao <= 3;
+  // `aro` e não `ring`: `ring` é utilitário do Tailwind e venceria este CSS
+  const anel = podio ? `avwrap aro s${posicao}` : "avwrap";
+
+  return (
+    <div className={podio ? "rrow top" : "rrow"}>
+      {podio ? (
+        <span className={`medal m${posicao}`}>{posicao}</span>
+      ) : (
+        <span className="rk">{posicao}</span>
+      )}
+      <div className={anel}>
+        <Retrato id={o.id} />
+      </div>
+      <div className="rinfo">
+        <div className="rn">
+          <span className="rstat" style={{ background: COR[tomAderencia(o.ader)] }} />
+          {o.nome}
+        </div>
+        <div className="rs">{o.turno || `${o.lig} lig. · ${o.cont} contatos`}</div>
+      </div>
+      <div className="rmet">
+        <div className="rsm">
+          {SECUNDARIAS.filter((k) => k !== por).map((k) => (
+            <span key={k}>
+              <b>{valorMetrica(o, k)}</b> {METRICA_UNIDADE[k]}
+            </span>
+          ))}
+        </div>
+        <div className="rbig">
+          <b>{valorMetrica(o, por)}</b>
+          <small>{METRICA_UNIDADE[por]}</small>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,123 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   MOVIMENTO
+
+   O mockup tem três gestos de animação e nada mais: o PULSO do indicador ao
+   vivo, o FOGUETE subindo (altura + posição da nave) e a BARRA de progresso
+   preenchendo. Tudo o que existe aqui além disso é o mínimo que um app —
+   e não uma imagem estática — precisa: entrada de item, folha, aviso.
+
+   Regra da casa: nenhuma animação nova inventa easing. Escolha entre
+   --ease-out (padrão), --ease-out-soft (entradas), --ease-spring (molas),
+   --ease-bounce (toque) e --ease-rocket (o foguete e a barra).
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── do mockup ─────────────────────────────────────────────────────────── */
+@keyframes pulse-ring {
+  70% {
+    box-shadow: 0 0 0 7px rgba(52, 208, 127, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(52, 208, 127, 0);
+  }
+}
+
+/* ── entradas ──────────────────────────────────────────────────────────── */
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── folha inferior ────────────────────────────────────────────────────── */
+@keyframes sheet-up {
+  from {
+    transform: translate3d(0, 100%, 0);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes sheet-down {
+  from {
+    transform: none;
+  }
+  to {
+    transform: translate3d(0, 100%, 0);
+  }
+}
+
+/* ── aviso ─────────────────────────────────────────────────────────────── */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale(0.97);
+  }
+}
+
+/* ── esqueleto ─────────────────────────────────────────────────────────── */
+@keyframes shimmer {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@layer components {
+  .anim-reveal {
+    animation: reveal-up 420ms var(--ease-out-soft) backwards;
+  }
+  .anim-fade {
+    animation: fade-in 300ms var(--ease-out) backwards;
+  }
+  .anim-scale {
+    animation: scale-in 200ms var(--ease-out-soft) backwards;
+  }
+  .spin {
+    animation: spin 1s linear infinite;
+  }
+}
