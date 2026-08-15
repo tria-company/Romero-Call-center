@@ -1,18 +1,20 @@
 // Mapa operador do discador <-> assignee ClickUp (Fase 02 Plano 02, D-P2-06
-// sub-ponto). O login do discador vive em `DISCADOR_USERS` (discador-auth.ts);
-// o assignee de uma task do ClickUp é um member id numérico da workspace. A
-// skill `gerar-lote-diario` precisa traduzir "usuário do discador" ->
-// "memberId do ClickUp" para atribuir a Ligação ao operador certo (e o
-// discador poder filtrar "minhas tasks" por esse mesmo assignee).
+// sub-ponto). Desde a Fase 11 (D-02) a fonte primária é o snapshot em memória
+// de `discador_usuarios` (Postgres) — `assigneeDoOperador`/
+// `mapaOperadorParaAssignee` leem `clickup_member_id` do snapshot. O mapa
+// `DISCADOR_ASSIGNEES` do env vira fallback SOMENTE de degradação (snapshot
+// vazio — store não aquecido ainda/indisponível): não é uma segunda fonte
+// viva, o store é a fonte de verdade quando aquecido.
 //
-// MÓDULO SEM IMPORTS (nem relativos, nem de pacotes) — só `process.env` — para
-// ser importável tanto pelo bundle Mastra quanto por
-// `node --experimental-strip-types` a partir dos scripts de smoke/runner.
+// Importa `snapshotUsuarios` de `./usuarios.ts` (extensão `.ts` explícita —
+// mantém importável por `node --experimental-strip-types` a partir dos
+// scripts de smoke/runner, mesmo padrão do resto do módulo).
 //
 // DISCADOR_ASSIGNEES: "usuario1:memberId1,usuario2:memberId2" (ex:
 // "admin:88123456"). O memberId vem de ClickUp -> Settings -> Members (ou
-// GET /team). v1 é single-operator (D-P2-08 sub-ponto): normalmente só um par
-// usuario:memberId é usado, via `LOTE_OPERADOR_DEFAULT`.
+// GET /team).
+
+import { snapshotUsuarios } from './usuarios.ts';
 
 function carregarAssignees(): Map<string, string> {
   const raw = process.env.DISCADOR_ASSIGNEES || '';
@@ -27,23 +29,46 @@ function carregarAssignees(): Map<string, string> {
   return m;
 }
 
+// Mantido só como fallback de degradação (ver nota acima) — carregado 1x no
+// boot, igual antes da Fase 11.
 const ASSIGNEES = carregarAssignees();
 
-if (!process.env.DISCADOR_ASSIGNEES) {
+if (!process.env.DISCADOR_ASSIGNEES && snapshotUsuarios().size === 0) {
   console.warn(
-    '[operadores] DISCADOR_ASSIGNEES vazio: a skill gerar-lote-diario nao consegue atribuir ' +
-      'Ligacoes a nenhum operador do ClickUp. Configure "usuario:memberId,..." no .env ' +
-      '(memberId em ClickUp -> Settings -> Members).',
+    '[operadores] DISCADOR_ASSIGNEES vazio e snapshot do store ainda nao aquecido: a skill ' +
+      'gerar-lote-diario pode nao conseguir atribuir Ligacoes a nenhum operador do ClickUp ' +
+      'ate o boot rodar recarregarUsuarios(). Configure clickup_member_id em discador_usuarios ' +
+      '(ou DISCADOR_ASSIGNEES "usuario:memberId,..." como fallback).',
   );
 }
 
-/** Retorna uma cópia do mapa usuário-do-discador -> memberId-do-ClickUp (DISCADOR_ASSIGNEES). */
+/**
+ * Retorna o mapa usuário-do-discador -> memberId-do-ClickUp. Fonte primária:
+ * snapshot do store (D-02); fallback de degradação pro mapa `DISCADOR_ASSIGNEES`
+ * do env SOMENTE quando o snapshot está vazio.
+ */
 export function mapaOperadorParaAssignee(): Map<string, string> {
-  return new Map(ASSIGNEES);
+  const snap = snapshotUsuarios();
+  if (snap.size === 0) return new Map(ASSIGNEES);
+  const m = new Map<string, string>();
+  for (const [usuario, reg] of snap) {
+    if (reg.clickup_member_id) m.set(usuario, reg.clickup_member_id);
+  }
+  return m;
 }
 
-/** Resolve o memberId do ClickUp para um usuário do discador, ou `null` se não mapeado. */
+/**
+ * Resolve o memberId do ClickUp para um usuário do discador, ou `null` se não
+ * mapeado. Fonte primária: snapshot do store (D-02) — `clickup_member_id` do
+ * registro do usuário. Fallback SOMENTE de degradação (snapshot vazio) pro
+ * mapa `DISCADOR_ASSIGNEES` do env — não é uma segunda fonte viva, o store é
+ * a fonte de verdade quando aquecido.
+ */
 export function assigneeDoOperador(usuario: string): string | null {
   const u = (usuario || '').trim().toLowerCase();
+  const snap = snapshotUsuarios();
+  if (snap.size > 0) {
+    return snap.get(u)?.clickup_member_id ?? null;
+  }
   return ASSIGNEES.get(u) ?? null;
 }
