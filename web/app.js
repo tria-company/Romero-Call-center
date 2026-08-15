@@ -39,9 +39,10 @@
   // lista rolável do GHL QUALIFICADO (D-P2-07): /api/discador/qualificados
   // NAO e mais chamada por esta tela.
   function mostrarStatus(msg){$('fila-lista').style.display='none';$('fila-status').textContent=msg;$('fila-status').style.display='block';}
-  // Lista AO VIVO (LIVE-QUEUE): reconstroi #fila-lista inteiro a cada render
-  // (fila pequena, aceitavel). Nome/telefone via textContent (sem XSS, sem
-  // escaping) — nunca innerHTML/template literal.
+  // Uma-por-vez (D-P2-08): renderiza SO o proximo lead (itens[0]). O backend
+  // continua mandando a fila inteira, mas so exibimos o primeiro — ao desfechar,
+  // o proximo poll refetcha e o de baixo sobe. Nome/telefone via textContent
+  // (sem XSS, sem escaping) — nunca innerHTML/template literal.
   function renderFila(itens){
     if(!itens||!itens.length){
       $('fila-contador').textContent='';
@@ -49,13 +50,11 @@
       return;
     }
     $('fila-status').style.display='none';
-    $('fila-contador').textContent=itens.length+' ligações';
+    $('fila-contador').textContent='Próxima ligação';
     var lista=$('fila-lista');
     lista.textContent='';
     lista.style.display='block';
-    for(var i=0;i<itens.length;i++){
-      lista.appendChild(criarItemFila(itens[i]));
-    }
+    lista.appendChild(criarItemFila(itens[0]));
   }
   function criarItemFila(item){
     var row=document.createElement('div');row.className='fila-item';
