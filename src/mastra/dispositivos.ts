@@ -15,6 +15,11 @@
 
 import Redis from 'ioredis';
 import { WAVOIP_DEVICES, WAVOIP_USER_DEVICES, WAVOIP_DEVICE_TOKEN, REDIS_URL, DEVICE_LEASE_TTL_MS } from './config.ts';
+// Fase 11 (D-04): device dedicado passa a viver no registro do usuário
+// (`wavoip_device_id`, snapshot em memória de discador_usuarios). O mapa
+// `WAVOIP_USER_DEVICES` do env vira fallback SOMENTE de degradação quando o
+// snapshot está vazio (store não aquecido ainda/indisponível).
+import { snapshotUsuarios } from './usuarios.ts';
 
 export type ModoDevice = 'dedicado' | 'pool' | 'global';
 
@@ -84,6 +89,20 @@ export function tokenDoDevice(deviceId: string): string | null {
   return entrada ? entrada.token : null;
 }
 
+/**
+ * Inventário público de devices (deviceId + numero SOMENTE — nunca o
+ * `token`). Consumido pela rota `/api/admin/devices` do painel admin
+ * (Fase 11 Plano 04) para popular o dropdown de vínculo de device por
+ * operador — LGPD/segredo (T-11-03-I1): o token do device NUNCA sai daqui.
+ */
+export function inventarioPublico(): Array<{ deviceId: string; numero: string }> {
+  const lista: Array<{ deviceId: string; numero: string }> = [];
+  for (const [deviceId, entrada] of INVENTARIO) {
+    lista.push({ deviceId, numero: entrada.numero });
+  }
+  return lista;
+}
+
 /** Mapa reverso numero(so-digitos)->deviceId. null se nenhum device casa. */
 export function deviceIdPorNumero(numero: string): string | null {
   const alvo = (numero || '').replace(/[^\d]/g, '');
@@ -105,7 +124,10 @@ function existeDeviceDePool(): boolean {
 
 /**
  * Resolve a config de device do usuario autenticado (DEVICE-01, DD-07-02):
- * 1. usuario tem device dedicado (WAVOIP_USER_DEVICES) -> esse token, modo 'dedicado'.
+ * 1. usuario tem device dedicado -> esse token, modo 'dedicado'. Fonte primária
+ *    (D-04): `wavoip_device_id` do snapshot do store; fallback de degradação
+ *    pro mapa `WAVOIP_USER_DEVICES` do env SOMENTE quando o snapshot está
+ *    vazio — não é uma segunda fonte viva.
  * 2. senao, se ha device de pool livre no inventario -> wavoipToken null, modo 'pool'
  *    (o frontend fara lease no inicio da chamada — plano 07-02).
  * 3. senao -> WAVOIP_DEVICE_TOKEN global, modo 'global' (comportamento atual de 1 device,
@@ -113,7 +135,10 @@ function existeDeviceDePool(): boolean {
  */
 export function resolverConfigDoUsuario(usuario: string): ConfigDevice {
   const u = (usuario || '').trim().toLowerCase();
-  const deviceIdDedicado = u ? DEDICADOS.get(u) : undefined;
+  const snap = snapshotUsuarios();
+  const deviceIdDedicado = u
+    ? (snap.size > 0 ? (snap.get(u)?.wavoip_device_id ?? undefined) : DEDICADOS.get(u))
+    : undefined;
   if (deviceIdDedicado) {
     const token = tokenDoDevice(deviceIdDedicado);
     if (token) {
