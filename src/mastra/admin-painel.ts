@@ -91,10 +91,13 @@ export const ADMIN_HTML = `<!doctype html>
       <div class="row">
         <h1>Painel operacional</h1>
         <span id="upd-pill" class="pill">—</span>
+        <button id="nav-painel-btn" class="ghost">Painel</button>
+        <button id="nav-usuarios-btn" class="ghost" style="display:none">Usuários</button>
         <button id="logout-btn" class="ghost">Sair</button>
       </div>
     </header>
     <main>
+      <div id="painel-tab">
       <section id="kpis-bloco" class="bloco">
         <div id="kpis-erro" class="erro-bloco" style="display:none"></div>
         <div id="kpis-grid" class="kpi-grid">
@@ -156,6 +159,30 @@ export const ADMIN_HTML = `<!doctype html>
           <div class="placeholder">—</div>
           <div class="placeholder-sub">Status de réplica/deploy não é acompanhado ao vivo nesta fase. O alerta de saúde de réplica sai direto pelo Slack (ver runbook de deploy).</div>
         </div>
+      </section>
+      </div>
+
+      <section id="usuarios-bloco" class="bloco" style="display:none">
+        <div class="bloco-title">Usuários</div>
+        <p class="muted" style="margin:0">Operadores do discador — usuário, papel, vínculo ao membro do ClickUp e ao device Wavoip (opcional).</p>
+        <div id="usuarios-erro" class="erro-bloco" style="display:none"></div>
+        <div id="usuarios-lista"></div>
+        <form id="usuario-form" class="card" style="display:flex;flex-direction:column;gap:10px">
+          <div class="bloco-title" style="font-size:15px">Novo operador</div>
+          <input id="f-usuario" class="field" placeholder="Usuário" autocapitalize="none" autocomplete="off">
+          <input id="f-senha" class="field" type="password" placeholder="Senha inicial" autocomplete="new-password">
+          <select id="f-papel" class="field">
+            <option value="atendente">Atendente</option>
+            <option value="gestor">Gestor</option>
+          </select>
+          <select id="sel-membro" class="field">
+            <option value="">— carregando membros do ClickUp —</option>
+          </select>
+          <select id="sel-device" class="field">
+            <option value="">— pool/global —</option>
+          </select>
+          <button type="submit" class="primary">Criar operador</button>
+        </form>
       </section>
     </main>
   </div>
@@ -255,15 +282,188 @@ export const ADMIN_APP_JS = `(function(){
   function iniciarPainel(){
     show('painel');
     iniciarPolling();
+    carregarMembros();
+    carregarDevices();
+    carregarUsuarios();
   }
   document.addEventListener('visibilitychange',function(){
     if(document.visibilityState==='visible'){if(getToken()){iniciarPolling();}}
     else{pararPolling();}
   });
+
+  // ============ Usuários (gestão de operadores — Fase 11) ============
+  // Aba visível só para gestor: a autoridade real é o gate server-side em
+  // /api/admin/usuarios* (403 pra atendente) — o hide aqui é so conveniencia de UI.
+  var MEMBROS=[], DEVICES=[];
+  function esc(s){
+    return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function mostrarTab(tab){
+    $('painel-tab').style.display=(tab==='painel')?'block':'none';
+    $('usuarios-bloco').style.display=(tab==='usuarios')?'flex':'none';
+  }
+  function apiEnvio(path,method,body){
+    var t=getToken();
+    var opts={method:method,headers:{'Content-Type':'application/json'}};
+    if(t){opts.headers['Authorization']='Bearer '+t;}
+    if(body!==undefined){opts.body=JSON.stringify(body);}
+    return fetch(path,opts).then(function(res){
+      if(res.status===401){setToken('');pararPolling();show('login');throw new Error('401');}
+      return res.json().catch(function(){return {};}).then(function(j){return {ok:res.ok,status:res.status,j:j};});
+    });
+  }
+  function nomeMembro(id){
+    if(!id){return '— sem vínculo —';}
+    for(var i=0;i<MEMBROS.length;i++){if(String(MEMBROS[i].id)===String(id)){return MEMBROS[i].nome||MEMBROS[i].email||id;}}
+    return id;
+  }
+  function nomeDevice(id){
+    if(!id){return '— pool/global —';}
+    for(var i=0;i<DEVICES.length;i++){if(String(DEVICES[i].deviceId)===String(id)){return DEVICES[i].numero||id;}}
+    return id;
+  }
+  function preencherSelectMembros(valorAtual){
+    var sel=$('sel-membro');sel.innerHTML='';
+    var op0=document.createElement('option');op0.value='';op0.textContent='— selecione o membro ClickUp —';sel.appendChild(op0);
+    for(var i=0;i<MEMBROS.length;i++){
+      var m=MEMBROS[i];var op=document.createElement('option');op.value=m.id;op.textContent=(m.nome||m.email||m.id);
+      if(valorAtual!=null&&String(valorAtual)===String(m.id)){op.selected=true;}
+      sel.appendChild(op);
+    }
+  }
+  function preencherSelectDevices(valorAtual){
+    var sel=$('sel-device');sel.innerHTML='';
+    var op0=document.createElement('option');op0.value='';op0.textContent='— pool/global —';sel.appendChild(op0);
+    for(var i=0;i<DEVICES.length;i++){
+      var d=DEVICES[i];var op=document.createElement('option');op.value=d.deviceId;op.textContent=(d.numero||d.deviceId);
+      if(valorAtual!=null&&String(valorAtual)===String(d.deviceId)){op.selected=true;}
+      sel.appendChild(op);
+    }
+  }
+  function carregarMembros(){
+    api('/api/admin/clickup-membros').then(function(res){
+      if(!res.ok){return;}
+      return res.json().then(function(j){MEMBROS=j.membros||[];preencherSelectMembros();renderUsuarios(ULTIMA_LISTA);});
+    }).catch(function(){});
+  }
+  function carregarDevices(){
+    api('/api/admin/devices').then(function(res){
+      if(!res.ok){return;}
+      return res.json().then(function(j){DEVICES=j.devices||[];preencherSelectDevices();renderUsuarios(ULTIMA_LISTA);});
+    }).catch(function(){});
+  }
+  var ULTIMA_LISTA=[];
+  function renderUsuarios(usuarios){
+    ULTIMA_LISTA=usuarios||[];
+    var lista=$('usuarios-lista');lista.innerHTML='';
+    if(!ULTIMA_LISTA.length){
+      var vazio=document.createElement('div');vazio.className='muted';vazio.textContent='Nenhum operador cadastrado ainda.';lista.appendChild(vazio);
+      return;
+    }
+    for(var i=0;i<ULTIMA_LISTA.length;i++){
+      (function(u){
+        var card=document.createElement('div');card.className='card';card.style.marginBottom='10px';
+        card.innerHTML=
+          '<div style="display:flex;align-items:center;gap:8px;justify-content:space-between">'
+          +'<div><b>'+esc(u.usuario)+'</b> <span class="pill">'+(u.papel==='gestor'?'Gestor':'Atendente')+'</span></div>'
+          +'</div>'
+          +'<div class="muted" style="margin-top:6px">Membro ClickUp: '+esc(nomeMembro(u.clickup_member_id))+'</div>'
+          +'<div class="muted">Device: '+esc(nomeDevice(u.wavoip_device_id))+'</div>'
+          +'<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">'
+          +'<button type="button" class="ghost btn-editar">Editar</button>'
+          +'<button type="button" class="ghost btn-reset">Resetar senha</button>'
+          +'<button type="button" class="ghost btn-remover">Remover</button>'
+          +'</div>';
+        var btnEditar=card.querySelector('.btn-editar');
+        var btnReset=card.querySelector('.btn-reset');
+        var btnRemover=card.querySelector('.btn-remover');
+        btnEditar.onclick=function(){ativarEdicao(card,u);};
+        btnReset.onclick=function(){resetarSenha(u.id);};
+        btnRemover.onclick=function(){removerUsuario(u.id,u.usuario);};
+        lista.appendChild(card);
+      })(ULTIMA_LISTA[i]);
+    }
+  }
+  function ativarEdicao(card,u){
+    card.innerHTML='';
+    var titulo=document.createElement('div');titulo.innerHTML='<b>'+esc(u.usuario)+'</b>';card.appendChild(titulo);
+    var selPapel=document.createElement('select');selPapel.className='field';selPapel.style.marginTop='8px';
+    ['atendente','gestor'].forEach(function(p){var op=document.createElement('option');op.value=p;op.textContent=(p==='gestor'?'Gestor':'Atendente');if(p===u.papel){op.selected=true;}selPapel.appendChild(op);});
+    card.appendChild(selPapel);
+    var selMembro=document.createElement('select');selMembro.className='field';selMembro.style.marginTop='8px';
+    var opM0=document.createElement('option');opM0.value='';opM0.textContent='— sem vínculo —';selMembro.appendChild(opM0);
+    MEMBROS.forEach(function(m){var op=document.createElement('option');op.value=m.id;op.textContent=(m.nome||m.email||m.id);if(String(u.clickup_member_id)===String(m.id)){op.selected=true;}selMembro.appendChild(op);});
+    card.appendChild(selMembro);
+    var selDevice=document.createElement('select');selDevice.className='field';selDevice.style.marginTop='8px';
+    var opD0=document.createElement('option');opD0.value='';opD0.textContent='— pool/global —';selDevice.appendChild(opD0);
+    DEVICES.forEach(function(d){var op=document.createElement('option');op.value=d.deviceId;op.textContent=(d.numero||d.deviceId);if(String(u.wavoip_device_id)===String(d.deviceId)){op.selected=true;}selDevice.appendChild(op);});
+    card.appendChild(selDevice);
+    var linhaBtns=document.createElement('div');linhaBtns.style.cssText='display:flex;gap:8px;margin-top:10px';
+    var btnSalvar=document.createElement('button');btnSalvar.type='button';btnSalvar.className='ghost';btnSalvar.textContent='Salvar';
+    var btnCancelar=document.createElement('button');btnCancelar.type='button';btnCancelar.className='ghost';btnCancelar.textContent='Cancelar';
+    linhaBtns.appendChild(btnSalvar);linhaBtns.appendChild(btnCancelar);card.appendChild(linhaBtns);
+    btnCancelar.onclick=function(){renderUsuarios(ULTIMA_LISTA);};
+    btnSalvar.onclick=function(){
+      editarUsuario(u.id,{papel:selPapel.value,clickup_member_id:selMembro.value||null,wavoip_device_id:selDevice.value||null});
+    };
+  }
+  function mostrarErroUsuarios(msg){
+    var el=$('usuarios-erro');el.textContent=msg;el.style.display='block';
+  }
+  function carregarUsuarios(){
+    api('/api/admin/usuarios').then(function(res){
+      if(res.status===403){
+        $('nav-usuarios-btn').style.display='none';
+        if($('usuarios-bloco').style.display!=='none'){mostrarTab('painel');}
+        return;
+      }
+      $('nav-usuarios-btn').style.display='inline-block';
+      if(!res.ok){mostrarErroUsuarios('Não foi possível carregar os usuários agora.');return;}
+      return res.json().then(function(j){$('usuarios-erro').style.display='none';renderUsuarios(j.usuarios||[]);});
+    }).catch(function(e){if(e&&e.message==='401'){return;}mostrarErroUsuarios('Não foi possível carregar os usuários agora.');});
+  }
+  function criarUsuario(ev){
+    if(ev&&ev.preventDefault){ev.preventDefault();}
+    var usuario=$('f-usuario').value.trim();
+    var senha=$('f-senha').value;
+    var papel=$('f-papel').value;
+    var membro=$('sel-membro').value;
+    var device=$('sel-device').value;
+    $('usuarios-erro').style.display='none';
+    if(!usuario||!senha){mostrarErroUsuarios('Usuário e senha são obrigatórios.');return;}
+    apiEnvio('/api/admin/usuarios','POST',{usuario:usuario,senha:senha,papel:papel,clickup_member_id:membro||null,wavoip_device_id:device||null})
+    .then(function(r){
+      if(!r.ok){mostrarErroUsuarios((r.j&&r.j.erro)||'Erro ao criar operador.');return;}
+      $('f-usuario').value='';$('f-senha').value='';$('f-papel').value='atendente';preencherSelectMembros();preencherSelectDevices();
+      carregarUsuarios();
+    }).catch(function(e){if(e&&e.message==='401'){return;}mostrarErroUsuarios('Erro ao criar operador.');});
+  }
+  function resetarSenha(id){
+    var nova=window.prompt('Nova senha para este operador:');
+    if(!nova){return;}
+    apiEnvio('/api/admin/usuarios/'+encodeURIComponent(id),'PATCH',{senha:nova})
+    .then(function(r){if(!r.ok){mostrarErroUsuarios((r.j&&r.j.erro)||'Erro ao resetar a senha.');return;}carregarUsuarios();})
+    .catch(function(e){if(e&&e.message==='401'){return;}mostrarErroUsuarios('Erro ao resetar a senha.');});
+  }
+  function editarUsuario(id,campos){
+    apiEnvio('/api/admin/usuarios/'+encodeURIComponent(id),'PATCH',campos)
+    .then(function(r){if(!r.ok){mostrarErroUsuarios((r.j&&r.j.erro)||'Erro ao atualizar operador.');return;}carregarUsuarios();})
+    .catch(function(e){if(e&&e.message==='401'){return;}mostrarErroUsuarios('Erro ao atualizar operador.');});
+  }
+  function removerUsuario(id,usuario){
+    if(!window.confirm('Remover o operador "'+usuario+'"? Essa ação não pode ser desfeita.')){return;}
+    apiEnvio('/api/admin/usuarios/'+encodeURIComponent(id),'DELETE')
+    .then(function(r){if(!r.ok){mostrarErroUsuarios((r.j&&r.j.erro)||'Erro ao remover operador.');return;}carregarUsuarios();})
+    .catch(function(e){if(e&&e.message==='401'){return;}mostrarErroUsuarios('Erro ao remover operador.');});
+  }
+
   window.addEventListener('DOMContentLoaded',function(){
     $('login-btn').onclick=doLogin;
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
     $('logout-btn').onclick=function(){pararPolling();setToken('');show('login');};
+    $('nav-painel-btn').onclick=function(){mostrarTab('painel');};
+    $('nav-usuarios-btn').onclick=function(){mostrarTab('usuarios');carregarUsuarios();};
+    $('usuario-form').addEventListener('submit',criarUsuario);
     if(getToken()){iniciarPainel();}else{show('login');}
   });
 })();`;
