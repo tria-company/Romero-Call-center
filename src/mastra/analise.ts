@@ -149,6 +149,13 @@ export function deveProcessarFalhaTerminal(callId: string, jaProcessadas: Set<st
 //   default é +2 dias úteis a partir de hoje — função isolada/nomeada para
 //   poder ser ajustada sem tocar no resto.
 
+/**
+ * Voto extraído pela IA por candidato: uma escolha de `EscolhaVoto` (espelhada
+ * de clickup.ts — este módulo é PURO e não importa) ou `null` quando a
+ * transcrição não permite afirmar. Em `null`, o processador NÃO toca no campo.
+ */
+export type VotoIA = 'sim' | 'nao' | 'naoDeclarou' | null;
+
 /** Resultado normalizado da análise (saída de `parseResultadoAnalise`). */
 export interface ResultadoAnalise {
   /** Nota de aderência ao script, 0–10 (D-P3-09). */
@@ -161,6 +168,12 @@ export interface ResultadoAnalise {
   retorno: { necessario: boolean; data: string | null };
   /** Observações relevantes extraídas da conversa (discrição do planner). */
   observacoesExtraidas: string;
+  /**
+   * Intenção de voto do lead extraída da transcrição, por candidato (OPER-04b).
+   * `null` = a transcrição não dá base pra afirmar → o processador não escreve
+   * nada nesse campo do lead (não sobrescreve a marcação manual do closer).
+   */
+  voto: { romero: VotoIA; andressa: VotoIA };
   /** true quando o parse da saída do LLM falhou — alimenta `necessitaRevisao` (D-P3-10). */
   falhaTecnica: boolean;
 }
@@ -193,6 +206,12 @@ export function montarPromptAnalise({ script, transcricao }: { script: string; t
     '',
     'Dê uma nota GERAL de aderência de 0 (não seguiu nada do script) a 10 (seguiu perfeitamente todas as seções).',
     '',
+    'Além da aderência, EXTRAIA da transcrição a intenção de voto do lead para CADA candidato (Romero e Andressa):',
+    '- "sim" = o lead declara/confirma que vai votar naquele candidato.',
+    '- "nao" = o lead declara que NÃO vai votar naquele candidato (ou que vota em outro).',
+    '- "naoDeclarou" = o tema do voto surgiu, mas o lead não se comprometeu / ficou em dúvida.',
+    '- null = a transcrição não dá base para afirmar (o assunto não apareceu). Nunca invente; na dúvida entre "naoDeclarou" e null, use null.',
+    '',
     '=== SCRIPT COMBINADO ===',
     script || '(script vazio)',
     '',
@@ -205,10 +224,12 @@ export function montarPromptAnalise({ script, transcricao }: { script: string; t
     '  "resumoAnalise": "<resumo curto da ligação em 1-2 frases>",',
     '  "sinaisAlerta": ["<sinal, ex.: reclamação, pedido para não ligar mais, dado sensível compartilhado>"],',
     '  "retorno": { "necessario": <true ou false>, "data": "<AAAA-MM-DD ou null>" },',
+    '  "voto": { "romero": <"sim"|"nao"|"naoDeclarou"|null>, "andressa": <"sim"|"nao"|"naoDeclarou"|null> },',
     '  "observacoesExtraidas": "<observações relevantes extraídas da conversa>"',
     '}',
     '',
     'Se não houver nenhum sinal de alerta, devolva "sinaisAlerta": []. Se o lead não combinou um retorno, devolva "retorno": { "necessario": false, "data": null }.',
+    'Se a transcrição não deixar clara a intenção de voto de um candidato, devolva null para ele — não chute.',
   ].join('\n');
 
   return { system, prompt };
@@ -222,8 +243,14 @@ function resultadoFalhaTecnica(): ResultadoAnalise {
     sinaisAlerta: [],
     retorno: { necessario: false, data: null },
     observacoesExtraidas: '',
+    voto: { romero: null, andressa: null },
     falhaTecnica: true,
   };
+}
+
+/** Coage um valor bruto do LLM para `VotoIA` — só aceita as 3 escolhas válidas; qualquer outra coisa (inclusive null/ausente) vira null. */
+function normalizarVotoIA(v: unknown): VotoIA {
+  return v === 'sim' || v === 'nao' || v === 'naoDeclarou' ? v : null;
 }
 
 /**
@@ -258,6 +285,7 @@ export function parseResultadoAnalise(textoLLM: string): ResultadoAnalise {
     retornoBruto.data === null || retornoBruto.data === undefined || retornoBruto.data === ''
       ? null
       : String(retornoBruto.data);
+  const votoBruto = obj.voto && typeof obj.voto === 'object' ? obj.voto : {};
 
   return {
     aderencia,
@@ -265,6 +293,7 @@ export function parseResultadoAnalise(textoLLM: string): ResultadoAnalise {
     sinaisAlerta,
     retorno: { necessario: Boolean(retornoBruto.necessario), data: retornoData },
     observacoesExtraidas: typeof obj.observacoesExtraidas === 'string' ? obj.observacoesExtraidas : '',
+    voto: { romero: normalizarVotoIA(votoBruto.romero), andressa: normalizarVotoIA(votoBruto.andressa) },
     falhaTecnica: false,
   };
 }
@@ -288,6 +317,25 @@ export function necessitaRevisao(opts: {
   if (opts.aderencia < opts.limiar) return true;
   if (opts.sinaisAlerta.length > 0) return true;
   return false;
+}
+
+/** Ação de escrita do voto extraído pela IA contra o valor atual (manual) do lead. */
+export type AcaoVoto = 'ignorar' | 'preencher' | 'manter' | 'divergencia';
+
+/**
+ * Política humano×IA para o voto (OPER-04b, decidida pelo operador): a IA
+ * PREENCHE o campo vazio e VALIDA o já-preenchido — NUNCA sobrescreve a
+ * marcação manual do closer.
+ * - `ia === null` → 'ignorar' (a transcrição não deu base pra afirmar).
+ * - `atual === null` (campo vazio) → 'preencher' com o valor da IA.
+ * - já preenchido e IGUAL → 'manter' (concordam).
+ * - já preenchido e DIFERENTE → 'divergencia' (marca revisão humana, sem sobrescrever).
+ * Pura/nomeada — a política pode mudar sem tocar no writeback do processador.
+ */
+export function decidirAcaoVoto(ia: VotoIA, atual: VotoIA): AcaoVoto {
+  if (ia === null) return 'ignorar';
+  if (atual === null) return 'preencher';
+  return ia === atual ? 'manter' : 'divergencia';
 }
 
 function ehDiaUtil(data: Date): boolean {

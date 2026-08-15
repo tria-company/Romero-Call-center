@@ -52,7 +52,10 @@ import {
   CAMPOS_LEADS,
   resolverLeadDaLigacao,
   consolidarLead,
+  resolverVotoAtualLead,
+  definirVotoLeadCampo,
   fecharLigacao,
+  type EscolhaVoto,
 } from './clickup.ts';
 
 import { transcreverCallUrl } from './deepgram.ts';
@@ -69,6 +72,8 @@ import {
   parseResultadoAnalise,
   necessitaRevisao,
   extrairRetorno,
+  decidirAcaoVoto,
+  type VotoIA,
 } from './analise.ts';
 
 import { montarPromptContexto, proximoContato, derivarContadores } from './contexto.ts';
@@ -109,6 +114,12 @@ function valoresAtuaisDoLead(lead: Awaited<ReturnType<typeof lerTask>>): {
   };
 }
 
+/** Rótulo PT-BR de uma escolha de voto — só para a nota de divergência (sem PII). */
+const ROTULO_VOTO: Record<EscolhaVoto, string> = { sim: 'Sim', nao: 'Não', naoDeclarou: 'Não declarou' };
+function rotuloVoto(v: EscolhaVoto | null): string {
+  return v ? ROTULO_VOTO[v] : '—';
+}
+
 /**
  * Consolida o resultado da ligacao no lead (Lista 01) e fecha a task de
  * Ligacao (Lista 02) — usado nos DOIS caminhos do processador (atendida, apos
@@ -131,6 +142,8 @@ async function consolidarEFecharLigacao(
     resumoAnalise: string;
     aderencia: number | null;
     retorno: { necessario: boolean; data: Date | null };
+    /** Voto extraído pela IA (só no caminho ATENDIDO/transcrito) — preenche vazio, valida preenchido; ausente = não mexe no voto. */
+    voto?: { romero: VotoIA; andressa: VotoIA };
   },
 ): Promise<void> {
   try {
@@ -141,6 +154,38 @@ async function consolidarEFecharLigacao(
       const lead = await lerTask(leadTaskId);
       const atuais = valoresAtuaisDoLead(lead);
       const hoje = new Date();
+
+      // Voto (OPER-04b): o Agente Análise PREENCHE o campo de voto vazio e
+      // VALIDA o já-preenchido pelo closer — nunca sobrescreve a marcação
+      // manual. Divergência (IA≠humano) marca NECESSITA_REVISAO na Ligação e
+      // entra no resumo consolidado, sem alterar o voto. Log-e-segue: nunca
+      // trava a consolidação/fechamento (WR-03/D-P3-08). Sem PII em log.
+      const divergenciasVoto: string[] = [];
+      if (opts.voto) {
+        try {
+          const votoAtual = resolverVotoAtualLead(lead);
+          const candidatos = [
+            { chave: 'romero' as const, nome: 'Romero' },
+            { chave: 'andressa' as const, nome: 'Andressa' },
+          ];
+          for (const { chave, nome } of candidatos) {
+            const ia = opts.voto[chave];
+            const { definido, escolha } = votoAtual[chave];
+            // Campo com valor que não conseguimos traduzir: não arrisca
+            // sobrescrever nem gerar falso-positivo de divergência — pula.
+            if (definido && escolha === null) continue;
+            const acao = decidirAcaoVoto(ia, definido ? escolha : null);
+            if (acao === 'preencher') {
+              await definirVotoLeadCampo(leadTaskId, chave, ia as EscolhaVoto);
+              console.log(`[processador] voto ${nome} preenchido pela IA (${ia}) no lead ${leadTaskId}`);
+            } else if (acao === 'divergencia') {
+              divergenciasVoto.push(`${nome}: closer marcou "${rotuloVoto(escolha)}", IA ouviu "${rotuloVoto(ia)}"`);
+            }
+          }
+        } catch (e) {
+          console.error('[processador] falha ao preencher/validar voto pela IA (segue):', e instanceof Error ? e.message : String(e));
+        }
+      }
 
       // D-P3-13: reescreve o resumo vivo. Falha do LLM (indisponibilidade/
       // erro de parse-livre, este prompt nao pede JSON) loga e mantem a
@@ -159,6 +204,17 @@ async function consolidarEFecharLigacao(
         if (textoLLM) observacaoConsolidada = textoLLM.trim();
       } catch (e) {
         console.error('[processador] falha no Agente Contexto (LLM) — mantendo observacao anterior:', e);
+      }
+
+      // Divergência de voto IA×closer: anexa ao resumo vivo do lead (visível no
+      // dossiê/preview) e força NECESSITA_REVISAO na Ligação — sem tocar no voto.
+      if (divergenciasVoto.length > 0) {
+        observacaoConsolidada = `${observacaoConsolidada}\n\n⚠️ Voto — divergência IA×closer (revisar): ${divergenciasVoto.join('; ')}.`.trim();
+        try {
+          await setCustomField(taskLigacaoId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
+        } catch (e) {
+          console.error('[processador] falha ao marcar NECESSITA_REVISAO por divergencia de voto (segue):', e);
+        }
       }
 
       const proximoContatoData = proximoContato({
@@ -463,6 +519,7 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     resumoAnalise: (resultadoAnalise?.resumoAnalise ?? '') + sinaisTexto,
     aderencia: resultadoAnalise?.aderencia ?? null,
     retorno: retornoAnalise ?? { necessario: false, data: null },
+    voto: resultadoAnalise?.voto,
   });
 
   // CR-02: limpa a entrada telefone->task apos consolidar/fechar — uma

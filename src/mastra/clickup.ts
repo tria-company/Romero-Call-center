@@ -1158,6 +1158,75 @@ export async function salvarVotoLead(
   return { temLead: true };
 }
 
+/** Voto atual (manual) do lead por candidato — alimenta a validação humano×IA no processador (OPER-04b). */
+export interface VotoAtualLead {
+  romero: { definido: boolean; escolha: EscolhaVoto | null };
+  andressa: { definido: boolean; escolha: EscolhaVoto | null };
+}
+
+/**
+ * Traduz o valor lido de um drop_down de voto (Lista 01) de volta para
+ * `EscolhaVoto`. Tolerante ao formato do GET (mesmo racional de `lerAtendeu`):
+ * casa o UUID da opção direto contra `OPCOES_LEADS[campo]` (formato que
+ * `setCustomField`/`salvarVotoLead` gravam); senão resolve via
+ * `type_config.options` por orderindex/id/name e casa o id. Indeterminado/
+ * ausente → null (nunca lança). Sem PII/log.
+ */
+function resolverEscolhaVoto(lead: TaskClickUp | null, campoId: string): EscolhaVoto | null {
+  const cf = lead?.custom_fields?.find((c) => c.id === campoId);
+  const raw = cf?.value;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const opcoes = (OPCOES_LEADS as Record<string, Record<EscolhaVoto, string>>)[campoId];
+  const rawStr = String(raw);
+  const entradas = Object.entries(opcoes) as [EscolhaVoto, string][];
+  // Caso 1: UUID da opção direto.
+  const porUuid = entradas.find(([, uuid]) => uuid === rawStr);
+  if (porUuid) return porUuid[0];
+  // Caso 2: orderindex/id/name — resolve via type_config.options e casa o id.
+  const opcao = cf?.type_config?.options?.find(
+    (o) => String(o.orderindex) === rawStr || o.id === rawStr || o.name === rawStr,
+  );
+  if (opcao) {
+    const porId = entradas.find(([, uuid]) => uuid === opcao.id);
+    if (porId) return porId[0];
+  }
+  return null;
+}
+
+/**
+ * Lê o voto atual (manual) do lead JÁ CARREGADO — sem novo fetch (o processador
+ * já leu o lead na consolidação). `definido` = o drop_down tem qualquer valor
+ * (mesma checagem de `lerStatusVotoLead`); `escolha` = o valor traduzido, ou
+ * null quando vazio/irressolúvel. Puro/sync, sem I/O.
+ */
+export function resolverVotoAtualLead(lead: TaskClickUp | null): VotoAtualLead {
+  const ler = (campoId: string) => {
+    const raw = lead?.custom_fields?.find((c) => c.id === campoId)?.value;
+    return { definido: campoDefinido(raw), escolha: resolverEscolhaVoto(lead, campoId) };
+  };
+  return {
+    romero: ler(CAMPOS_LEADS.CONFIRMOU_VOTO_ROMERO),
+    andressa: ler(CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA),
+  };
+}
+
+/**
+ * Grava UM candidato de voto no lead (Lista 01, drop_down por UUID via
+ * `OPCOES_LEADS`) — usado pelo Agente Análise quando PREENCHE um campo vazio.
+ * Diferente de `salvarVotoLead`, escreve direto por `leadTaskId` (o processador
+ * roda no worker/webhook, sem operador logado pra `validarLigacaoDoOperador`).
+ * Erros de infra LANÇAM (WR-03) — o caller loga-e-segue.
+ */
+export async function definirVotoLeadCampo(
+  leadTaskId: string,
+  candidato: 'romero' | 'andressa',
+  valor: EscolhaVoto,
+): Promise<void> {
+  const campoId =
+    candidato === 'romero' ? CAMPOS_LEADS.CONFIRMOU_VOTO_ROMERO : CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA;
+  await setCustomField(leadTaskId, campoId, OPCOES_LEADS[campoId][valor]);
+}
+
 /** Patch de contadores mecânicos do lead — mesmo shape de `ContadoresLead` (contexto.ts), injetado pelo caller. */
 export interface PatchContadoresLead {
   tentativas: number;
