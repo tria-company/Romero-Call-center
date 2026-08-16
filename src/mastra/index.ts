@@ -60,6 +60,12 @@ import {
   lerTimelineDaLigacao,
   definirVotoLeadCampo,
   comentarTask,
+  // quick-260815-r3: "Ligar" na ficha cria uma Ligação avulsa ATRIBUÍDA ao
+  // operador (deep-link do discador). valorCampoLead/CAMPOS_LEADS leem o
+  // telefone do lead pra criar a avulsa (choke point de leitura de campo).
+  criarLigacaoAvulsa,
+  valorCampoLead,
+  CAMPOS_LEADS,
 } from './clickup';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
@@ -676,6 +682,43 @@ export const mastra = new Mastra({
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao salvar a anotação' }, 502);
+          }
+        },
+      },
+      {
+        // Rota — "Ligar para QUALQUER lead" (quick-260815-r3): cria uma Ligação
+        // AVULSA para o lead da Lista 01 e a ATRIBUI ao operador logado, depois
+        // devolve o taskId pro discador abrir a chamada exata (deep-link &task).
+        // Gate de PAPEL gestor (mesma visão total das rotas 1-4). O assignee vem
+        // SEMPRE de assigneeDoOperador(sess.usuario), NUNCA do body — e é
+        // obrigatório: sem dono, o GET /ligacao/:taskId (ownership CR-01) daria
+        // 404. Guard anti-IDOR (validarLeadDaLista01) reaproveita a task lida pra
+        // extrair o telefone. LGPD: telefone nunca é logado (só mensagem genérica).
+        path: '/api/discador/lead/:leadTaskId/ligar',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Operador sem mapeamento no ClickUp' }, 409);
+          const leadTaskId = c.req.param('leadTaskId');
+          try {
+            // validarLeadDaLista01 é o guard anti-IDOR E devolve a task já lida —
+            // reaproveita pra ler o telefone sem um segundo GET ao ClickUp.
+            const task = await validarLeadDaLista01(leadTaskId);
+            const telefone = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
+            if (!telefone) return c.json({ erro: 'Lead sem telefone' }, 422);
+            const { id } = await criarLigacaoAvulsa(telefone, assignee);
+            return c.json({ taskId: id });
+          } catch (e) {
+            // LGPD: nunca logar telefone/CPF — só a mensagem genérica de erro.
+            console.error('[discador] erro ao criar ligação para o lead:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado
+              ? c.json({ erro: 'Lead não encontrado' }, 404)
+              : c.json({ erro: 'Erro ao iniciar a ligação' }, 502);
           }
         },
       },

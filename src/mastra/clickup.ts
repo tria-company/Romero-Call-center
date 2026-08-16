@@ -861,15 +861,24 @@ export async function buscarLigacaoAbertaPorTelefone(telefone: string): Promise<
  * segue — ID_LEAD já foi gravado). Erro de infra/HTTP na CRIAÇÃO da task
  * LANÇA (WR-03); o vínculo opcional ao lead NÃO aborta a criação. Nada de
  * PII em log dentro desta função.
+ *
+ * `assigneeId` (quick-260815-r3): quando presente e numérico, ATRIBUI a
+ * Ligação avulsa ao operador (campo nativo `assignees`) — obrigatório quando
+ * a avulsa nasce de "Ligar" na ficha/fila do app, senão o deep-link
+ * `GET /ligacao/:taskId` (validação de ownership por assignee, CR-01) daria
+ * 404. Backward-compatible: o caller do webhook (D-P3-03) não passa assignee
+ * e a avulsa continua sem dono, como hoje.
  */
-export async function criarLigacaoAvulsa(telefone: string): Promise<{ id: string }> {
+export async function criarLigacaoAvulsa(telefone: string, assigneeId?: string): Promise<{ id: string }> {
   // O campo TELEFONE é tipo "phone" -> exige E.164 ('+'); o telefone cru do
   // Wavoip não tem '+' e causava 400. Se não normalizar, melhor criar a
   // avulsa SEM o campo (o `name` já carrega o número cru) do que perder o
   // registro da gravação em um 400 (D-P3-03).
   const e164 = normalizarTelefoneE164(telefone);
+  const assigneeNum = assigneeId !== undefined ? Number(assigneeId) : NaN;
   const novaTask = await criarTask(CLICKUP_LIST_LIGACOES, {
     name: `Ligação avulsa — ${telefone}`,
+    ...(Number.isFinite(assigneeNum) ? { assignees: [assigneeNum] } : {}),
     ...(e164 !== null ? { custom_fields: [{ id: CAMPOS_LIGACOES.TELEFONE, value: e164 }] } : {}),
   });
   if (!novaTask?.id) {
@@ -1354,7 +1363,7 @@ export async function fecharLigacao(taskId: string): Promise<void> {
 // é single-tenant. LGPD: exibir ao dono ≠ logar — NUNCA loga telefone/CPF.
 
 /** Lê um custom field da Lista 01 por field-id (D-07), sempre como string ('' se ausente). */
-function valorCampoLead(task: TaskClickUp, fieldId: string): string {
+export function valorCampoLead(task: TaskClickUp, fieldId: string): string {
   const v = task.custom_fields?.find((c) => c.id === fieldId)?.value;
   return v === null || v === undefined ? '' : String(v);
 }
