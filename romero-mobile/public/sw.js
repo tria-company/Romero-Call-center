@@ -18,7 +18,7 @@
    ══════════════════════════════════════════════════════════════════════════ */
 
 /* Subir a versão invalida todos os caches antigos no `activate`. */
-const VERSAO = "central-animal-v6";
+const VERSAO = "central-animal-v7";
 const CACHE_SHELL = `${VERSAO}-shell`;
 const CACHE_ESTATICO = `${VERSAO}-static`;
 const CACHE_DINAMICO = `${VERSAO}-dyn`;
