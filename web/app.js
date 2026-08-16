@@ -3,7 +3,7 @@
   var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
   var fila=null, filaPollInt=null;
   var timerInt=null, timerStart=0;
-  var wakeLock=null, emChamada=false;
+  var wakeLock=null, emChamada=false, retornoPainel=null;
   var foiAtendida=false, desfechoEnviado=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
   var previewAtualItem=null;
   // Multi-device pool (DEVICE-02): deviceModo aprendido uma vez via /config
@@ -111,7 +111,10 @@
   // Volta pra fila apos os pontos terminais do fluxo (chamada/voto) e refetcha
   // silenciosamente — a task recem-desfechada some da lista (ou reaparece se
   // ficou na fila por nao-atendida/hangup antes de atender).
-  function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';carregarFilaSilencioso();}
+  // MESMO ENDERECO (u7): se veio do painel (deep-link de gestor), volta pra FILA
+  // DELE no painel — nao pra fila do discador. retornoPainel so e setado no init
+  // quando /me diz gestor + panelUrl.
+  function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';if(retornoPainel){window.location.href=retornoPainel;return;}carregarFilaSilencioso();}
   // Preview do lead antes de ligar (T-m3v): abre ao tocar "Ligar" na fila,
   // mostra CONTEXTO (dossie nativo) + SCRIPT; a chamada so comeca ao tocar
   // "Ligar" DENTRO do preview (delega pra iniciarLigacao existente).
@@ -127,6 +130,8 @@
     carregarScriptDoPreview(item.taskId);
   }
   function fecharPreview(){$('preview-overlay').style.display='none';previewAtualItem=null;}
+  // Botao "Voltar" do preview (u7): gestor vindo do painel volta pra fila DELE.
+  function voltarDoPreview(){if(retornoPainel){window.location.href=retornoPainel;return;}fecharPreview();}
   // Deep-link &task (quick-260815-r3): abre o preview da Ligacao exata pelo
   // taskId vindo do handoff. Ownership validado no backend (GET /ligacao/:taskId,
   // CR-01) — status !=200 (ex. 404 de outro operador) so nao abre, sem erro.
@@ -344,7 +349,7 @@
     $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}setToken('');show('login');};
     $('reload-btn').onclick=carregarFila;
     $('hangup-btn').onclick=hangup;
-    $('preview-voltar').onclick=fecharPreview;
+    $('preview-voltar').onclick=voltarDoPreview;
     $('preview-ligar').onclick=function(){var it=previewAtualItem;fecharPreview();if(it){iniciarLigacao(it);}};
     // Poll ~15s da fila ao vivo (LIVE-QUEUE) — pulado durante chamada ativa (pollFila).
     filaPollInt=setInterval(pollFila,15000);
@@ -366,7 +371,7 @@
     // Porta unica (quick 260816-u5): com &task e o gestor indo LIGAR (handoff de
     // chamada) — NUNCA redireciona, abre a Ligacao aqui. Sem &task, checa o papel
     // via /me e manda o gestor pro painel; atendente (e qualquer falha) cai na fila.
-    if(getToken()){if(hp.task){startFila();abrirLigacaoPorTask(hp.task);}else{api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.papel==='gestor'&&irParaPainel(getToken(),me.panelUrl)){return;}startFila();}).catch(function(){startFila();});}}else{show('login');}
+    if(getToken()){if(hp.task){api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.papel==='gestor'&&me.panelUrl){retornoPainel=me.panelUrl.replace(/[/]+$/,'')+'/fila';}}).catch(function(){});startFila();abrirLigacaoPorTask(hp.task);}else{api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.papel==='gestor'&&irParaPainel(getToken(),me.panelUrl)){return;}startFila();}).catch(function(){startFila();});}}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){});}
   });
 })();
