@@ -161,14 +161,13 @@ if (!CLICKUP_API_TOKEN) {
 export const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
 export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
 
-// Trava do backend (kill-switch) pra enumeracao/detalhe/escrita da Lista 01
-// LEADS pelo app do Romero (quick 260815-b1). Default vazio = OFF: sem
-// DISCADOR_LEAD_BROWSE = '1'/'true', as rotas de leads (GET/POST /api/discador/
-// leads*, /lead/:id*) respondem 403 — defesa em profundidade sob a autorizacao
-// single-tenant do Romero (exigirRomero, ponte Next, B2). A rota de timeline
-// (/api/discador/timeline/:taskId) e IDOR-safe por ownership do operador e NAO
-// usa esta flag. Default seguro e intencional -> sem console.warn (mesmo
-// espirito de OPER_STATUS_FECHADO).
+// [SEM EFEITO desde quick 260815-r12] Antiga trava de env (kill-switch) da
+// Lista 01 LEADS (quick 260815-b1). A trava do backend agora é o gate de PAPEL
+// gestor (papelDoOperador em operadores.ts): as rotas de leads (GET/POST
+// /api/discador/leads*, /lead/:id*) exigem papel 'gestor' — a conta de serviço
+// do mobile (admin) é gestor no seed (D-06), então não há mais env a configurar.
+// Mantido só como export documentado (nenhum caller lê) para não quebrar
+// deploys que ainda tenham a variável setada; pode ser removido no futuro.
 export const DISCADOR_LEAD_BROWSE = process.env.DISCADOR_LEAD_BROWSE || '';
 
 // ===== Lote diario priorizado (LOTE-01, Fase 02 Plano 01) =====

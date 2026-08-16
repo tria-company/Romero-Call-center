@@ -16,6 +16,18 @@
 
 import { snapshotUsuarios } from './usuarios.ts';
 
+/**
+ * Papel do operador (`'gestor' | 'atendente' | null`) a partir do snapshot em
+ * memória de `discador_usuarios` (D-02), ou `null` se não encontrado — molde de
+ * `assigneeDoOperador` (lê o mesmo snapshot). Usado pelo gate de leitura da
+ * Lista 01 LEADS (quick 260815-r12): só gestor vê a visão total do lead. A conta
+ * de serviço do mobile (admin) é gestor no seed (D-06). NUNCA loga PII.
+ */
+export function papelDoOperador(usuario: string): 'gestor' | 'atendente' | null {
+  const u = (usuario || '').trim().toLowerCase();
+  return snapshotUsuarios().get(u)?.papel ?? null;
+}
+
 function carregarAssignees(): Map<string, string> {
   const raw = process.env.DISCADOR_ASSIGNEES || '';
   const m = new Map<string, string>();

@@ -75,7 +75,7 @@ import { enfileirarSyncClickup } from './fila.ts';
 import { processarSyncClickupJob } from './sync-clickup.ts';
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
-import { assigneeDoOperador } from './operadores';
+import { assigneeDoOperador, papelDoOperador } from './operadores';
 
 // ehStatusFalhaTerminal e o gate CR-01 do branch CALL (so falha terminal
 // CONFIRMADA enfileira/processa a nao-atendida). O resto do Agente Analise
@@ -91,7 +91,7 @@ import { ADMIN_HTML, ADMIN_APP_JS } from './admin-painel';
 // Metricas operacionais (Fase 10 Plano 02, OBS-02/D-06): leitura agregada
 // (painel) + presenca de operador + contagem de erro por etapa (webhook).
 import { lerMetricas, registrarPresenca, registrarErroEtapa } from './metricas.ts';
-import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA, DISCADOR_LEAD_BROWSE } from './config';
+import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA } from './config';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
 import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
@@ -173,17 +173,6 @@ async function sessaoGestor(c: { req: { header: (nome: string) => string | undef
   const reg = await buscarUsuario(sess.usuario);
   if (!reg || reg.papel !== 'gestor') return { status: 403 };
   return { status: 200, usuario: sess.usuario };
-}
-
-/**
- * Kill-switch do backend (quick 260815-b1) pra enumeracao/detalhe/escrita da
- * Lista 01 LEADS pelo app do Romero: liberado SO com DISCADOR_LEAD_BROWSE
- * '1'/'true' (default OFF -> 403). Defesa em profundidade sob a autorizacao
- * single-tenant do Romero (exigirRomero, ponte Next, B2). A rota de timeline
- * (IDOR-safe por operador) NAO usa este guard.
- */
-function leadBrowseLiberado(): boolean {
-  return DISCADOR_LEAD_BROWSE === '1' || DISCADOR_LEAD_BROWSE === 'true';
 }
 
 /**
@@ -570,11 +559,14 @@ export const mastra = new Mastra({
       },
 
       // ============ LISTA 01 LEADS — app do Romero (quick 260815-b1) ============
-      // Rotas 1-4: Bearer + kill-switch DISCADOR_LEAD_BROWSE (default OFF -> 403).
-      // A logica de mascaramento/validacao/resolucao vive em clickup.ts (choke
-      // point) — aqui so o wiring HTTP. LGPD: CPF nunca no corpo; telefone
-      // mascarado no resumo, em claro so no detalhe; console.error so mensagem
-      // generica (nunca telefone/CPF/taskId em claro).
+      // Rotas 1-4: Bearer + gate de PAPEL gestor (quick 260815-r12) — só quem é
+      // 'gestor' no snapshot de discador_usuarios (papelDoOperador) vê a visão
+      // total do lead (CPF + telefone em claro); atendente/desconhecido -> 403.
+      // A conta de serviço do mobile (admin) é gestor no seed (D-06), então o
+      // gate funciona sem env extra (substitui DISCADOR_LEAD_BROWSE). A logica de
+      // validacao/resolucao vive em clickup.ts (choke point) — aqui so o wiring
+      // HTTP. LGPD: o gestor autenticado PODE ver CPF/telefone, mas os logs NUNCA
+      // levam PII (console.error só mensagem generica, nunca telefone/CPF/taskId).
       {
         // Rota 1 — enumeracao (resumo) da Lista 01: telefone SEMPRE mascarado,
         // nunca CPF, filtro `q` server-side, paginacao por cursor (page opaca).
@@ -583,7 +575,7 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
-          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const q = c.req.query('q') || undefined;
           const cursor = c.req.query('cursor');
           const limit = Number(c.req.query('limit')) || undefined;
@@ -606,7 +598,7 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
-          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const leadTaskId = c.req.param('leadTaskId');
           try {
             const detalhe = await lerLeadDetalhe(leadTaskId);
@@ -629,7 +621,7 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
-          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const leadTaskId = c.req.param('leadTaskId');
           const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
           const normalizar = (v: unknown): 'sim' | 'nao' | 'naoDeclarou' | undefined =>
@@ -666,7 +658,7 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
-          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const leadTaskId = c.req.param('leadTaskId');
           const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
           const texto = String(body.texto || '').trim();
