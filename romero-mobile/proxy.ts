@@ -7,7 +7,8 @@ import { COOKIE_SESSAO, lerSessao } from "./lib/sessao";
  * layout autenticado — `app/(app)/layout.tsx` (quick-260816-u5-fix, WR-02).
  *
  * Gate de acesso (o antigo `middleware` — no Next 16 o arquivo se chama
- * `proxy`). Sem sessão válida, tudo redireciona para /login.
+ * `proxy`). Sem sessão válida, tudo redireciona para a PORTA ÚNICA = /discador
+ * (MESMO ENDERECO: mesma origem serve o discador via rewrite).
  *
  * O matcher deixa passar assets, ícones, manifest e o service worker: se o SW
  * for redirecionado para o HTML do login, o registro falha e o app deixa de
@@ -31,7 +32,7 @@ export default async function proxy(req: NextRequest) {
   }
 
   const url = req.nextUrl.clone();
-  url.pathname = "/login";
+  url.pathname = "/discador";
   url.search = "";
   return NextResponse.redirect(url);
 }

@@ -24,8 +24,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // Gate real de sessao (quick-260816-u5-fix, WR-02): o proxy.ts NAO e compilado
   // como middleware nesta versao do Next (middleware-manifest.json vazio), entao
   // travamos aqui no layout — sem sessao valida, qualquer rota autenticada (/,
-  // /base, /fila, /perfil) volta pro login.
-  if (!sessao) redirect("/login");
+  // /base, /fila, /perfil) volta pra PORTA UNICA = o discador. MESMO ENDERECO: a
+  // mesma origem serve `/discador` via rewrite; o handoff do gestor volta pra
+  // `/login#token`, tambem mesma origem.
+  if (!sessao) redirect("/discador");
   const papel = sessao?.papel ?? "atendente";
   return (
     <>
