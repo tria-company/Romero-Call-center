@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { exigirRomero } from "@/lib/autorizacao";
+import { exigirSessao } from "@/lib/autorizacao";
 import { chamarDiscador } from "@/lib/discador-servidor";
 
 /**
@@ -14,11 +14,14 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const gate = await exigirRomero();
+  const gate = await exigirSessao();
   if (!gate.ok) return gate.resposta;
 
   const { id } = await params;
-  const r = await chamarDiscador(`/api/discador/lead/${encodeURIComponent(id)}`);
+  const r = await chamarDiscador(
+    `/api/discador/lead/${encodeURIComponent(id)}`,
+    gate.sessao.dToken,
+  );
 
   return NextResponse.json(r.dados ?? { erro: "Sem resposta." }, {
     status: r.status,
