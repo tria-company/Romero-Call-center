@@ -7,6 +7,7 @@ import { PinoLogger } from '@mastra/loggers';
 // WAVOIP_DEVICE_TOKEN global importado aqui.
 import {
   WAVOIP_WEBHOOK_TOKEN,
+  DISCADOR_PANEL_URL,
 } from './config';
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
@@ -271,11 +272,28 @@ export const mastra = new Mastra({
             if (!credenciaisValidas) {
               return c.json({ status: 'invalido' }, 401);
             }
-            return c.json({ token: emitirToken(usuario), usuario, papel: papelDoUsuario(usuario) ?? 'atendente' });
+            return c.json({ token: emitirToken(usuario), usuario, papel: papelDoUsuario(usuario) ?? 'atendente', panelUrl: DISCADOR_PANEL_URL });
           } catch (e) {
             console.error('[discador] erro login:', e);
             return c.json({ status: 'erro' }, 500);
           }
+        },
+      },
+      {
+        // Identidade da sessao (quick 260816-u5): papel + panelUrl do usuario
+        // logado. Serve pro front decidir o redirect do GESTOR pro painel no
+        // reload/retorno (o login ja devolve o mesmo shape na hora de entrar).
+        // Bearer padrao (verificarToken) — 401 sem sessao. Nunca loga o token.
+        path: '/api/discador/me',
+        method: 'GET',
+        handler: (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          return c.json({
+            usuario: sess.usuario,
+            papel: papelDoUsuario(sess.usuario) ?? 'atendente',
+            panelUrl: DISCADOR_PANEL_URL,
+          });
         },
       },
       {

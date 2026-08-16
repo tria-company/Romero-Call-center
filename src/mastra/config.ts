@@ -170,6 +170,15 @@ export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '10003
 // deploys que ainda tenham a variável setada; pode ser removido no futuro.
 export const DISCADOR_LEAD_BROWSE = process.env.DISCADOR_LEAD_BROWSE || '';
 
+// ===== Porta única — redirect do gestor pro painel (quick 260816-u5) =====
+//
+// URL do painel do gestor (romero-mobile). O discador é a PORTA de todos: o
+// login devolve `panelUrl` e a rota /api/discador/me também — o front redireciona
+// o GESTOR pra cá (já logado, token no fragmento) e mantém o ATENDENTE na fila.
+// Vazio DE PROPÓSITO (degradação graciosa): sem painel configurado, ninguém é
+// redirecionado — todos caem na fila (não quebra). Nunca logar o token no redirect.
+export const DISCADOR_PANEL_URL = process.env.DISCADOR_PANEL_URL || '';
+
 // ===== Lote diario priorizado (LOTE-01, Fase 02 Plano 01) =====
 //
 // Parametros da selecao/priorizacao do lote do dia (src/mastra/lote.ts).
