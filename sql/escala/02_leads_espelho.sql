@@ -39,3 +39,12 @@ create index if not exists idx_leads_espelho_andressa    on discador_leads_espel
 create index if not exists idx_leads_espelho_militante   on discador_leads_espelho (militante);
 create index if not exists idx_leads_espelho_semcontato  on discador_leads_espelho (sem_contato);
 create index if not exists idx_leads_espelho_atualizado  on discador_leads_espelho (atualizado_em);
+
+-- PostgREST self-hosted: o backend escreve como `service_role`. Após um CREATE
+-- TABLE, o cache de schema do PostgREST fica leitura-só até recarregar — a tabela
+-- aceita SELECT mas devolve 404 no INSERT/UPSERT. As duas linhas abaixo garantem o
+-- acesso de escrita e forçam o reload do cache (idempotentes; rode sempre que
+-- reaplicar). Só `service_role` (o backend) — nunca anon/authenticated, pra não
+-- expor a base com telefone/CPF pela API pública.
+grant all privileges on table discador_leads_espelho to service_role;
+notify pgrst, 'reload schema';
