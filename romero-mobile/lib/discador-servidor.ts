@@ -107,11 +107,12 @@ export async function chamarDiscador(
 /** Voto de confirmação (Romero/Andressa) no backend. */
 export type VotoReal = "sim" | "nao" | "naoDeclarou";
 
-/** Resumo de lead da listagem (`GET /api/discador/leads`). Telefone MASCARADO. */
+/** Resumo de lead da listagem (`GET /api/discador/leads`). Visão do gestor: telefone e CPF em claro. */
 export type LeadResumoReal = {
   leadTaskId: string;
   nome: string;
-  telefoneMascarado: string;
+  telefone: string;
+  cpf: string;
   bairro: string;
   cidade: string;
   confirmouRomero: VotoReal | null;
@@ -129,12 +130,13 @@ export type ItemTimelineReal = {
   motivoFalha: string;
 };
 
-/** Ficha completa de um lead (`GET /api/discador/lead/:id`). Telefone em claro. */
+/** Ficha completa de um lead (`GET /api/discador/lead/:id`). Visão do gestor: telefone e CPF em claro. */
 export type LeadFichaReal = {
   lead: {
     leadTaskId: string;
     nome: string;
     telefone: string;
+    cpf: string;
     bairro: string;
     cidade: string;
     uf: string;

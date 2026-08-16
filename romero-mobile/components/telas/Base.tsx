@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Search, X } from "lucide-react";
 // Helper PURO de iniciais — fora de qualquer store/localStorage.
 import { iniciais } from "@/lib/leads-util";
+import { fmtTelefone } from "@/lib/contato";
 import { useLeadsReais } from "@/lib/leads-real";
 import { Autobox, Esqueleto, Vhead } from "./blocos";
 
@@ -169,9 +170,9 @@ export function Base() {
                 <span className="tn trunc" style={{ display: "block" }}>
                   {l.nome}
                 </span>
-                {/* Bairro · cidade quando houver; senão o telefone MASCARADO — nunca claro/logado. */}
+                {/* Bairro · cidade quando houver; senão o telefone em claro (visão do gestor) — nunca logado. */}
                 <span className="tm trunc" style={{ display: "block" }}>
-                  {[l.bairro, l.cidade].filter(Boolean).join(" · ") || l.telefoneMascarado}
+                  {[l.bairro, l.cidade].filter(Boolean).join(" · ") || fmtTelefone(l.telefone)}
                 </span>
                 <span className="tags" style={{ marginTop: 7 }}>
                   {l.confirmouRomero === "sim" && <span className="tag pe">40000</span>}

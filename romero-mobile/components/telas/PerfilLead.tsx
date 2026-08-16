@@ -143,8 +143,9 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
         {!lead.ultimoContato && <span className="tag">Nunca contatada</span>}
       </div>
 
-      {/* Telefone em claro para o operador discar — nunca logar (LGPD). */}
+      {/* Telefone e CPF em claro — visão do gestor (dono autenticado); nunca logar (LGPD). */}
       <div className="dim2">{fmtTelefone(lead.telefone)}</div>
+      {lead.cpf && <div className="dim2">CPF {lead.cpf}</div>}
 
       <BlocoLista titulo="Apoio confirmado">
         <LinhaApoio
