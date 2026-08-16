@@ -24,7 +24,11 @@ export function FormularioLogin() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ usuario, senha }),
       });
-      const dados = (await res.json().catch(() => ({}))) as { error?: string; nome?: string };
+      const dados = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        nome?: string;
+        papel?: "gestor" | "atendente";
+      };
       if (!res.ok) {
         setErro(dados.error ?? "Não foi possível entrar.");
         setEnviando(false);
@@ -36,7 +40,8 @@ export function FormularioLogin() {
       } catch {
         /* armazenamento bloqueado; o nome cai no padrão */
       }
-      router.replace("/");
+      // Cada papel cai no seu lugar: gestor no Início, atendente na Fila.
+      router.replace(dados.papel === "gestor" ? "/" : "/fila");
       router.refresh();
     } catch {
       setErro("Falha de conexão. Tente de novo.");
