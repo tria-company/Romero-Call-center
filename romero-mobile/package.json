@@ -3,13 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "predev": "node scripts/garantir-reais.mjs",
     "dev": "next dev -p 3011",
-    "prebuild": "node scripts/garantir-reais.mjs",
     "build": "next build",
     "start": "next start -p 3011",
     "lint": "eslint",
-    "puxar:clickup": "node scripts/puxar-clickup.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

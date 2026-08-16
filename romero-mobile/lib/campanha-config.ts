@@ -7,10 +7,13 @@
    comanda a operação.
 
    O resto da tela (ligações, contatos, tempo médio, ranking, cobertura, SLA)
-   vem CONTADO de `lib/db/reais.json`, gerado por `npm run puxar:clickup`.
+   é telemetria contada da operação. Hoje ela NÃO existe mais aqui: a extração
+   periódica em arquivo foi desacoplada e a Central de Campanha mostra "sem
+   dados ainda" para tudo que não seja meta/calendário/equipe (ver `campanha.ts`,
+   const `VAZIO`). Voltará quando existir uma rota de agregação ao vivo.
 
-   Editar aqui é o jeito certo de ajustar meta e datas. Editar a telemetria
-   não é — ela se refaz a cada extração.
+   Editar aqui é o jeito certo de ajustar meta e datas — são decisão de campanha,
+   não medição.
    ══════════════════════════════════════════════════════════════════════════ */
 
 export const CONFIG_CAMPANHA = {
