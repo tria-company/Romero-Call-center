@@ -20,9 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v20 -> discador-v21): parse de #token+&task no init —
-// auto-login do handoff mobile + deep-link pra abrir a Ligacao exata — quick-260815-r3
-export const DISCADOR_SW_JS = `const CACHE='discador-v21';
+// CACHE bump (discador-v21 -> discador-v22): porta unica — o discador vira a
+// porta de todos e redireciona o GESTOR pro painel dele (login/me devolvem
+// panelUrl; token no fragmento). Atendente segue na fila — quick-260816-u5
+export const DISCADOR_SW_JS = `const CACHE='discador-v22';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -328,10 +329,16 @@ export const DISCADOR_APP_JS = `(function(){
     var u=$('u').value.trim(), p=$('p').value;$('login-err').textContent='';
     fetch('/api/discador/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,senha:p})})
     .then(function(res){return res.json().then(function(j){return {ok:res.ok,j:j};});})
-    .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';startFila();})
+    .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';if(r.j.papel==='gestor'&&irParaPainel(r.j.token,r.j.panelUrl)){return;}startFila();})
     .catch(function(){$('login-err').textContent='Erro ao entrar.';});
   }
   function startFila(){show('fila');carregarFila();}
+  // Porta unica (quick 260816-u5): o discador e a porta de todos. O GESTOR logado
+  // e mandado pro painel dele, ja logado (token no FRAGMENTO — nao vai ao servidor
+  // nem a log/Referer). panelUrl vazio (painel nao configurado) -> retorna false e
+  // o front cai na fila (degrada, nao quebra). Regex sem backslash de proposito
+  // (/[/]+$/) pra sobreviver identica dentro de DISCADOR_APP_JS (template literal).
+  function irParaPainel(token,panelUrl){if(!panelUrl){return false;}window.location.href=panelUrl.replace(/[/]+$/,'')+'/#token='+encodeURIComponent(token);return true;}
   // Fila do operador logado (Lista 02 ClickUp — LOTE-04). Substitui a antiga
   // lista rolável do GHL QUALIFICADO (D-P2-07): /api/discador/qualificados
   // NAO e mais chamada por esta tela.
@@ -650,7 +657,10 @@ export const DISCADOR_APP_JS = `(function(){
     var hp=lerParamsDoHash();
     if(hp.token){setToken(hp.token);}
     try{history.replaceState(null,'',location.pathname+location.search);}catch(e){}
-    if(getToken()){startFila();if(hp.task){abrirLigacaoPorTask(hp.task);}}else{show('login');}
+    // Porta unica (quick 260816-u5): com &task e o gestor indo LIGAR (handoff de
+    // chamada) — NUNCA redireciona, abre a Ligacao aqui. Sem &task, checa o papel
+    // via /me e manda o gestor pro painel; atendente (e qualquer falha) cai na fila.
+    if(getToken()){if(hp.task){startFila();abrirLigacaoPorTask(hp.task);}else{api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.papel==='gestor'&&irParaPainel(getToken(),me.panelUrl)){return;}startFila();}).catch(function(){startFila();});}}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/discador/sw.js').catch(function(){});}
   });
 })();`;
