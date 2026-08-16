@@ -11,35 +11,36 @@ const soDigitos = (s: string) => s.replace(/\D/g, "");
 
 /**
  * Central de ligação. O botão "Ligar" NÃO abre mais o discador do aparelho:
- * manda o operador para o call center, onde a chamada acontece de verdade —
- * gravada, transcrita e analisada. O `tel:` deixava a ligação fora de todo
- * esse circuito.
+ * manda o operador para o call center (`/discador`), onde a chamada acontece de
+ * verdade — gravada, transcrita e analisada. O `tel:` deixava a ligação fora de
+ * todo esse circuito.
  *
- * A credencial do call center NÃO mora aqui, de propósito: este arquivo vai
- * inteiro para o navegador. Quem faz o login é o servidor, em
- * `app/api/callcenter/token` — o cliente só recebe o token pronto.
+ * MESMO ENDERECO: o call center vive na MESMA origem do painel (`/discador`,
+ * proxied pro Mastra via rewrites). Origem única = mesmo localStorage/cookie, o
+ * "Ligar" abre a chamada sem re-login. O token (quando presente) vai no
+ * FRAGMENTO, nunca na query.
  */
-export const URL_CALL_CENTER = process.env.NEXT_PUBLIC_CALLCENTER_URL || "https://romero-call-center.vercel.app/";
+export const URL_CALL_CENTER = process.env.NEXT_PUBLIC_CALLCENTER_URL || "/discador";
 
 /**
- * URL do call center já autenticada.
+ * URL do call center na MESMA ORIGEM (`/discador`, proxied pro Mastra via
+ * rewrites). Como painel e discador compartilham origem, compartilham também o
+ * localStorage: o discador já tem o token guardado e abre a chamada sem re-login.
  *
- * O token vai no FRAGMENTO (`#`), nunca na query: fragmento não é enviado ao
- * servidor, então não aparece em log de acesso nem em Referer.
+ * O token — quando passado — vai no FRAGMENTO (`#`), nunca na query: fragmento
+ * não é enviado ao servidor, então não aparece em log de acesso nem em Referer.
  *
- * Sem token devolve a URL nua — o operador digita a senha uma vez e o próprio
- * call center a guarda. Ou seja, falha de token degrada, não quebra.
- *
- * `taskId` (quick-260815-r3): quando presente, vai como `&task=` no MESMO
- * fragmento — o discador faz deep-link e abre a Ligação exata. Só entra no
- * fragmento se HÁ token (sem token não há sessão pra abrir a chamada). Sem
- * token, a URL nua ignora o taskId (o operador loga e vê a fila).
+ * `taskId`: vai como `task=` no MESMO fragmento — o discador faz deep-link e
+ * abre a Ligação exata. Como a sessão já vive no localStorage da origem, o
+ * deep-link da task acontece MESMO sem token no argumento. Sem token nem task,
+ * devolve a URL nua (`/discador`) — a porta única.
  */
 export function urlCallCenter(token?: string | null, taskId?: string | null): string {
   const base = URL_CALL_CENTER.replace(/\/+$/, "");
-  if (!token) return URL_CALL_CENTER;
-  const task = taskId ? `&task=${encodeURIComponent(taskId)}` : "";
-  return `${base}#token=${encodeURIComponent(token)}${task}`;
+  const partes: string[] = [];
+  if (token) partes.push(`token=${encodeURIComponent(token)}`);
+  if (taskId) partes.push(`task=${encodeURIComponent(taskId)}`);
+  return partes.length ? `${base}#${partes.join("&")}` : URL_CALL_CENTER;
 }
 
 export function paraE164(bruto: string | undefined | null): string | null {
