@@ -1,119 +1,64 @@
 "use client";
 
 import * as React from "react";
-import { useCandidatos, useIndicadores, type Candidato } from "@/lib/db";
-import { FOTO_ANDREZA, FOTO_ROMERO } from "@/lib/fotos";
-import { fmtDiaPorExtenso, fmtInt, saudacao } from "@/lib/format";
+import { fmtDiaPorExtenso, saudacao } from "@/lib/format";
 import { operadorAtual } from "@/components/shell/BootDados";
 import { InstallBanner } from "@/components/shell/InstallPrompt";
-import { Contador, Metrica, Skels, Vhead } from "./blocos";
-import { Foguete } from "./Foguete";
+import { useFilaReal } from "@/lib/fila-real";
+import { useMetricasReais } from "@/lib/metricas-real";
+import { BlocoLista, Contador, Metrica, Skels, Vhead } from "./blocos";
 
 /* TELA 01 · INÍCIO
-   Seguidores, base, fila do dia e as duas urnas com o mesmo peso na tela.
-   Depois de tudo isso vem a Central de Campanha, que chega por `children`.
+   Só tiles com fonte REAL: a fila de hoje (do discador) e a operação ao vivo
+   (métricas agregadas do call center). Sem números de campanha mocados
+   (Instagram, urnas, foguete, metas) — esses saíram. Depois dos tiles vem a
+   Central de Campanha, que chega por `children`.
 
-   O `children` NÃO É ENFEITE DE API: ele é o que permite a seção de campanha
-   ser um componente de SERVIDOR dentro desta tela, que é cliente. Importá-la
-   aqui a arrastaria para o cliente e ela passaria a esperar a hidratação junto
-   com o resto — que é exatamente o problema que tirar aqueles números do
-   localStorage resolveu. Quem monta o par é `app/(app)/page.tsx`.
+   O `children` NÃO É ENFEITE: ele é o que permite a seção de campanha ser um
+   componente de SERVIDOR dentro desta tela, que é cliente. Importá-la aqui a
+   arrastaria para o cliente. Quem monta o par é `app/(app)/page.tsx`.
 
-   Por isso também o esqueleto virou PARCIAL: enquanto a base local hidrata,
-   só os blocos daqui viram barras; a campanha já está desenhada embaixo. */
-
-const FOTOS: Record<string, string> = { romero: FOTO_ROMERO, andreza: FOTO_ANDREZA };
+   Por isso o `{children}` fica SEMPRE no último índice do `.view`, FORA de
+   qualquer condicional de carregamento: enquanto os tiles reais hidratam/pedem
+   os dados, só eles viram barras; a campanha já está desenhada embaixo e não
+   pisca junto (o "esqueleto eterno" que a versão antiga evitava). */
 
 export function Inicio({ children }: { children?: React.ReactNode }) {
-  const candidatos = useCandidatos();
-  const ind = useIndicadores();
   const [nome, setNome] = React.useState("");
   const relogio = useRelogio();
+  const fila = useFilaReal();
 
   React.useEffect(() => setNome(operadorAtual()), []);
 
-  // `ind` só existe quando o banco existe (useIndicadores devolve null sem ele),
-  // então testar `ind` no JSX já estreita o tipo e cobre os dois
-  const carregando = !ind;
-
-  /* UM return só, e o `{children}` SEMPRE no mesmo índice.
-     Com dois `return` de formas diferentes ([Skels, children] contra
-     [Vhead, igrow, mrow, banner, urnas, children]), o React casa filhos sem
-     `key` POR ÍNDICE: na virada do esqueleto para o conteúdo ele comparava o
-     `<section class="cc">` com um `<div class="igrow">`, via tipos diferentes,
-     e DESTRUÍA a campanha inteira para remontá-la três posições adiante — 577
-     elementos e 17 SVGs reconstruídos no mesmo quadro da hidratação, e a
-     escolha do `<select>` do ranking perdida. Assim o array é sempre
-     [miolo, children]: só o índice 0 troca de tipo, que é o que de fato muda. */
   return (
-    <div className="view" aria-busy={carregando || undefined}>
-      {ind ? (
-        <>
-          <Vhead
-            titulo={`${saudacao()}, ${nome || "equipe"}`}
-            sub={fmtDiaPorExtenso()}
-            live={relogio}
+    <div className="view" aria-busy={fila.carregando || undefined}>
+      <Vhead
+        titulo={`${saudacao()}, ${nome || "equipe"}`}
+        sub={fmtDiaPorExtenso()}
+        live={relogio}
+      />
+
+      {/* fila de hoje — contagem real do discador */}
+      <div className="mrow">
+        {fila.carregando ? (
+          <Skels alturas={[132]} />
+        ) : (
+          <Metrica
+            valor={<Contador valor={fila.itens.length} />}
+            label="Sua fila de hoje"
+            delta={fila.erro ? "não foi possível carregar" : undefined}
+            alerta={fila.erro}
+            href="/fila"
+            full
           />
+        )}
+      </div>
 
-          {/* faixa do instagram */}
-          <div className="igrow">
-            {candidatos.map((c) => (
-              <div key={c.id} className={c.id === "romero" ? "ig r" : "ig a"}>
-                <div className="iga" style={{ backgroundImage: `url(${FOTOS[c.id]})` }} />
-                <div style={{ minWidth: 0 }}>
-                  <div className="igh">{c.instagram}</div>
-                  <div className="igv">
-                    <Contador valor={c.seguidores} />
-                  </div>
-                  <div className="igd">▲ {fmtInt(c.seguidoresHoje)} seguidores hj</div>
-                </div>
-              </div>
-            ))}
-          </div>
+      {/* operação ao vivo — métricas agregadas do call center */}
+      <OperacaoAoVivo />
 
-          {/* métricas */}
-          <div className="mrow">
-            <Metrica
-              valor={<Contador valor={ind.cadastros} />}
-              label="Cadastros na base"
-              href="/base"
-            />
-            <Metrica
-              valor={<Contador valor={ind.apoiadoresAtivos} />}
-              label="Apoiadores ativos"
-              delta={`▲ ${fmtInt(ind.apoiadoresHoje)} hoje`}
-            />
-            <Metrica
-              valor={<Contador valor={ind.filaTotal} />}
-              label="Sua fila de hoje"
-              delta={`${fmtInt(ind.filaFeitas)} já feitas`}
-              href="/fila"
-            />
-            {/* sem `href`: a tela de Equipe, que era o destino, foi removida.
-                O número continua informando, mas não há mais para onde ir. */}
-            <Metrica
-              valor={<Contador valor={ind.abertas} />}
-              label="Solicitações abertas"
-              delta={
-                ind.vencendoHoje > 0
-                  ? `${fmtInt(ind.vencendoHoje)} vencendo hoje`
-                  : "nenhuma vencendo"
-              }
-              alerta={ind.vencendoHoje > 0}
-            />
-          </div>
-
-          {/* convite de instalação — some quando dispensado ou já instalado */}
-          <InstallBanner />
-
-          {/* as duas urnas */}
-          {candidatos.map((c) => (
-            <CardCandidato key={c.id} c={c} />
-          ))}
-        </>
-      ) : (
-        <Skels alturas={[64, 62, 132, 172, 172]} />
-      )}
+      {/* convite de instalação — some quando dispensado ou já instalado */}
+      <InstallBanner />
 
       {/* a Central de Campanha, depois de tudo o que já existia.
           FORA do condicional de propósito — ver o comentário acima. */}
@@ -122,27 +67,45 @@ export function Inicio({ children }: { children?: React.ReactNode }) {
   );
 }
 
-function CardCandidato({ c }: { c: Candidato }) {
-  const pct = c.meta > 0 ? (c.apoio / c.meta) * 100 : 0;
+/**
+ * Bloco "Operação ao vivo": quatro números do backend do discador. Nunca quebra
+ * a Home — some quando dá erro; mostra esqueleto discreto enquanto carrega ou
+ * quando o operador não tem acesso à métrica (o resto da tela segue de pé).
+ */
+function OperacaoAoVivo() {
+  const { metricas, semAcesso, erro } = useMetricasReais();
+
+  // Erro de rede/backend: o bloco some — a fila e a campanha continuam.
+  if (erro) return null;
+
   return (
-    <div className={c.id === "romero" ? "cand r" : "cand a"}>
-      <div className="cand-main">
-        <div className="who">
-          {c.emoji} {c.cargo}
+    <BlocoLista titulo="Operação ao vivo">
+      {metricas === null || semAcesso ? (
+        <div className="mrow">
+          <Skels alturas={[92, 92, 92, 92]} />
         </div>
-        <div className="nm">{c.nome}</div>
-        <div className="num">{c.numero}</div>
-        <div className="big">
-          <Contador valor={c.apoio} />
+      ) : (
+        <div className="mrow">
+          <Metrica
+            valor={<Contador valor={metricas.atendentesOnline} />}
+            label="Atendentes online"
+          />
+          <Metrica
+            valor={<Contador valor={metricas.chamadasAtivas} />}
+            label="Chamadas ativas"
+          />
+          <Metrica
+            valor={<Contador valor={metricas.profundidadeFila} />}
+            label="Profundidade da fila"
+          />
+          <Metrica
+            valor={<Contador valor={metricas.errosDia} />}
+            label="Erros hoje"
+            alerta={metricas.errosDia > 0}
+          />
         </div>
-        <div className="goal">
-          apoio confirmado · rumo a <b>{fmtInt(c.meta)}</b> ·{" "}
-          {pct.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%
-        </div>
-        <div className="today">🔥 +{fmtInt(c.apoioHoje)} hoje</div>
-      </div>
-      <Foguete pct={pct} />
-    </div>
+      )}
+    </BlocoLista>
   );
 }
 
