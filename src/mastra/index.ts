@@ -416,14 +416,17 @@ export const mastra = new Mastra({
         },
       },
       {
-        // Desfecho terminal da chamada (quick-260813-lf7 / RETENTION-BY-OUTCOME)
-        // — o UNICO ponto que tira a Ligacao da fila, migrado do /ligando. Body:
-        // { taskId, resultado } com resultado 'atendida'|'recusou' (whitelist
-        // estrita — T-lf7-02). Mesmo isolamento por operador de /ligando (CR-01/
-        // T-lf7-01): assignee vem SEMPRE de sess.usuario, nunca do body; um
-        // taskId arbitrario nao pode desfechar a Ligacao de outro operador.
-        // Nao-atendida / hangup antes de atender NAO chamam este endpoint — a
-        // task fica na fila (status inalterado), reaparecendo no proximo poll.
+        // Desfecho da chamada (quick-260813-lf7 / RETENTION-BY-OUTCOME, ampliado
+        // em quick-260815-w6h) — body: { taskId, resultado } com resultado
+        // 'atendida'|'recusou'|'nao_atendida' (whitelist estrita — T-lf7-02).
+        // Mesmo isolamento por operador de /ligando (CR-01/T-lf7-01): assignee
+        // vem SEMPRE de sess.usuario, nunca do body; um taskId arbitrario nao
+        // pode desfechar a Ligacao de outro operador.
+        // 'atendida'/'recusou' sao TERMINAIS (tiram a Ligacao da fila).
+        // 'nao_atendida' (unanswered/ended/hangup sem atender) NAO fecha a task
+        // — so carimba INICIO (ultima tentativa) e invalida o cache, forcando
+        // um refetch RE-ORDENADO: a task afunda pro fim da fila e o proximo
+        // lead vira itens[0].
         path: '/api/discador/desfecho',
         method: 'POST',
         handler: async (c) => {
@@ -436,7 +439,7 @@ export const mastra = new Mastra({
           const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
           const taskId = String(body.taskId || '');
           const resultado = body.resultado;
-          if (resultado !== 'atendida' && resultado !== 'recusou') {
+          if (resultado !== 'atendida' && resultado !== 'recusou' && resultado !== 'nao_atendida') {
             return c.json({ erro: 'resultado inválido' }, 400);
           }
           try {

@@ -482,6 +482,12 @@ export async function listarMembrosWorkspace(): Promise<MembroClickUp[]> {
  * abertas (`include_closed=false`). Erro de infra/HTTP PROPAGA (WR-03/
  * T-02-03-D — o caller/rota decide o 502, nunca mascara como fila vazia).
  *
+ * Ordenação (quick-260815-w6h): a fila devolvida vem ordenada por INICIO
+ * ascendente (sort estável) — leads nunca tentados primeiro, já-tentados
+ * (via desfecho 'nao_atendida') afundam pro fim, o que falhou há mais tempo
+ * antes do que acabou de falhar. Isso faz o "próximo lead" (itens[0] na UI)
+ * avançar em vez de repetir o mesmo card não-atendido.
+ *
  * Read-through (CACHE-01, D-01/D-02): só a fila PADRÃO (sem `opts.page`) é
  * cacheada — páginas seguintes não passam pelo cache-aside, mantendo o
  * comportamento atual. No hit, retorna direto do cache (não bate no
@@ -513,7 +519,23 @@ export async function buscarFilaLigacoes(
   const abertas = OPER_STATUS_EM_PROCESSAMENTO
     ? tasks.filter((t) => nomeDoStatus(t.status) !== OPER_STATUS_EM_PROCESSAMENTO)
     : tasks;
-  const fila = mapearFilaLigacao(abertas, CAMPOS_LIGACOES);
+  // quick-260815-w6h: ordena por INICIO ascendente (sort ESTÁVEL, sobre cópia
+  // pra não mutar `abertas`) — never-tried (sem INICIO válido) vem PRIMEIRO,
+  // preservando a ordem/prioridade do ClickUp entre eles (comparador 0);
+  // já-tentados afundam pro fim, o que falhou há mais tempo primeiro, o que
+  // acabou de falhar (INICIO mais recente) por último. Isso é o que faz o
+  // lead 'nao_atendida' sumir do topo — a UI renderiza só itens[0].
+  const ordenadas = [...abertas].sort((a, b) => {
+    const inicioA = Number(a.custom_fields?.find((cf) => cf.id === CAMPOS_LIGACOES.INICIO)?.value);
+    const inicioB = Number(b.custom_fields?.find((cf) => cf.id === CAMPOS_LIGACOES.INICIO)?.value);
+    const tentadaA = Number.isFinite(inicioA);
+    const tentadaB = Number.isFinite(inicioB);
+    if (!tentadaA && !tentadaB) return 0;
+    if (!tentadaA) return -1;
+    if (!tentadaB) return 1;
+    return inicioA - inicioB;
+  });
+  const fila = mapearFilaLigacao(ordenadas, CAMPOS_LIGACOES);
   if (cacheavel) {
     await guardarFilaCache(assigneeId, fila);
   }
@@ -616,8 +638,14 @@ export async function iniciarLigacao(
   return { telefone };
 }
 
-/** Desfecho terminal de uma chamada que tira a Ligação da fila (RETENTION-BY-OUTCOME). */
-export type ResultadoDesfecho = 'atendida' | 'recusou';
+/**
+ * Desfecho de uma chamada (RETENTION-BY-OUTCOME). 'atendida'/'recusou' são
+ * TERMINAIS — tiram a Ligação da fila. 'nao_atendida' (quick-260815-w6h) NÃO
+ * é terminal: a task fica na fila (não fecha, não muda status), só carimba
+ * INICIO como marca de "última tentativa" — a fila reordena por INICIO
+ * ascendente e o lead afunda pro fim, reaparecendo mais tarde no mesmo dia.
+ */
+export type ResultadoDesfecho = 'atendida' | 'recusou' | 'nao_atendida';
 
 /**
  * Registra o DESFECHO terminal de uma chamada (quick-260813-lf7 /
@@ -637,6 +665,12 @@ export type ResultadoDesfecho = 'atendida' | 'recusou';
  *   métricas/fila. Fechar em 'complete' usa o mesmo mecanismo já provado pelo
  *   pipeline das atendidas.
  *
+ * - `'nao_atendida'` (quick-260815-w6h): NÃO fecha e NÃO move de status —
+ *   apenas carimba `CAMPOS_LIGACOES.INICIO` de novo (marca "última tentativa")
+ *   e retorna. A task PERMANECE na fila; `buscarFilaLigacoes` a devolve
+ *   re-ordenada (afunda pro fim, ordenado por INICIO ascendente), então o
+ *   próximo lead vira `itens[0]` e este reaparece mais tarde no mesmo dia.
+ *
  * `assigneeIdEsperado` é OBRIGATÓRIO — `validarLigacaoDoOperador` roda PRIMEIRO
  * (CR-01/IDOR, mesma garantia de /ligando e /voto): o `taskId` do body nunca
  * pode desfechar a Ligação de outro operador. Erros de infra/HTTP ou de
@@ -652,6 +686,12 @@ export async function registrarDesfecho(
     if (OPER_STATUS_EM_PROCESSAMENTO) {
       await atualizarTask(taskId, { status: OPER_STATUS_EM_PROCESSAMENTO });
     }
+    return;
+  }
+  if (resultado === 'nao_atendida') {
+    // Não fecha, não muda status — só carimba a última tentativa. A task
+    // continua na fila; buscarFilaLigacoes a reordena pro fim.
+    await setCustomField(taskId, CAMPOS_LIGACOES.INICIO, Date.now());
     return;
   }
   // resultado === 'recusou'
