@@ -38,13 +38,13 @@ export function Fila() {
     };
   }, []);
 
-  // Chamado no gesto do toque — NÃO async, para o `window.open` ser síncrono.
-  // quick-260815-r3: a fila já tem a Ligação (item.taskId), então passa &task
-  // pro discador abrir a chamada exata (e agora auto-loga por #token). Mantém
-  // noopener: é `window.open` direto com a URL final, sem navegar depois.
+  // Chamado no gesto do toque. MESMO ENDERECO (u7): navega na MESMA aba pro
+  // discador (mesma origem) — sem abrir aba nova órfã. A fila já tem a Ligação
+  // (item.taskId), então passa &task pro discador abrir a chamada exata (auto-
+  // loga por #token). Ao VOLTAR, o discador devolve o gestor pra ESTA fila (/fila).
   function ligar(item: ItemFilaReal) {
     vibrar();
-    window.open(urlCallCenter(tokenCC, item.taskId), "_blank", "noopener,noreferrer");
+    window.location.href = urlCallCenter(tokenCC, item.taskId);
   }
 
   if (carregando) return <Esqueleto alturas={[64, 86, 86, 86]} />;
