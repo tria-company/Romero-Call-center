@@ -25,12 +25,17 @@ const RECORTES = [
 
 type RecorteId = (typeof RECORTES)[number]["id"];
 
+// Teto de leads carregados via auto-scroll quando há recorte (client-side): limita
+// quanto da base entra no navegador procurando matches raros. Além disso, refine
+// pela busca (server-side). Não se aplica a "todos" (rola a base inteira aos poucos).
+const CAP_RECORTE = 1500;
+
 export function Base() {
   const [busca, setBusca] = React.useState("");
   const [recorte, setRecorte] = React.useState<RecorteId>("todos");
 
   // O hook já debouncia a busca (~300ms) — passar `busca` direto, sem debounce local.
-  const { leads, carregando, carregandoMais, temMais, total, erro, semAcesso, recarregar, carregarMais } =
+  const { leads, carregando, carregandoMais, temMais, total, erro, erroMais, semAcesso, recarregar, carregarMais } =
     useLeadsReais({ busca });
 
   // Recorte é CLIENT-SIDE: o backend só filtra por nome, não por recorte.
@@ -49,15 +54,20 @@ export function Base() {
     }
   }, [leads, recorte]);
 
-  // Scroll infinito SERVER-SIDE (u9): a sentinela no fim dispara carregarMais
-  // (busca a próxima página do ClickUp e ANEXA). O observer é recriado quando a
-  // lista cresce, pra continuar carregando até encher a viewport ou acabar
-  // (temMais=false). Depende de leads.length (não filtrados): mesmo que a página
-  // nova não tenha nada do recorte atual, segue paginando pra procurar.
+  // TETO de auto-carga QUANDO HÁ RECORTE (u10, fix da revisão): o recorte é
+  // client-side; sem teto, um recorte que casa poucos leads deixa a sentinela
+  // sempre visível e pagina a base INTEIRA (100k, com telefone/CPF) pro navegador.
+  // Com recorte, para de auto-carregar em CAP_RECORTE — o usuário refina pela
+  // busca (server-side). 'todos' não tem teto (rola natural, página enche a tela).
+  const atingiuTeto = recorte !== "todos" && leads.length >= CAP_RECORTE;
+
+  // Scroll infinito: a sentinela dispara carregarMais. NÃO auto-carrega enquanto
+  // erroMais (erro transitório — mostra retry) nem além do teto. O observer é
+  // recriado quando a lista cresce, pra continuar até encher a viewport ou acabar.
   const sentinela = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     const el = sentinela.current;
-    if (!el || !temMais || carregandoMais) return;
+    if (!el || !temMais || carregandoMais || erroMais || atingiuTeto) return;
     const io = new IntersectionObserver(
       (e) => {
         if (e[0]?.isIntersecting) carregarMais();
@@ -66,7 +76,7 @@ export function Base() {
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [temMais, carregandoMais, leads.length, carregarMais]);
+  }, [temMais, carregandoMais, erroMais, atingiuTeto, leads.length, carregarMais]);
 
   if (carregando) return <Esqueleto alturas={[64, 46, 44, 300]} />;
 
@@ -199,7 +209,22 @@ export function Base() {
               carregando mais…
             </div>
           )}
-          {lista.length === 0 && temMais && (
+          {erroMais && !carregandoMais && (
+            <button
+              type="button"
+              className="seg"
+              style={{ display: "block", margin: "12px auto", fontSize: 12 }}
+              onClick={carregarMais}
+            >
+              erro ao carregar mais — tocar pra tentar
+            </button>
+          )}
+          {atingiuTeto && temMais && (
+            <div className="dim" style={{ textAlign: "center", padding: "12px 4px", fontSize: 12 }}>
+              mostrando os primeiros {leads.length.toLocaleString("pt-BR")} — refine a busca
+            </div>
+          )}
+          {lista.length === 0 && temMais && !atingiuTeto && !erroMais && (
             <div className="dim" style={{ textAlign: "center", padding: "12px 4px", fontSize: 12 }}>
               procurando…
             </div>

@@ -32,6 +32,7 @@ export type EstadoLeadsReais = {
   temMais: boolean; // há um próximo cursor pra carregar
   total: number | null; // total REAL da base (task_count do ClickUp); null quando desconhecido
   erro: boolean;
+  erroMais: boolean; // falhou ao carregar a PRÓXIMA página (transitório) — oferece retry sem sumir o "+"
   semAcesso: boolean;
   recarregar: () => void;
   carregarMais: () => void;
@@ -57,6 +58,7 @@ export function useLeadsReais(opts: { busca?: string } = {}): EstadoLeadsReais {
   const [carregando, setCarregando] = React.useState(true);
   const [carregandoMais, setCarregandoMais] = React.useState(false);
   const [erro, setErro] = React.useState(false);
+  const [erroMais, setErroMais] = React.useState(false);
   const [semAcesso, setSemAcesso] = React.useState(false);
 
   const buscaRef = React.useRef(busca); // termo atual (sem stale closure em carregarMais)
@@ -73,6 +75,7 @@ export function useLeadsReais(opts: { busca?: string } = {}): EstadoLeadsReais {
     setCarregando(true);
     setCarregandoMais(false);
     setErro(false);
+    setErroMais(false);
     setSemAcesso(false);
     try {
       const q = termo ? `?q=${encodeURIComponent(termo)}` : "";
@@ -117,6 +120,7 @@ export function useLeadsReais(opts: { busca?: string } = {}): EstadoLeadsReais {
     const g = geracaoRef.current;
     carregandoMaisRef.current = true;
     setCarregandoMais(true);
+    setErroMais(false);
     try {
       const termo = buscaRef.current;
       const pre = termo ? `q=${encodeURIComponent(termo)}&` : "";
@@ -125,8 +129,9 @@ export function useLeadsReais(opts: { busca?: string } = {}): EstadoLeadsReais {
       });
       if (geracaoRef.current !== g) return;
       if (!r.ok) {
-        setCursor(null);
-        cursorRef.current = null;
+        // Erro TRANSITÓRIO (429/500/rede): NÃO zera o cursor (mantém o "+"); marca
+        // erroMais pra a UI oferecer "tentar de novo" e o observer parar de auto-tentar.
+        setErroMais(true);
         return;
       }
       const d = (await r.json().catch(() => null)) as {
@@ -139,10 +144,8 @@ export function useLeadsReais(opts: { busca?: string } = {}): EstadoLeadsReais {
       setCursor(nc);
       cursorRef.current = nc;
     } catch {
-      if (geracaoRef.current === g) {
-        setCursor(null);
-        cursorRef.current = null;
-      }
+      // Falha de rede: mantém o cursor (não some o "+") e sinaliza pra retry.
+      if (geracaoRef.current === g) setErroMais(true);
     } finally {
       carregandoMaisRef.current = false;
       if (geracaoRef.current === g) setCarregandoMais(false);
@@ -168,6 +171,7 @@ export function useLeadsReais(opts: { busca?: string } = {}): EstadoLeadsReais {
     temMais: cursor !== null,
     total,
     erro,
+    erroMais,
     semAcesso,
     recarregar,
     carregarMais,
