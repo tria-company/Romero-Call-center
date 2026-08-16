@@ -1,9 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, TriangleAlert } from "lucide-react";
 import { Marca } from "@/components/brand/Marca";
+
+/** Lê `token=` do fragmento (`#token=…`), sem logar nada (LGPD). */
+function lerTokenDoHash(): string | null {
+  if (typeof window === "undefined") return null;
+  const bruto = window.location.hash.replace(/^#/, "");
+  if (!bruto) return null;
+  const params = new URLSearchParams(bruto);
+  const token = params.get("token");
+  return token && token.trim() ? token : null;
+}
 
 export function FormularioLogin() {
   const router = useRouter();
@@ -12,6 +22,40 @@ export function FormularioLogin() {
   const [verSenha, setVerSenha] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
+  // Handoff do discador: enquanto roda, esconde o form e mostra "Entrando…".
+  const [handoff, setHandoff] = useState(false);
+
+  // AUTO-LOGIN por token (U5c): o discador manda o gestor pra `/#token=…`.
+  // Lê o token, LIMPA o fragmento (não deixa o token na URL) e troca por sessão.
+  useEffect(() => {
+    const token = lerTokenDoHash();
+    if (!token) return;
+    // Remove o fragmento imediatamente — o token não pode ficar na URL.
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    setHandoff(true);
+    setErro(null);
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/handoff", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token }),
+        });
+        const dados = (await res.json().catch(() => ({}))) as { error?: string };
+        if (!res.ok) {
+          setErro(dados.error ?? "Não foi possível entrar pelo discador.");
+          setHandoff(false);
+          return;
+        }
+        router.replace("/");
+        router.refresh();
+      } catch {
+        setErro("Não foi possível entrar pelo discador.");
+        setHandoff(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function enviar(e: React.FormEvent) {
     e.preventDefault();
@@ -40,8 +84,8 @@ export function FormularioLogin() {
       } catch {
         /* armazenamento bloqueado; o nome cai no padrão */
       }
-      // Cada papel cai no seu lugar: gestor no Início, atendente na Fila.
-      router.replace(dados.papel === "gestor" ? "/" : "/fila");
+      // Painel é gestor-only (U5c): só gestor chega aqui com ok → Início.
+      router.replace("/");
       router.refresh();
     } catch {
       setErro("Falha de conexão. Tente de novo.");
@@ -74,7 +118,20 @@ export function FormularioLogin() {
           </div>
         </div>
 
-        <form onSubmit={enviar} style={{ marginTop: 22, display: "grid", gap: 12 }}>
+        {handoff && (
+          <p
+            className="dim"
+            style={{ textAlign: "center", marginTop: 20, fontSize: 13 }}
+          >
+            Entrando pelo discador…
+          </p>
+        )}
+
+        <form
+          onSubmit={enviar}
+          hidden={handoff}
+          style={{ marginTop: 22, display: "grid", gap: 12 }}
+        >
           <div>
             <div className="flabel">Usuário</div>
             <input
