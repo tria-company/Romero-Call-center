@@ -19,7 +19,7 @@ const soDigitos = (s: string) => s.replace(/\D/g, "");
  * inteiro para o navegador. Quem faz o login é o servidor, em
  * `app/api/callcenter/token` — o cliente só recebe o token pronto.
  */
-export const URL_CALL_CENTER = "https://romero-call-center.vercel.app/";
+export const URL_CALL_CENTER = process.env.NEXT_PUBLIC_CALLCENTER_URL || "https://romero-call-center.vercel.app/";
 
 /**
  * URL do call center já autenticada.
@@ -39,7 +39,7 @@ export function urlCallCenter(token?: string | null, taskId?: string | null): st
   const base = URL_CALL_CENTER.replace(/\/+$/, "");
   if (!token) return URL_CALL_CENTER;
   const task = taskId ? `&task=${encodeURIComponent(taskId)}` : "";
-  return `${base}/#token=${encodeURIComponent(token)}${task}`;
+  return `${base}#token=${encodeURIComponent(token)}${task}`;
 }
 
 export function paraE164(bruto: string | undefined | null): string | null {
