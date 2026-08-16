@@ -21,7 +21,7 @@ import { adquirirToken } from './rate-limiter-clickup.ts';
 import { obterFilaCache, guardarFilaCache, obterLigacaoCache, guardarLigacaoCache } from './cache-fila.ts';
 import { mapearFilaLigacao, parseLeadDaTask } from './lote.ts';
 import type { ItemFila } from './lote.ts';
-import { mascararTelefone, scrubPii } from './mascarar.ts';
+import { mascararTelefone } from './mascarar.ts';
 import { registrar429ClickUp } from './metricas.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
@@ -1027,10 +1027,9 @@ function formatarDataLigacao(epochMs: string): string {
  * `data` já vem formatada em Brasília; `atendeu` é boolean; os demais são
  * string possivelmente vazia. NÃO carrega CPF/telefone como campos próprios;
  * os campos de texto livre (`resumoAnalise`/`motivoFalha`, vindos de
- * ANALISE_IA/MOTIVO_FALHA, gerados por IA sobre a transcrição) PODEM reproduzir
- * PII, então passam por `scrubPii` nas SAÍDAS de API (`lerLeadDetalhe`/
- * `lerTimelineDaLigacao`). O produtor cru `buscarLigacoesDoLead` NÃO scruba —
- * é consumido internamente por `gerar-dossie.ts` e fica idêntico.
+ * ANALISE_IA/MOTIVO_FALHA, gerados por IA sobre a transcrição) são expostos
+ * CRUS ao gestor (quick 260815-r12 — visão total do dono autenticado). LGPD:
+ * exibir ao dono ≠ logar; nenhum PII vai pra log.
  */
 export type ItemTimeline = {
   data: string;
@@ -1347,12 +1346,12 @@ export async function fecharLigacao(taskId: string): Promise<void> {
 
 // ===== Lista 01 LEADS — rotas do app do Romero (B1, quick 260815-b1) =====
 //
-// Choke point (D-07/D-09) das novas rotas de leitura/escrita da Lista 01 pelo
-// app mobile do Romero: mascaramento de telefone, validação de lista (anti-IDOR
-// de escrita) e resolução de lead vivem AQUI — `index.ts` só faz o wiring HTTP.
-// LGPD: CPF NUNCA é lido/retornado por nenhum destes helpers; telefone só sai
-// mascarado no resumo (`listarLeadsResumo`) e em claro no detalhe
-// (`lerLeadDetalhe`, o operador precisa discar). Nunca loga telefone/CPF.
+// Choke point (D-07/D-09) das rotas de leitura/escrita da Lista 01 pelo app
+// mobile do Romero: validação de lista (anti-IDOR de escrita) e resolução de
+// lead vivem AQUI — `index.ts` só faz o wiring HTTP. Visão do GESTOR (quick
+// 260815-r12): telefone e CPF saem EM CLARO no resumo e no detalhe — o dono
+// autenticado (gate de papel gestor na rota) pode ver a visão total; a operação
+// é single-tenant. LGPD: exibir ao dono ≠ logar — NUNCA loga telefone/CPF.
 
 /** Lê um custom field da Lista 01 por field-id (D-07), sempre como string ('' se ausente). */
 function valorCampoLead(task: TaskClickUp, fieldId: string): string {
@@ -1371,22 +1370,6 @@ function campoLeadBooleano(task: TaskClickUp, fieldId: string): boolean {
   const v = task.custom_fields?.find((c) => c.id === fieldId)?.value;
   if (v === true) return true;
   return ['true', 'sim', '1', 'yes'].includes(String(v).toLowerCase().trim());
-}
-
-/**
- * Aplica `scrubPii` nos campos de texto livre (`resumoAnalise`/`motivoFalha`)
- * de cada item da timeline ANTES de expor ao cliente — esses textos vêm de
- * ANALISE_IA/MOTIVO_FALHA (gerados por IA sobre a transcrição) e podem
- * reproduzir CPF/telefone (LGPD: "CPF NUNCA no corpo"). Só as saídas de API
- * scrubam; o produtor cru `buscarLigacoesDoLead` fica idêntico (consumido por
- * `gerar-dossie.ts`).
- */
-function scrubTimeline(itens: ItemTimeline[]): ItemTimeline[] {
-  return itens.map((item) => ({
-    ...item,
-    resumoAnalise: scrubPii(item.resumoAnalise),
-    motivoFalha: scrubPii(item.motivoFalha),
-  }));
 }
 
 /**
@@ -1410,11 +1393,12 @@ export async function validarLeadDaLista01(leadTaskId: string): Promise<TaskClic
   return task;
 }
 
-/** Resumo de um lead da Lista 01 para a listagem do app (telefone SEMPRE mascarado; NUNCA CPF). */
+/** Resumo de um lead da Lista 01 para a listagem do app (visão do gestor: telefone e CPF em claro). */
 export interface LeadResumo {
   leadTaskId: string;
   nome: string;
-  telefoneMascarado: string;
+  telefone: string;
+  cpf: string;
   bairro: string;
   cidade: string;
   confirmouRomero: EscolhaVoto | null;
@@ -1425,13 +1409,14 @@ export interface LeadResumo {
 }
 
 /**
- * Lista os leads da Lista 01 (resumo) para o app do Romero — telefone SEMPRE
- * mascarado (`mascararTelefone`), NUNCA CPF. Filtra por `q` (substring
- * case-insensitive no NOME) via filtro IN-PROCESS (em memória) após listar a
- * página do ClickUp — nunca devolve não-casados. Paginação
- * por page opaca (`cursor = String(page+1)` a menos que `lastPage`); corta em
- * `limit` (default 30, teto 100). `listarTasks` LANÇA em falha de infra (WR-03)
- * — o caller mapeia pro 502. Sem log de PII (D-09/D-10).
+ * Lista os leads da Lista 01 (resumo) para o app do Romero — visão do gestor
+ * (quick 260815-r12): telefone EM CLARO e CPF inclusos (o gate de papel gestor
+ * na rota autoriza a visão total; a operação é single-tenant do dono). Filtra
+ * por `q` (substring case-insensitive no NOME) via filtro IN-PROCESS (em
+ * memória) após listar a página do ClickUp — nunca devolve não-casados.
+ * Paginação por page opaca (`cursor = String(page+1)` a menos que `lastPage`);
+ * corta em `limit` (default 30, teto 100). `listarTasks` LANÇA em falha de infra
+ * (WR-03) — o caller mapeia pro 502. Sem log de PII (D-09/D-10).
  */
 export async function listarLeadsResumo(
   opts: { page?: number; q?: string; limit?: number } = {},
@@ -1448,7 +1433,8 @@ export async function listarLeadsResumo(
     leads.push({
       leadTaskId: task.id,
       nome: parsed.nome,
-      telefoneMascarado: mascararTelefone(parsed.telefone),
+      telefone: parsed.telefone,
+      cpf: valorCampoLead(task, CAMPOS_LEADS.CPF),
       bairro: valorCampoLead(task, CAMPOS_LEADS.BAIRRO),
       cidade: valorCampoLead(task, CAMPOS_LEADS.CIDADE),
       confirmouRomero: voto.romero.escolha,
@@ -1461,11 +1447,12 @@ export async function listarLeadsResumo(
   return { leads, cursor: lastPage ? undefined : String(page + 1) };
 }
 
-/** Detalhe de um lead da Lista 01 para o app (telefone EM CLARO — operador disca; NUNCA CPF). */
+/** Detalhe de um lead da Lista 01 para o app (visão do gestor: telefone e CPF em claro). */
 export interface LeadDetalhe {
   leadTaskId: string;
   nome: string;
   telefone: string;
+  cpf: string;
   bairro: string;
   cidade: string;
   uf: string;
@@ -1479,10 +1466,12 @@ export interface LeadDetalhe {
 
 /**
  * Lê o detalhe completo de um lead da Lista 01 para o app do Romero: valida a
- * lista (`validarLeadDaLista01`, anti-IDOR), monta `LeadDetalhe` (telefone EM
- * CLARO pra discar, NUNCA CPF; datas legíveis em Brasília), o dossiê (descrição
- * nativa da task — igual `lerContextoLead`) e a timeline de ligações. LANÇA em
- * infra/autz (WR-03) — o caller mapeia 404/502.
+ * lista (`validarLeadDaLista01`, anti-IDOR), monta `LeadDetalhe` (visão do
+ * gestor, quick 260815-r12: telefone e CPF EM CLARO; datas legíveis em
+ * Brasília), o dossiê (descrição nativa da task — igual `lerContextoLead`, cru)
+ * e a timeline de ligações (crua). O gate de papel gestor na rota autoriza a
+ * visão total — a operação é single-tenant do dono. LANÇA em infra/autz
+ * (WR-03) — o caller mapeia 404/502.
  */
 export async function lerLeadDetalhe(
   leadTaskId: string,
@@ -1494,6 +1483,7 @@ export async function lerLeadDetalhe(
     leadTaskId: task.id,
     nome: parsed.nome,
     telefone: parsed.telefone,
+    cpf: valorCampoLead(task, CAMPOS_LEADS.CPF),
     bairro: valorCampoLead(task, CAMPOS_LEADS.BAIRRO),
     cidade: valorCampoLead(task, CAMPOS_LEADS.CIDADE),
     uf: valorCampoLead(task, CAMPOS_LEADS.UF),
@@ -1504,11 +1494,11 @@ export async function lerLeadDetalhe(
     ultimoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.ULTIMO_CONTATO)),
     proximoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.PROXIMO_CONTATO)),
   };
-  // LGPD ("CPF NUNCA no corpo"): o dossiê é a descrição da task, gerada
-  // injetando dados do Supabase (inclui CPF) no prompt do LLM — pode reproduzir
-  // PII no texto livre. Scruba ANTES de retornar ao cliente.
-  const dossie = scrubPii(task.description ?? task.text_content ?? '');
-  const timeline = scrubTimeline(await buscarLigacoesDoLead(leadTaskId, parsed.telefone));
+  // Visão do gestor (quick 260815-r12): dossiê e timeline CRUS — o dono
+  // autenticado pode ver tudo (o gate de papel gestor na rota autoriza). LGPD:
+  // exibir ao dono ≠ logar; nenhum PII vai pra log aqui.
+  const dossie = task.description ?? task.text_content ?? '';
+  const timeline = await buscarLigacoesDoLead(leadTaskId, parsed.telefone);
   return { lead, dossie, timeline };
 }
 
@@ -1528,9 +1518,9 @@ export async function lerTimelineDaLigacao(
   const leadId = await resolverLeadPelaTask(task);
   if (!leadId) return [];
   const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
-  // LGPD: campos de texto livre da timeline podem reproduzir PII da transcrição
-  // — scruba nas saídas de API (o produtor cru fica idêntico p/ gerar-dossie.ts).
-  return scrubTimeline(await buscarLigacoesDoLead(leadId, telefone));
+  // Visão do gestor (quick 260815-r12): timeline crua — o dono autenticado pode
+  // ver tudo. LGPD: exibir ≠ logar; nenhum PII vai pra log aqui.
+  return await buscarLigacoesDoLead(leadId, telefone);
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
