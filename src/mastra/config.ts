@@ -367,6 +367,14 @@ export const SUPABASE_TABLE_WEBHOOK_EVENTOS = process.env.SUPABASE_TABLE_WEBHOOK
 // console.warn (mesmo espírito de SUPABASE_TABLE_WEBHOOK_EVENTOS).
 export const SUPABASE_TABLE_USUARIOS = process.env.SUPABASE_TABLE_USUARIOS || 'discador_usuarios';
 
+// ===== Escala — ESPELHO rápido dos leads da Lista 01 (u10, sql/escala/02) =====
+//
+// Read-model no Postgres pra Base do painel: busca/filtro/paginação em ms em vez de
+// ~2,7s/página no ClickUp (inviável p/ 100 mil). ClickUp segue a fonte da verdade;
+// o espelho é sincronizado em 2º plano + write-through no voto. Default sensato.
+export const SUPABASE_TABLE_LEADS_ESPELHO =
+  process.env.SUPABASE_TABLE_LEADS_ESPELHO || 'discador_leads_espelho';
+
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook

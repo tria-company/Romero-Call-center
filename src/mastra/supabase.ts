@@ -25,6 +25,7 @@ import {
   SUPABASE_COL_FOLLOWUP_REF,
   SUPABASE_TABLES_SERVICOS,
   SUPABASE_TABLE_WEBHOOK_EVENTOS,
+  SUPABASE_TABLE_LEADS_ESPELHO,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -481,4 +482,165 @@ export async function listarServicosPrestados(
   }
 
   return { servicos, tabelasComErro };
+}
+
+// ===== ESPELHO rápido dos leads da Lista 01 (u10) — read-model p/ a Base =====
+//
+// A Base do painel lê daqui (Postgres, ms) em vez do ClickUp ao vivo (~2,7s/página).
+// ClickUp segue a fonte da verdade: `sincronizarEspelhoLeads` (espelho.ts) copia pra
+// cá, e o voto é write-through. NUNCA loga telefone/cpf (LGPD). Degrada: sem Supabase
+// ou tabela inexistente (404) devolve null/no-op pro caller cair no caminho ClickUp.
+
+export interface LeadEspelhoRow {
+  clickup_task_id: string;
+  id_supabase?: string | null;
+  nome: string;
+  nome_lower: string;
+  telefone: string;
+  cpf: string;
+  bairro: string;
+  cidade: string;
+  confirmou_romero: string | null;
+  confirmou_andressa: string | null;
+  militante: boolean;
+  sem_contato: boolean;
+  atualizado_em: string;
+}
+
+/**
+ * Upsert (merge por `clickup_task_id`) de um LOTE de leads no espelho — usado pelo
+ * sincronizador. Sem Supabase configurado -> no-op (0). Erro de rede/HTTP LANÇA
+ * (WR-03). Devolve quantas linhas foram enviadas.
+ */
+export async function upsertLeadsEspelho(rows: LeadEspelhoRow[]): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  if (rows.length === 0) return 0;
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao upsertar ${rows.length} leads no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao upsertar leads no espelho (${SUPABASE_TABLE_LEADS_ESPELHO})`);
+  }
+  return rows.length;
+}
+
+export type RecorteEspelho = 'todos' | 'romero' | 'andressa' | 'militante' | 'sem-contato';
+
+/** Resumo de lead servido da Base (mesma forma do LeadResumo do ClickUp). */
+export interface LeadEspelhoResumo {
+  leadTaskId: string;
+  nome: string;
+  telefone: string;
+  cpf: string;
+  bairro: string;
+  cidade: string;
+  confirmouRomero: string | null;
+  confirmouAndressa: string | null;
+  militante: boolean;
+  semContato: boolean;
+}
+
+/**
+ * Lê a Base do ESPELHO (rápido): busca por nome (`ilike`, índice trigram), recorte
+ * (filtro server-side), paginação (`offset`/`limit`) e TOTAL exato (Content-Range) —
+ * tudo no Postgres. Sem Supabase OU tabela inexistente (404) -> `null` (o caller cai
+ * no caminho ClickUp). Erro de rede/HTTP LANÇA (WR-03).
+ */
+export async function listarLeadsEspelho(opts: {
+  q?: string;
+  recorte?: RecorteEspelho;
+  offset?: number;
+  limit?: number;
+}): Promise<{ leads: LeadEspelhoResumo[]; total: number } | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const limit = Math.min(Math.max(1, opts.limit ?? 50), 200);
+  const offset = Math.max(0, opts.offset ?? 0);
+  const params = new URLSearchParams();
+  params.set(
+    'select',
+    'clickup_task_id,nome,telefone,cpf,bairro,cidade,confirmou_romero,confirmou_andressa,militante,sem_contato',
+  );
+  params.set('order', 'nome_lower.asc');
+  params.set('limit', String(limit));
+  params.set('offset', String(offset));
+  const q = (opts.q ?? '').trim().toLowerCase();
+  if (q) params.set('nome_lower', `ilike.*${q}*`);
+  switch (opts.recorte) {
+    case 'romero': params.set('confirmou_romero', 'eq.sim'); break;
+    case 'andressa': params.set('confirmou_andressa', 'eq.sim'); break;
+    case 'militante': params.set('militante', 'is.true'); break;
+    case 'sem-contato': params.set('sem_contato', 'is.true'); break;
+    default: break;
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: { ...headers(), 'Prefer': 'count=exact' },
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar leads do espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    if (res.status === 404) return null; // tabela ainda não aplicada -> fallback ClickUp
+    throw new Error(`[supabase] HTTP ${res.status} ao listar leads do espelho`);
+  }
+  const cr = res.headers.get('content-range') || ''; // ex.: "0-49/100007"
+  const m = cr.match(/\/(\d+)$/);
+  const total = m ? Number(m[1]) : 0;
+  const data = await res.json();
+  const linhas: Record<string, unknown>[] = Array.isArray(data) ? data : [];
+  const leads: LeadEspelhoResumo[] = linhas.map((r) => ({
+    leadTaskId: String(r.clickup_task_id ?? ''),
+    nome: String(r.nome ?? ''),
+    telefone: String(r.telefone ?? ''),
+    cpf: String(r.cpf ?? ''),
+    bairro: String(r.bairro ?? ''),
+    cidade: String(r.cidade ?? ''),
+    confirmouRomero: (r.confirmou_romero as string) ?? null,
+    confirmouAndressa: (r.confirmou_andressa as string) ?? null,
+    militante: Boolean(r.militante),
+    semContato: Boolean(r.sem_contato),
+  }));
+  return { leads, total };
+}
+
+/**
+ * Write-through do voto no espelho: atualiza `confirmou_romero`/`confirmou_andressa`
+ * da linha (por `clickup_task_id`) pra o voto aparecer NA HORA na Base. No-op sem
+ * Supabase; 404 (linha/tabela ausente) é tolerado. Erro de rede/HTTP LANÇA (WR-03) —
+ * o caller (rota de voto) loga-e-segue, pra nunca virar 500 por causa do espelho.
+ */
+export async function atualizarVotoEspelho(
+  clickupTaskId: string,
+  patch: { romero?: string | null; andressa?: string | null },
+): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  const corpo: Record<string, unknown> = { atualizado_em: new Date().toISOString() };
+  if ('romero' in patch) corpo.confirmou_romero = patch.romero ?? null;
+  if ('andressa' in patch) corpo.confirmou_andressa = patch.andressa ?? null;
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?clickup_task_id=eq.${encodeURIComponent(clickupTaskId)}`,
+      { method: 'PATCH', headers: { ...headers(), 'Prefer': 'return=minimal' }, body: JSON.stringify(corpo) },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao atualizar voto no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`[supabase] HTTP ${res.status} ao atualizar voto no espelho`);
+  }
 }
