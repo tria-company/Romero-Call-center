@@ -20,10 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v23 -> discador-v24): deep-link de gestor agora volta pra
-// FILA DELE no painel (retornoPainel = panelUrl + /fila), nao pra fila do
-// discador — app.js mudou, precisa propagar. quick-260816-u7
-export const DISCADOR_SW_JS = `const CACHE='discador-v24';
+// CACHE bump (discador-v24 -> discador-v25): discador manda TODO MUNDO pro painel
+// (login unico u8: gestor -> painel, atendente -> /fila) — app.js mudou, precisa
+// propagar. quick-260816-u8
+export const DISCADOR_SW_JS = `const CACHE='discador-v25';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -329,12 +329,12 @@ export const DISCADOR_APP_JS = `(function(){
     var u=$('u').value.trim(), p=$('p').value;$('login-err').textContent='';
     fetch('/api/discador/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,senha:p})})
     .then(function(res){return res.json().then(function(j){return {ok:res.ok,j:j};});})
-    .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';if(r.j.papel==='gestor'&&irParaPainel(r.j.token,r.j.panelUrl)){return;}startFila();})
+    .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';if(irParaPainel(r.j.token,r.j.panelUrl)){return;}startFila();})
     .catch(function(){$('login-err').textContent='Erro ao entrar.';});
   }
   function startFila(){show('fila');carregarFila();}
-  // Porta unica (quick 260816-u5): o discador e a porta de todos. O GESTOR logado
-  // e mandado pro painel dele, ja logado (token no FRAGMENTO — nao vai ao servidor
+  // Porta unica (u5/u8): o discador e a porta de todos. TODO usuario logado e
+  // mandado pro painel, ja logado (token no FRAGMENTO — nao vai ao servidor
   // nem a log/Referer). panelUrl vazio (painel nao configurado) -> retorna false e
   // o front cai na fila (degrada, nao quebra). Regex sem backslash de proposito
   // (/[/]+$/) pra sobreviver identica dentro de DISCADOR_APP_JS (template literal).
@@ -662,10 +662,10 @@ export const DISCADOR_APP_JS = `(function(){
     var hp=lerParamsDoHash();
     if(hp.token){setToken(hp.token);}
     try{history.replaceState(null,'',location.pathname+location.search);}catch(e){}
-    // Porta unica (quick 260816-u5): com &task e o gestor indo LIGAR (handoff de
-    // chamada) — NUNCA redireciona, abre a Ligacao aqui. Sem &task, checa o papel
-    // via /me e manda o gestor pro painel; atendente (e qualquer falha) cai na fila.
-    if(getToken()){if(hp.task){api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.papel==='gestor'&&me.panelUrl){retornoPainel=me.panelUrl.replace(/[/]+$/,'')+'/fila';}}).catch(function(){});startFila();abrirLigacaoPorTask(hp.task);}else{api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.papel==='gestor'&&irParaPainel(getToken(),me.panelUrl)){return;}startFila();}).catch(function(){startFila();});}}else{show('login');}
+    // Porta unica (u5/u8): com &task e o usuario indo LIGAR (handoff de chamada)
+    // — NUNCA redireciona, abre a Ligacao aqui. Sem &task, manda TODO MUNDO pro
+    // painel; o painel roteia por papel (gestor -> painel, atendente -> /fila).
+    if(getToken()){if(hp.task){api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.panelUrl){retornoPainel=me.panelUrl.replace(/[/]+$/,'')+'/fila';}}).catch(function(){});startFila();abrirLigacaoPorTask(hp.task);}else{api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&irParaPainel(getToken(),me.panelUrl)){return;}startFila();}).catch(function(){startFila();});}}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/discador/sw.js').catch(function(){});}
   });
 })();`;
