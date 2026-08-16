@@ -253,3 +253,23 @@ export async function salvarAnotacaoReal(leadTaskId: string, texto: string): Pro
     return false;
   }
 }
+
+/**
+ * Cria a Ligação para o lead (quick-260815-r3) — avulsa atribuída ao operador
+ * no backend do discador — e devolve o `taskId` pro deep-link do call center.
+ * `null` em qualquer erro (call center fora do ar, sem telefone, sem papel) —
+ * o caller degrada abrindo a fila normal. Nunca lança.
+ */
+export async function iniciarLigacaoReal(leadTaskId: string): Promise<string | null> {
+  try {
+    const r = await fetch(`/api/mobile/lead/${encodeURIComponent(leadTaskId)}/ligar`, {
+      method: "POST",
+      headers: CABECALHO_JSON,
+    });
+    if (!r.ok) return null;
+    const d = (await r.json().catch(() => null)) as { taskId?: string } | null;
+    return d?.taskId ?? null;
+  } catch {
+    return null;
+  }
+}

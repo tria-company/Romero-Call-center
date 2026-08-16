@@ -29,10 +29,17 @@ export const URL_CALL_CENTER = "https://romero-call-center.vercel.app/";
  *
  * Sem token devolve a URL nua — o operador digita a senha uma vez e o próprio
  * call center a guarda. Ou seja, falha de token degrada, não quebra.
+ *
+ * `taskId` (quick-260815-r3): quando presente, vai como `&task=` no MESMO
+ * fragmento — o discador faz deep-link e abre a Ligação exata. Só entra no
+ * fragmento se HÁ token (sem token não há sessão pra abrir a chamada). Sem
+ * token, a URL nua ignora o taskId (o operador loga e vê a fila).
  */
-export function urlCallCenter(token?: string | null): string {
+export function urlCallCenter(token?: string | null, taskId?: string | null): string {
   const base = URL_CALL_CENTER.replace(/\/+$/, "");
-  return token ? `${base}/#token=${encodeURIComponent(token)}` : URL_CALL_CENTER;
+  if (!token) return URL_CALL_CENTER;
+  const task = taskId ? `&task=${encodeURIComponent(taskId)}` : "";
+  return `${base}/#token=${encodeURIComponent(token)}${task}`;
 }
 
 export function paraE164(bruto: string | undefined | null): string | null {

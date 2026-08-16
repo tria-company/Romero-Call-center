@@ -39,13 +39,12 @@ export function Fila() {
   }, []);
 
   // Chamado no gesto do toque — NÃO async, para o `window.open` ser síncrono.
-  // TODO Fase B: deep-link por lead exige mudar o hash do discador (fora de
-  // escopo) — hoje abre a MESMA fila do topo.
-  // NÃO registrar interação: os leads são remotos (não estão no store local);
-  // o registro fica para a Fase B.
-  function ligar(_item: ItemFilaReal) {
+  // quick-260815-r3: a fila já tem a Ligação (item.taskId), então passa &task
+  // pro discador abrir a chamada exata (e agora auto-loga por #token). Mantém
+  // noopener: é `window.open` direto com a URL final, sem navegar depois.
+  function ligar(item: ItemFilaReal) {
     vibrar();
-    window.open(urlCallCenter(tokenCC), "_blank", "noopener,noreferrer");
+    window.open(urlCallCenter(tokenCC, item.taskId), "_blank", "noopener,noreferrer");
   }
 
   if (carregando) return <Esqueleto alturas={[64, 86, 86, 86]} />;

@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 // Helper PURO de iniciais — fora de qualquer store/localStorage.
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
-import { useLeadReal, salvarVotoReal, salvarAnotacaoReal } from "@/lib/leads-real";
+import { useLeadReal, salvarVotoReal, salvarAnotacaoReal, iniciarLigacaoReal } from "@/lib/leads-real";
 import type { VotoReal } from "@/lib/discador-servidor";
 import { Autobox, BlocoLista, Esqueleto, Voltar } from "./blocos";
 
@@ -57,9 +57,26 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
   const voltarPara = de === "fila" ? "/fila" : "/base";
 
   // Chamado no gesto do toque — NÃO async, para o `window.open` ser síncrono.
+  // quick-260815-r3: cria a Ligação (avulsa atribuída ao operador) e só então
+  // navega a aba já aberta pro discador com &task (deep-link). A aba abre
+  // SÍNCRONA no gesto (about:blank) e SEM noopener — precisamos setar
+  // `w.location.href` depois que a Ligação é criada. Sem taskId (erro), abre a
+  // URL nua (fila normal). Se a criação falhar de vez, fecha a aba órfã.
   function ligar() {
     vibrar();
-    window.open(urlCallCenter(tokenCC), "_blank", "noopener,noreferrer");
+    const w = window.open("about:blank", "_blank");
+    iniciarLigacaoReal(id)
+      .then((taskId) => {
+        const url = urlCallCenter(tokenCC, taskId || undefined);
+        if (w) {
+          w.location.href = url;
+        } else {
+          window.open(url, "_blank");
+        }
+      })
+      .catch(() => {
+        if (w) w.close();
+      });
   }
 
   async function votar(patch: { romero?: VotoReal; andressa?: VotoReal }) {
