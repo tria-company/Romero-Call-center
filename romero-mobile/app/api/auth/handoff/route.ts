@@ -6,11 +6,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Handoff (U5c): AUTO-LOGIN por token do discador. O discador redireciona o
- * GESTOR para `${panelUrl}/#token=<token>`; o painel lê o fragmento e chama
- * esta rota. O token é verificado contra o backend do discador
- * (`GET /api/discador/me`) e SÓ vira sessão se o papel for `gestor` —
- * atendente é recusado (403), pois o painel é gestor-only.
+ * Handoff (U5c + u8): AUTO-LOGIN por token do discador. O discador redireciona
+ * QUALQUER usuário logado para `${panelUrl}/login#token=<token>`; o painel lê o
+ * fragmento e chama esta rota. O token é verificado contra o backend do discador
+ * (`GET /api/discador/me`); vira sessão para gestor E atendente (o papel decide
+ * o destino no cliente: gestor → painel, atendente → fila).
  *
  * LGPD: nunca logar o token.
  */
@@ -52,14 +52,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (dados.papel !== "gestor") {
-    return NextResponse.json(
-      { error: "Painel restrito a gestores." },
-      { status: 403 },
-    );
-  }
+  // Login único (u8): o handoff aceita gestor E atendente (o papel decide o
+  // destino no cliente). Qualquer papel != gestor entra como atendente.
+  const papel = dados.papel === "gestor" ? ("gestor" as const) : ("atendente" as const);
 
-  const jwt = await criarSessao(dados.usuario.toLowerCase(), dados.usuario, "gestor", token);
+  const jwt = await criarSessao(dados.usuario.toLowerCase(), dados.usuario, papel, token);
   if (!jwt) {
     return NextResponse.json(
       { error: "AUTH_SECRET ausente ou fraco. Configure o ambiente." },
@@ -67,7 +64,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const res = NextResponse.json({ ok: true });
+  const res = NextResponse.json({ ok: true, papel });
   res.cookies.set(COOKIE_SESSAO, jwt, {
     httpOnly: true,
     sameSite: "lax",

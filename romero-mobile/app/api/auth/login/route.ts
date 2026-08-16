@@ -61,17 +61,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Painel é GESTOR-ONLY (U5c): atendente não cria sessão aqui — usa o discador.
-  if (dados.papel !== "gestor") {
-    return NextResponse.json(
-      { error: "O painel é só para gestores. Atendentes usam o discador para ligar." },
-      { status: 403 },
-    );
-  }
-
+  // Login único (u8): o painel aceita gestor E atendente. O papel decide o
+  // destino (gestor → painel completo; atendente → só a fila) — as telas por
+  // papel já existem (U4). Qualquer papel != gestor entra como atendente.
+  const papel = dados.papel === "gestor" ? ("gestor" as const) : ("atendente" as const);
   const login = (dados.usuario || usuario).toLowerCase();
   const nome = dados.usuario || usuario;
-  const papel = "gestor" as const;
 
   const jwt = await criarSessao(login, nome, papel, dados.token);
   if (!jwt) {

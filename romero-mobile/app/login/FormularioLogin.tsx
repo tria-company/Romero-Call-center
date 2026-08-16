@@ -41,13 +41,17 @@ export function FormularioLogin() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ token }),
         });
-        const dados = (await res.json().catch(() => ({}))) as { error?: string };
+        const dados = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          papel?: "gestor" | "atendente";
+        };
         if (!res.ok) {
           setErro(dados.error ?? "Não foi possível entrar pelo discador.");
           setHandoff(false);
           return;
         }
-        router.replace("/");
+        // Login único (u8): atendente cai na fila dele; gestor no painel.
+        router.replace(dados.papel === "atendente" ? "/fila" : "/");
         router.refresh();
       } catch {
         setErro("Não foi possível entrar pelo discador.");
@@ -84,8 +88,8 @@ export function FormularioLogin() {
       } catch {
         /* armazenamento bloqueado; o nome cai no padrão */
       }
-      // Painel é gestor-only (U5c): só gestor chega aqui com ok → Início.
-      router.replace("/");
+      // Login único (u8): gestor → Início; atendente → a fila dele.
+      router.replace(dados.papel === "atendente" ? "/fila" : "/");
       router.refresh();
     } catch {
       setErro("Falha de conexão. Tente de novo.");
