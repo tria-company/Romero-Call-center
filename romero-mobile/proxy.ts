@@ -11,7 +11,20 @@ import { COOKIE_SESSAO, lerSessao } from "./lib/sessao";
  */
 export default async function proxy(req: NextRequest) {
   const sessao = await lerSessao(req.cookies.get(COOKIE_SESSAO)?.value);
-  if (sessao) return NextResponse.next();
+
+  if (sessao) {
+    // Rotas só-gestor: Início (raiz) e Base (e subrotas). O atendente é
+    // devolvido para a Fila — o único lugar que ele opera.
+    const { pathname } = req.nextUrl;
+    const soGestor = pathname === "/" || pathname === "/base" || pathname.startsWith("/base/");
+    if (soGestor && sessao.papel !== "gestor") {
+      const url = req.nextUrl.clone();
+      url.pathname = "/fila";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
+    return NextResponse.next();
+  }
 
   const url = req.nextUrl.clone();
   url.pathname = "/login";
