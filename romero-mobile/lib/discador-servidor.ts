@@ -114,8 +114,8 @@ export type LeadResumoReal = {
   telefoneMascarado: string;
   bairro: string;
   cidade: string;
-  confirmouRomero: VotoReal;
-  confirmouAndressa: VotoReal;
+  confirmouRomero: VotoReal | null;
+  confirmouAndressa: VotoReal | null;
   militante: boolean;
   semContato: boolean;
 };
@@ -124,7 +124,7 @@ export type LeadResumoReal = {
 export type ItemTimelineReal = {
   data: string;
   atendeu: boolean;
-  aderencia: number | null;
+  aderencia: string;
   resumoAnalise: string;
   motivoFalha: string;
 };
@@ -138,8 +138,8 @@ export type LeadFichaReal = {
     bairro: string;
     cidade: string;
     uf: string;
-    confirmouRomero: VotoReal;
-    confirmouAndressa: VotoReal;
+    confirmouRomero: VotoReal | null;
+    confirmouAndressa: VotoReal | null;
     militante: boolean;
     observacao: string;
     ultimoContato: string | null;

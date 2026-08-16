@@ -54,7 +54,7 @@ export function LinhaDoTempo({ id }: { id: string }) {
             >
               <div className="tld">{item.data}</div>
               <div className="tlt">{item.atendeu ? "Atendeu" : "Não atendeu"}</div>
-              {item.aderencia != null && (
+              {item.aderencia && (
                 <div className="tls">Aderência: {item.aderencia}</div>
               )}
               {item.motivoFalha && <div className="tls">{item.motivoFalha}</div>}

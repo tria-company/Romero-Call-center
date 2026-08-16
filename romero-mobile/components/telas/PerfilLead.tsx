@@ -245,7 +245,7 @@ function LinhaApoio({
   onVotar,
 }: {
   rotulo: string;
-  valor: VotoReal;
+  valor: VotoReal | null;
   salvando: boolean;
   onVotar: (v: VotoReal) => void;
 }) {
