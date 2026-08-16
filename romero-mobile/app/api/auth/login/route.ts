@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const res = NextResponse.json({ ok: true, papel });
+  const res = NextResponse.json({ ok: true, papel, nome });
   res.cookies.set(COOKIE_SESSAO, jwt, {
     httpOnly: true,
     sameSite: "lax",
