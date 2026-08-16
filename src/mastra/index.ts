@@ -26,6 +26,7 @@ import {
   atualizarSenha,
   removerUsuario,
   buscarUsuario,
+  papelDoUsuario,
 } from './usuarios.ts';
 
 // Lista de leads qualificados (GHL, pipeline COMERCIAL USI) — legado, ver nota
@@ -270,7 +271,7 @@ export const mastra = new Mastra({
             if (!credenciaisValidas) {
               return c.json({ status: 'invalido' }, 401);
             }
-            return c.json({ token: emitirToken(usuario) });
+            return c.json({ token: emitirToken(usuario), usuario, papel: papelDoUsuario(usuario) ?? 'atendente' });
           } catch (e) {
             console.error('[discador] erro login:', e);
             return c.json({ status: 'erro' }, 500);
