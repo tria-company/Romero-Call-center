@@ -1321,6 +1321,19 @@ function valorCampoLead(task: TaskClickUp, fieldId: string): string {
 }
 
 /**
+ * Lê um custom field CHECKBOX da Lista 01 como boolean de verdade. O ClickUp
+ * devolve `true/false` para checkbox (MILITANTE não está em `OPCOES_LEADS`), e
+ * `valorCampoLead` transformaria em `"true"`/`"false"` — string não-vazia que
+ * vira truthy no cliente e marcaria "Militante" errado. Retorna true SÓ para
+ * valores afirmativos; `false`/`null`/`undefined`/`""`/`"false"`/`"nao"`/`"0"` → false.
+ */
+function campoLeadBooleano(task: TaskClickUp, fieldId: string): boolean {
+  const v = task.custom_fields?.find((c) => c.id === fieldId)?.value;
+  if (v === true) return true;
+  return ['true', 'sim', '1', 'yes'].includes(String(v).toLowerCase().trim());
+}
+
+/**
  * Aplica `scrubPii` nos campos de texto livre (`resumoAnalise`/`motivoFalha`)
  * de cada item da timeline ANTES de expor ao cliente — esses textos vêm de
  * ANALISE_IA/MOTIVO_FALHA (gerados por IA sobre a transcrição) e podem
@@ -1366,7 +1379,7 @@ export interface LeadResumo {
   cidade: string;
   confirmouRomero: EscolhaVoto | null;
   confirmouAndressa: EscolhaVoto | null;
-  militante: string;
+  militante: boolean;
   /** true = nunca atendido (QTD_ATENDIMENTOS vazio/0). */
   semContato: boolean;
 }
@@ -1400,7 +1413,7 @@ export async function listarLeadsResumo(
       cidade: valorCampoLead(task, CAMPOS_LEADS.CIDADE),
       confirmouRomero: voto.romero.escolha,
       confirmouAndressa: voto.andressa.escolha,
-      militante: valorCampoLead(task, CAMPOS_LEADS.MILITANTE),
+      militante: campoLeadBooleano(task, CAMPOS_LEADS.MILITANTE),
       semContato: !(Number(valorCampoLead(task, CAMPOS_LEADS.QTD_ATENDIMENTOS)) > 0),
     });
     if (leads.length >= limit) break;
@@ -1418,7 +1431,7 @@ export interface LeadDetalhe {
   uf: string;
   confirmouRomero: EscolhaVoto | null;
   confirmouAndressa: EscolhaVoto | null;
-  militante: string;
+  militante: boolean;
   observacao: string;
   ultimoContato: string;
   proximoContato: string;
@@ -1446,7 +1459,7 @@ export async function lerLeadDetalhe(
     uf: valorCampoLead(task, CAMPOS_LEADS.UF),
     confirmouRomero: voto.romero.escolha,
     confirmouAndressa: voto.andressa.escolha,
-    militante: valorCampoLead(task, CAMPOS_LEADS.MILITANTE),
+    militante: campoLeadBooleano(task, CAMPOS_LEADS.MILITANTE),
     observacao: valorCampoLead(task, CAMPOS_LEADS.OBSERVACAO_CONSOLIDADA),
     ultimoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.ULTIMO_CONTATO)),
     proximoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.PROXIMO_CONTATO)),
