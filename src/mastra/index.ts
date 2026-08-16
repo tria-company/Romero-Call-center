@@ -52,6 +52,14 @@ import {
   lerContextoLead,
   validarLigacaoDoOperador,
   listarMembrosWorkspace,
+  // Rotas da Lista 01 LEADS pro app do Romero (quick 260815-b1): choke point de
+  // mascaramento/validacao/resolucao vive em clickup.ts — aqui so o wiring HTTP.
+  listarLeadsResumo,
+  lerLeadDetalhe,
+  validarLeadDaLista01,
+  lerTimelineDaLigacao,
+  definirVotoLeadCampo,
+  comentarTask,
 } from './clickup';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
@@ -83,7 +91,7 @@ import { ADMIN_HTML, ADMIN_APP_JS } from './admin-painel';
 // Metricas operacionais (Fase 10 Plano 02, OBS-02/D-06): leitura agregada
 // (painel) + presenca de operador + contagem de erro por etapa (webhook).
 import { lerMetricas, registrarPresenca, registrarErroEtapa } from './metricas.ts';
-import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA } from './config';
+import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA, DISCADOR_LEAD_BROWSE } from './config';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
 import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
@@ -165,6 +173,17 @@ async function sessaoGestor(c: { req: { header: (nome: string) => string | undef
   const reg = await buscarUsuario(sess.usuario);
   if (!reg || reg.papel !== 'gestor') return { status: 403 };
   return { status: 200, usuario: sess.usuario };
+}
+
+/**
+ * Kill-switch do backend (quick 260815-b1) pra enumeracao/detalhe/escrita da
+ * Lista 01 LEADS pelo app do Romero: liberado SO com DISCADOR_LEAD_BROWSE
+ * '1'/'true' (default OFF -> 403). Defesa em profundidade sob a autorizacao
+ * single-tenant do Romero (exigirRomero, ponte Next, B2). A rota de timeline
+ * (IDOR-safe por operador) NAO usa este guard.
+ */
+function leadBrowseLiberado(): boolean {
+  return DISCADOR_LEAD_BROWSE === '1' || DISCADOR_LEAD_BROWSE === 'true';
 }
 
 /**
@@ -543,6 +562,154 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao carregar o contexto' }, 502);
+          }
+        },
+      },
+
+      // ============ LISTA 01 LEADS — app do Romero (quick 260815-b1) ============
+      // Rotas 1-4: Bearer + kill-switch DISCADOR_LEAD_BROWSE (default OFF -> 403).
+      // A logica de mascaramento/validacao/resolucao vive em clickup.ts (choke
+      // point) — aqui so o wiring HTTP. LGPD: CPF nunca no corpo; telefone
+      // mascarado no resumo, em claro so no detalhe; console.error so mensagem
+      // generica (nunca telefone/CPF/taskId em claro).
+      {
+        // Rota 1 — enumeracao (resumo) da Lista 01: telefone SEMPRE mascarado,
+        // nunca CPF, filtro `q` server-side, paginacao por cursor (page opaca).
+        path: '/api/discador/leads',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          const q = c.req.query('q') || undefined;
+          const cursor = c.req.query('cursor');
+          const limit = Number(c.req.query('limit')) || undefined;
+          const page = Number(cursor) || 0;
+          try {
+            const r = await listarLeadsResumo({ page, q, limit });
+            return c.json(r);
+          } catch (e) {
+            // LGPD: nunca logar PII — so a mensagem generica de erro.
+            console.error('[discador] erro ao listar leads:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar os leads' }, 502);
+          }
+        },
+      },
+      {
+        // Rota 2 — detalhe do lead: telefone EM CLARO (operador disca), nunca
+        // CPF; valida a lista (validarLeadDaLista01, anti-IDOR) dentro do helper.
+        path: '/api/discador/lead/:leadTaskId',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          const leadTaskId = c.req.param('leadTaskId');
+          try {
+            const detalhe = await lerLeadDetalhe(leadTaskId);
+            return c.json(detalhe);
+          } catch (e) {
+            console.error('[discador] erro ao ler detalhe do lead:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado
+              ? c.json({ erro: 'Lead não encontrado' }, 404)
+              : c.json({ erro: 'Erro ao carregar o lead' }, 502);
+          }
+        },
+      },
+      {
+        // Rota 3 — grava voto(s) no lead. Guard Lista 01 (validarLeadDaLista01)
+        // ANTES de escrever (anti-IDOR de escrita); whitelist estrita de valores.
+        path: '/api/discador/lead/:leadTaskId/voto',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          const leadTaskId = c.req.param('leadTaskId');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const normalizar = (v: unknown): 'sim' | 'nao' | 'naoDeclarou' | undefined =>
+            v === 'sim' || v === 'nao' || v === 'naoDeclarou' ? v : undefined;
+          const romero = normalizar(body.romero);
+          const andressa = normalizar(body.andressa);
+          if (!romero && !andressa) {
+            // Nada valido selecionado — no-op idempotente (nao toca o ClickUp).
+            return c.json({ status: 'ok', semAlteracao: true });
+          }
+          try {
+            // Guard anti-IDOR de escrita: a task tem que ser da Lista 01 ANTES
+            // de gravar qualquer voto (definirVotoLeadCampo escreve por taskId cru).
+            await validarLeadDaLista01(leadTaskId);
+            if (romero) await definirVotoLeadCampo(leadTaskId, 'romero', romero);
+            if (andressa) await definirVotoLeadCampo(leadTaskId, 'andressa', andressa);
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            console.error('[discador] erro ao gravar voto do lead:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado
+              ? c.json({ erro: 'Lead não encontrado' }, 404)
+              : c.json({ erro: 'Erro ao gravar o voto' }, 502);
+          }
+        },
+      },
+      {
+        // Rota 4 — anotacao (comentario append-only) no lead. Guard Lista 01
+        // ANTES de comentar (anti-IDOR); comentario nunca sobrescreve a
+        // observacao consolidada (maquina-owned) — decisao do plano B1.
+        path: '/api/discador/lead/:leadTaskId/anotacao',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (!leadBrowseLiberado()) return c.json({ erro: 'enumeração desabilitada' }, 403);
+          const leadTaskId = c.req.param('leadTaskId');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const texto = String(body.texto || '').trim();
+          if (!texto) return c.json({ erro: 'texto obrigatório' }, 400);
+          try {
+            // Guard anti-IDOR de escrita ANTES de comentar (comentarTask escreve
+            // por taskId cru, sem validar a lista).
+            await validarLeadDaLista01(leadTaskId);
+            await comentarTask(leadTaskId, texto);
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            console.error('[discador] erro ao anotar no lead:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado
+              ? c.json({ erro: 'Lead não encontrado' }, 404)
+              : c.json({ erro: 'Erro ao salvar a anotação' }, 502);
+          }
+        },
+      },
+      {
+        // Rota 5 — timeline de ligacoes do lead da Ligacao (Lista 02) do
+        // operador. SEM browse-gate: e IDOR-safe por ownership (assignee =
+        // assigneeDoOperador(sess.usuario), NUNCA do body/query) + a validacao
+        // CR-01 de validarLigacaoDoOperador dentro do helper.
+        path: '/api/discador/timeline/:taskId',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const taskId = c.req.param('taskId');
+          try {
+            const timeline = await lerTimelineDaLigacao(taskId, assignee);
+            return c.json({ timeline });
+          } catch (e) {
+            console.error('[discador] erro ao carregar timeline:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao carregar a timeline' }, 502);
           }
         },
       },
