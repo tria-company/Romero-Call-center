@@ -102,7 +102,13 @@ import { ADMIN_HTML, ADMIN_APP_JS } from './admin-painel';
 import { lerMetricas, registrarPresenca, registrarErroEtapa } from './metricas.ts';
 import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA } from './config';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
-import { registrarEventoWebhook, marcarEventoWebhook } from './supabase';
+import {
+  registrarEventoWebhook,
+  marcarEventoWebhook,
+  listarLeadsEspelho,
+  atualizarVotoEspelho,
+  type RecorteEspelho,
+} from './supabase';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
 // lida no request) mora na camada Redis-ou-memoria (estado-webhook.ts) —
 // alternavel por REDIS_URL sem reescrever o handler abaixo. Resolucao de
@@ -604,12 +610,40 @@ export const mastra = new Mastra({
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const q = c.req.query('q') || undefined;
           const cursor = c.req.query('cursor');
-          const limit = Number(c.req.query('limit')) || undefined;
+          const limit = Number(c.req.query('limit')) || 50;
+          const recorteReq = c.req.query('recorte') || 'todos';
+          const recorte = (['romero', 'andressa', 'militante', 'sem-contato'].includes(recorteReq)
+            ? recorteReq
+            : 'todos') as RecorteEspelho;
+
+          // ESPELHO primeiro (u10): busca/recorte/paginacao/TOTAL exato em ms no
+          // Postgres. cursor do espelho = "e<offset>" (namespace proprio, pra nao
+          // colidir com o cursor de PAGINA do ClickUp no fallback). Page 0 (sem
+          // cursor) sonda o espelho; usa se POPULADO (total>0). Vazio/ausente/404
+          // -> cai no ClickUp (degrada, nunca quebra).
+          const ehCursorEspelho = typeof cursor === 'string' && cursor.startsWith('e');
+          if (!cursor || ehCursorEspelho) {
+            try {
+              const offset = ehCursorEspelho ? Number(cursor.slice(1)) || 0 : 0;
+              const esp = await listarLeadsEspelho({ q, recorte, offset, limit });
+              if (esp && (esp.total > 0 || ehCursorEspelho)) {
+                const carregado = offset + esp.leads.length;
+                const proximo = carregado < esp.total ? 'e' + carregado : undefined;
+                return c.json({ leads: esp.leads, cursor: proximo, total: esp.total });
+              }
+            } catch (e) {
+              console.error('[discador] espelho indisponivel, fallback ClickUp:', e instanceof Error ? e.message : String(e));
+            }
+          }
+
+          // FALLBACK: ClickUp ao vivo (espelho ainda nao populado). cursor = PAGINA.
+          // O recorte so existe no espelho — neste caminho a UI filtra client-side
+          // (comportamento antigo). q server-side por pagina.
           const page = Number(cursor) || 0;
           try {
-            const r = await listarLeadsResumo({ page, q, limit });
-            // Total REAL da base (task_count do ClickUp) so na 1a pagina SEM
-            // busca — 1 call barata; a UI usa pro cabecalho (nao o "100+"). u9
+            // limit FIXO 100 aqui = tamanho da pagina do ClickUp (NAO o `limit` da
+            // API): cortar abaixo de 100 pularia os leads 51-100 de cada pagina (u9).
+            const r = await listarLeadsResumo({ page, q, limit: 100 });
             if (page === 0 && !q) {
               try {
                 const total = await contarLeadsDaLista();
@@ -674,6 +708,16 @@ export const mastra = new Mastra({
             await validarLeadDaLista01(leadTaskId);
             if (romero) await definirVotoLeadCampo(leadTaskId, 'romero', romero);
             if (andressa) await definirVotoLeadCampo(leadTaskId, 'andressa', andressa);
+            // Write-through no espelho (u10): o voto aparece NA HORA na Base. Loga-e-
+            // segue — nunca derruba o voto (o ClickUp, fonte da verdade, ja gravou).
+            try {
+              const patch: { romero?: string; andressa?: string } = {};
+              if (romero) patch.romero = romero;
+              if (andressa) patch.andressa = andressa;
+              await atualizarVotoEspelho(leadTaskId, patch);
+            } catch (e) {
+              console.error('[espelho] write-through do voto falhou (segue):', e instanceof Error ? e.message : String(e));
+            }
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao gravar voto do lead:', e instanceof Error ? e.message : String(e));
