@@ -60,23 +60,25 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
   // quick-260815-r3: cria a Ligação (avulsa atribuída ao operador) e só então
   // navega a aba já aberta pro discador com &task (deep-link). A aba abre
   // SÍNCRONA no gesto (about:blank) e SEM noopener — precisamos setar
-  // `w.location.href` depois que a Ligação é criada. Sem taskId (erro), abre a
-  // URL nua (fila normal). Se a criação falhar de vez, fecha a aba órfã.
+  // `w.location.href` depois que a Ligação é criada. quick-260815-rev3:
+  // `iniciarLigacaoReal` NUNCA rejeita — devolve `null` em erro. Sem taskId,
+  // fecha a aba órfã (about:blank) em vez de navegar pra fila genérica, que
+  // confundia o atendente.
   function ligar() {
     vibrar();
     const w = window.open("about:blank", "_blank");
-    iniciarLigacaoReal(id)
-      .then((taskId) => {
-        const url = urlCallCenter(tokenCC, taskId || undefined);
-        if (w) {
-          w.location.href = url;
-        } else {
-          window.open(url, "_blank");
-        }
-      })
-      .catch(() => {
+    iniciarLigacaoReal(id).then((taskId) => {
+      if (!taskId) {
         if (w) w.close();
-      });
+        return;
+      }
+      const url = urlCallCenter(tokenCC, taskId);
+      if (w) {
+        w.location.href = url;
+      } else {
+        window.open(url, "_blank");
+      }
+    });
   }
 
   async function votar(patch: { romero?: VotoReal; andressa?: VotoReal }) {
