@@ -44,7 +44,7 @@
   // nem a log/Referer). panelUrl vazio (painel nao configurado) -> retorna false e
   // o front cai na fila (degrada, nao quebra). Regex sem backslash de proposito
   // (/[/]+$/) pra sobreviver identica dentro de DISCADOR_APP_JS (template literal).
-  function irParaPainel(token,panelUrl){if(!panelUrl){return false;}window.location.href=panelUrl.replace(/[/]+$/,'')+'/#token='+encodeURIComponent(token);return true;}
+  function irParaPainel(token,panelUrl){if(!panelUrl){return false;}window.location.href=panelUrl.replace(/[/]+$/,'')+'/login#token='+encodeURIComponent(token);return true;}
   // Fila do operador logado (Lista 02 ClickUp — LOTE-04). Substitui a antiga
   // lista rolável do GHL QUALIFICADO (D-P2-07): /api/discador/qualificados
   // NAO e mais chamada por esta tela.

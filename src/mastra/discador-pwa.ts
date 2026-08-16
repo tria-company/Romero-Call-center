@@ -20,10 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v21 -> discador-v22): porta unica — o discador vira a
-// porta de todos e redireciona o GESTOR pro painel dele (login/me devolvem
-// panelUrl; token no fragmento). Atendente segue na fila — quick-260816-u5
-export const DISCADOR_SW_JS = `const CACHE='discador-v22';
+// CACHE bump (discador-v22 -> discador-v23): irParaPainel agora manda o gestor
+// pra /login#token (handoff mora na pagina /login do painel), nao mais pra
+// /#token — app.js mudou, precisa propagar. quick-260816-u5-fix (WR-01)
+export const DISCADOR_SW_JS = `const CACHE='discador-v23';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -338,7 +338,7 @@ export const DISCADOR_APP_JS = `(function(){
   // nem a log/Referer). panelUrl vazio (painel nao configurado) -> retorna false e
   // o front cai na fila (degrada, nao quebra). Regex sem backslash de proposito
   // (/[/]+$/) pra sobreviver identica dentro de DISCADOR_APP_JS (template literal).
-  function irParaPainel(token,panelUrl){if(!panelUrl){return false;}window.location.href=panelUrl.replace(/[/]+$/,'')+'/#token='+encodeURIComponent(token);return true;}
+  function irParaPainel(token,panelUrl){if(!panelUrl){return false;}window.location.href=panelUrl.replace(/[/]+$/,'')+'/login#token='+encodeURIComponent(token);return true;}
   // Fila do operador logado (Lista 02 ClickUp — LOTE-04). Substitui a antiga
   // lista rolável do GHL QUALIFICADO (D-P2-07): /api/discador/qualificados
   // NAO e mais chamada por esta tela.
