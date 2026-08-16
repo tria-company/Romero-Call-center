@@ -25,15 +25,13 @@ const RECORTES = [
 
 type RecorteId = (typeof RECORTES)[number]["id"];
 
-const PAGINA = 25;
-
 export function Base() {
   const [busca, setBusca] = React.useState("");
   const [recorte, setRecorte] = React.useState<RecorteId>("todos");
-  const [visiveis, setVisiveis] = React.useState(PAGINA);
 
   // O hook já debouncia a busca (~300ms) — passar `busca` direto, sem debounce local.
-  const { leads, carregando, erro, semAcesso, recarregar } = useLeadsReais({ busca });
+  const { leads, carregando, carregandoMais, temMais, total, erro, semAcesso, recarregar, carregarMais } =
+    useLeadsReais({ busca });
 
   // Recorte é CLIENT-SIDE: o backend só filtra por nome, não por recorte.
   const filtrados = React.useMemo(() => {
@@ -51,20 +49,24 @@ export function Base() {
     }
   }, [leads, recorte]);
 
-  React.useEffect(() => setVisiveis(PAGINA), [busca, recorte]);
-
-  // rolagem infinita: uma sentinela no fim da lista revela a página aos poucos
+  // Scroll infinito SERVER-SIDE (u9): a sentinela no fim dispara carregarMais
+  // (busca a próxima página do ClickUp e ANEXA). O observer é recriado quando a
+  // lista cresce, pra continuar carregando até encher a viewport ou acabar
+  // (temMais=false). Depende de leads.length (não filtrados): mesmo que a página
+  // nova não tenha nada do recorte atual, segue paginando pra procurar.
   const sentinela = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     const el = sentinela.current;
-    if (!el) return;
+    if (!el || !temMais || carregandoMais) return;
     const io = new IntersectionObserver(
-      (e) => e[0]?.isIntersecting && setVisiveis((v) => v + PAGINA),
+      (e) => {
+        if (e[0]?.isIntersecting) carregarMais();
+      },
       { rootMargin: "320px" },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [filtrados]);
+  }, [temMais, carregandoMais, leads.length, carregarMais]);
 
   if (carregando) return <Esqueleto alturas={[64, 46, 44, 300]} />;
 
@@ -79,13 +81,20 @@ export function Base() {
     );
   }
 
-  const lista = filtrados.slice(0, visiveis);
+  const lista = filtrados;
 
   return (
     <div className="view">
+      {/* Cabeçalho: na visão "Todos" sem busca, mostra o TOTAL REAL da base
+          (task_count do ClickUp). Com recorte/busca (contagem só do que carregou),
+          mostra o carregado com "+" enquanto há mais. */}
       <Vhead
         titulo="Base"
-        sub={`${filtrados.length} ${filtrados.length === 1 ? "pessoa" : "pessoas"}`}
+        sub={
+          recorte === "todos" && !busca && total != null
+            ? `${total.toLocaleString("pt-BR")} ${total === 1 ? "pessoa" : "pessoas"}`
+            : `${filtrados.length}${temMais ? "+" : ""} ${filtrados.length === 1 ? "pessoa" : "pessoas"}`
+        }
       />
 
       <label style={{ position: "relative", display: "block" }}>
@@ -149,7 +158,7 @@ export function Base() {
             tentar de novo
           </button>
         </div>
-      ) : lista.length === 0 ? (
+      ) : lista.length === 0 && !temMais ? (
         <div className="empty">
           <b>Ninguém com esse recorte</b>
           Ajuste a busca ou troque o filtro.
@@ -185,6 +194,16 @@ export function Base() {
             </Link>
           ))}
           <div ref={sentinela} style={{ height: 1 }} />
+          {carregandoMais && (
+            <div className="dim" style={{ textAlign: "center", padding: "12px 4px", fontSize: 12 }}>
+              carregando mais…
+            </div>
+          )}
+          {lista.length === 0 && temMais && (
+            <div className="dim" style={{ textAlign: "center", padding: "12px 4px", fontSize: 12 }}>
+              procurando…
+            </div>
+          )}
         </div>
       )}
     </div>
