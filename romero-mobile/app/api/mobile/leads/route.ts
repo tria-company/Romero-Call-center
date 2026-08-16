@@ -7,8 +7,8 @@ import { chamarDiscador } from "@/lib/discador-servidor";
  *
  * Repassa `?q=&cursor=&limit=` para `GET /api/discador/leads` com Bearer
  * server-side (o token nunca chega ao navegador). O status do backend é
- * repassado TAL QUAL — em especial `403` quando `DISCADOR_LEAD_BROWSE` não está
- * ligado no backend, para a UI distinguir "acesso não liberado".
+ * repassado TAL QUAL — em especial `403` quando o usuário não é gestor (gate
+ * de papel no backend), para a UI distinguir "acesso não liberado".
  *
  * LGPD: telefone SAI mascarado no corpo; nunca logar.
  */

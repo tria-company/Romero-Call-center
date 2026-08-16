@@ -5,7 +5,8 @@ import { chamarDiscador } from "@/lib/discador-servidor";
 /**
  * Rota-ponte: a FICHA de um lead (`GET /api/discador/lead/:id`) — lead,
  * dossiê e timeline — servida ao app com Bearer server-side. Status repassado
- * TAL QUAL (403 sem browse-flag, 404 lead inexistente, etc.).
+ * TAL QUAL (403 quando o usuário não é gestor — gate de papel no backend,
+ * 404 lead inexistente, etc.).
  *
  * Next 16: `params` é assíncrono → `await params`. LGPD: nunca logar telefone.
  */
