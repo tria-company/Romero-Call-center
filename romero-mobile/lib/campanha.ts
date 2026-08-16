@@ -26,15 +26,16 @@
      troque por `(meta - votos) / (totalDias - dia)`.
 
    ─────────────────────────────────────────────────────────────────────────
-   AGORA É DADO REAL. A constante desenhada saiu; os números vêm CONTADOS de
-   `lib/db/reais.json` (gerado por `npm run puxar:clickup` a partir da lista
-   Ligações do ClickUp) mais `lib/campanha-config.ts`, que guarda o que não é
-   telemetria: meta, calendário e tamanho da equipe.
+   HOJE A TELEMETRIA AO VIVO NÃO EXISTE MAIS AQUI. A extração periódica em
+   arquivo foi desacoplada: a Central de Campanha exibe apenas o que vem de
+   `lib/campanha-config.ts` — meta, calendário e tamanho da equipe — e TODO o
+   resto fica VAZIO, com a tela dizendo "sem dados ainda" (via `SemDados`). Os
+   números contados voltarão quando existir uma rota de agregação ao vivo; por
+   ora, `real` aponta para a constante `VAZIO`.
 
    Continua sendo montado no SERVIDOR e fora de `lib/db` — pelo mesmo motivo de
    sempre: não passa por localStorage, não espera hidratação, não tem esqueleto
-   eterno. O "fetch" previsto acima virou uma extração periódica gravada em
-   arquivo, o que preserva a propriedade que importa (o app funciona sem rede).
+   eterno. Mesmo sem telemetria, o app funciona sem rede.
 
    O que a fonte NÃO responde fica VAZIO, e a tela diz "sem dados ainda":
      · votos acumulados por dia — o ClickUp guarda confirmação de voto como
@@ -42,7 +43,6 @@
      · tendências e comparativo semanal — exigem semanas de histórico.
    ══════════════════════════════════════════════════════════════════════════ */
 
-import reaisBruto from "./db/reais.json";
 import { CONFIG_CAMPANHA } from "./campanha-config";
 
 export type TomCampanha = "accent" | "accent2" | "good" | "warn" | "crit";
@@ -227,8 +227,7 @@ const VAZIO: CampanhaReal = {
   aderenciaMedia: 0,
 };
 
-const real: CampanhaReal =
-  (reaisBruto as unknown as { campanha?: CampanhaReal }).campanha ?? VAZIO;
+const real: CampanhaReal = VAZIO;
 
 /** Barra proporcional à MAIOR da lista — é assim que o painel as desenha. */
 function barras(
@@ -345,9 +344,8 @@ export const CAMPANHA: Campanha = {
   cobertura: real.cobertura,
 };
 
-/** Fonte e momento da extração — a tela mostra de quando é o número. */
-export const CAMPANHA_GERADA_EM: string | null =
-  (reaisBruto as unknown as { geradoEm?: string }).geradoEm ?? null;
+/** Fonte e momento da extração — sem telemetria ao vivo, não há de quando. */
+export const CAMPANHA_GERADA_EM: string | null = null;
 
 /** Há telemetria suficiente para o painel dizer alguma coisa? */
 export const CAMPANHA_TEM_DADOS = real.totalLigacoes > 0;
