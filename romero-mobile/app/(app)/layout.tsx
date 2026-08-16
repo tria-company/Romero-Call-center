@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { TabBar } from "@/components/shell/TabBar";
 import { PageTransition } from "@/components/shell/PageTransition";
 import { BootDados } from "@/components/shell/BootDados";
@@ -20,6 +21,11 @@ import { COOKIE_SESSAO, lerSessao } from "@/lib/sessao";
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const sessao = await lerSessao((await cookies()).get(COOKIE_SESSAO)?.value);
+  // Gate real de sessao (quick-260816-u5-fix, WR-02): o proxy.ts NAO e compilado
+  // como middleware nesta versao do Next (middleware-manifest.json vazio), entao
+  // travamos aqui no layout — sem sessao valida, qualquer rota autenticada (/,
+  // /base, /fila, /perfil) volta pro login.
+  if (!sessao) redirect("/login");
   const papel = sessao?.papel ?? "atendente";
   return (
     <>

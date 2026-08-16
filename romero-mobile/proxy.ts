@@ -2,6 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 import { COOKIE_SESSAO, lerSessao } from "./lib/sessao";
 
 /**
+ * INERTE nesta versão do Next: este arquivo NÃO é compilado como middleware
+ * (middleware-manifest.json vazio), então o gate real de sessão vive no
+ * layout autenticado — `app/(app)/layout.tsx` (quick-260816-u5-fix, WR-02).
+ *
  * Gate de acesso (o antigo `middleware` — no Next 16 o arquivo se chama
  * `proxy`). Sem sessão válida, tudo redireciona para /login.
  *
