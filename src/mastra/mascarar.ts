@@ -32,3 +32,33 @@ export function mascararCpf(cpf: string): string {
   if (digitos.length < 6) return '*'.repeat(digitos.length);
   return `${digitos.slice(0, 3)}.***.***-${digitos.slice(-2)}`;
 }
+
+/**
+ * Scrub de PII em TEXTO LIVRE — para saídas de API que expõem markdown/resumos
+ * de IA ao cliente (dossiê da Lista 01, `resumoAnalise`/`motivoFalha` da timeline).
+ * Esses textos são gerados injetando dados do Supabase (inclui CPF) e a
+ * transcrição da ligação no prompt do LLM, então CPF/telefone podem reaparecer
+ * no texto livre — e a regra do projeto é "CPF NUNCA no corpo" (LGPD).
+ *
+ * Pura (sem rede/env), reusa `mascararCpf`/`mascararTelefone`. Estratégia
+ * CONSERVADORA — over-masking é aceitável, vazar não. As regras são aplicadas
+ * EM ORDEM (formatados antes dos nus) para não reprocessar um trecho já mascarado:
+ *   a) CPF formatado `123.456.789-01` → `mascararCpf`.
+ *   b) telefone formatado com DDD/parênteses/traço (ex.: `(81) 99999-8888`,
+ *      `81 99999 8888`) → `mascararTelefone`.
+ *   c) sequências nuas de dígitos: 11 díg. (CPF ou celular) → `mascararCpf`
+ *      (mascarar como CPF é seguro); 10 díg. → `mascararTelefone`.
+ * Se `!texto`, devolve como está.
+ */
+export function scrubPii(texto: string): string {
+  if (!texto) return texto;
+  let out = texto;
+  // a) CPF formatado (pontuado) primeiro.
+  out = out.replace(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/g, (m) => mascararCpf(m));
+  // b) telefone formatado com DDD/parênteses/traço/espaços.
+  out = out.replace(/\(?\b\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}\b/g, (m) => mascararTelefone(m));
+  // c) sequências nuas de dígitos: 11 (CPF/celular) e 10 (fixo com DDD).
+  out = out.replace(/\b\d{11}\b/g, (m) => mascararCpf(m));
+  out = out.replace(/\b\d{10}\b/g, (m) => mascararTelefone(m));
+  return out;
+}

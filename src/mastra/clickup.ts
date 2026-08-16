@@ -21,7 +21,7 @@ import { adquirirToken } from './rate-limiter-clickup.ts';
 import { obterFilaCache, guardarFilaCache, obterLigacaoCache, guardarLigacaoCache } from './cache-fila.ts';
 import { mapearFilaLigacao, parseLeadDaTask } from './lote.ts';
 import type { ItemFila } from './lote.ts';
-import { mascararTelefone } from './mascarar.ts';
+import { mascararTelefone, scrubPii } from './mascarar.ts';
 import { registrar429ClickUp } from './metricas.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
@@ -985,7 +985,12 @@ function formatarDataLigacao(epochMs: string): string {
  * `buscarLigacoesDoLead` já produzia (Seção 4 do dossiê). Só nomeia o tipo pra
  * reuso pelas rotas do app do Romero (B1); NÃO muda o comportamento em runtime.
  * `data` já vem formatada em Brasília; `atendeu` é boolean; os demais são
- * string possivelmente vazia. Sem CPF/telefone — só metadados da ligação.
+ * string possivelmente vazia. NÃO carrega CPF/telefone como campos próprios;
+ * os campos de texto livre (`resumoAnalise`/`motivoFalha`, vindos de
+ * ANALISE_IA/MOTIVO_FALHA, gerados por IA sobre a transcrição) PODEM reproduzir
+ * PII, então passam por `scrubPii` nas SAÍDAS de API (`lerLeadDetalhe`/
+ * `lerTimelineDaLigacao`). O produtor cru `buscarLigacoesDoLead` NÃO scruba —
+ * é consumido internamente por `gerar-dossie.ts` e fica idêntico.
  */
 export type ItemTimeline = {
   data: string;
@@ -1316,6 +1321,22 @@ function valorCampoLead(task: TaskClickUp, fieldId: string): string {
 }
 
 /**
+ * Aplica `scrubPii` nos campos de texto livre (`resumoAnalise`/`motivoFalha`)
+ * de cada item da timeline ANTES de expor ao cliente — esses textos vêm de
+ * ANALISE_IA/MOTIVO_FALHA (gerados por IA sobre a transcrição) e podem
+ * reproduzir CPF/telefone (LGPD: "CPF NUNCA no corpo"). Só as saídas de API
+ * scrubam; o produtor cru `buscarLigacoesDoLead` fica idêntico (consumido por
+ * `gerar-dossie.ts`).
+ */
+function scrubTimeline(itens: ItemTimeline[]): ItemTimeline[] {
+  return itens.map((item) => ({
+    ...item,
+    resumoAnalise: scrubPii(item.resumoAnalise),
+    motivoFalha: scrubPii(item.motivoFalha),
+  }));
+}
+
+/**
  * Valida (anti-IDOR de escrita/leitura de detalhe) que `leadTaskId` é uma task
  * da Lista 01 LEADS — espelho de `validarLigacaoDoOperador` para a Lista 01.
  * Sem assignee (a Lista 01 não é por-operador; a autorização single-tenant do
@@ -1353,7 +1374,8 @@ export interface LeadResumo {
 /**
  * Lista os leads da Lista 01 (resumo) para o app do Romero — telefone SEMPRE
  * mascarado (`mascararTelefone`), NUNCA CPF. Filtra por `q` (substring
- * case-insensitive no NOME) NO SERVIDOR (nunca devolve não-casados). Paginação
+ * case-insensitive no NOME) via filtro IN-PROCESS (em memória) após listar a
+ * página do ClickUp — nunca devolve não-casados. Paginação
  * por page opaca (`cursor = String(page+1)` a menos que `lastPage`); corta em
  * `limit` (default 30, teto 100). `listarTasks` LANÇA em falha de infra (WR-03)
  * — o caller mapeia pro 502. Sem log de PII (D-09/D-10).
@@ -1429,8 +1451,11 @@ export async function lerLeadDetalhe(
     ultimoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.ULTIMO_CONTATO)),
     proximoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.PROXIMO_CONTATO)),
   };
-  const dossie = task.description ?? task.text_content ?? '';
-  const timeline = await buscarLigacoesDoLead(leadTaskId, parsed.telefone);
+  // LGPD ("CPF NUNCA no corpo"): o dossiê é a descrição da task, gerada
+  // injetando dados do Supabase (inclui CPF) no prompt do LLM — pode reproduzir
+  // PII no texto livre. Scruba ANTES de retornar ao cliente.
+  const dossie = scrubPii(task.description ?? task.text_content ?? '');
+  const timeline = scrubTimeline(await buscarLigacoesDoLead(leadTaskId, parsed.telefone));
   return { lead, dossie, timeline };
 }
 
@@ -1450,7 +1475,9 @@ export async function lerTimelineDaLigacao(
   const leadId = await resolverLeadPelaTask(task);
   if (!leadId) return [];
   const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
-  return buscarLigacoesDoLead(leadId, telefone);
+  // LGPD: campos de texto livre da timeline podem reproduzir PII da transcrição
+  // — scruba nas saídas de API (o produtor cru fica idêntico p/ gerar-dossie.ts).
+  return scrubTimeline(await buscarLigacoesDoLead(leadId, telefone));
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
