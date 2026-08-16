@@ -174,6 +174,14 @@ export interface ResultadoAnalise {
    * nada nesse campo do lead (não sobrescreve a marcação manual do closer).
    */
   voto: { romero: VotoIA; andressa: VotoIA };
+  /**
+   * Evidência (trecho curto da transcrição) que embasou a leitura do voto de
+   * cada candidato — irmã de `voto`, NÃO reestrutura o campo original
+   * (OPER-04b/D2, ver quick-260815-oq4). `null` quando a IA não teve base pra
+   * citar um trecho (nunca inventa). Usada SÓ pra compor o log de voto no
+   * `ANALISE_IA` da Ligação — nunca vai pro console/arquivo (LGPD).
+   */
+  votoEvidencia: { romero: string | null; andressa: string | null };
   /** true quando o parse da saída do LLM falhou — alimenta `necessitaRevisao` (D-P3-10). */
   falhaTecnica: boolean;
 }
@@ -212,6 +220,8 @@ export function montarPromptAnalise({ script, transcricao }: { script: string; t
     '- "naoDeclarou" = o tema do voto surgiu, mas o lead não se comprometeu / ficou em dúvida.',
     '- null = a transcrição não dá base para afirmar (o assunto não apareceu). Nunca invente; na dúvida entre "naoDeclarou" e null, use null.',
     '',
+    'Para CADA candidato, cite também um TRECHO CURTO da transcrição (evidência) que embasou sua leitura do voto — null quando não houver um trecho pra citar (nunca invente).',
+    '',
     '=== SCRIPT COMBINADO ===',
     script || '(script vazio)',
     '',
@@ -225,11 +235,13 @@ export function montarPromptAnalise({ script, transcricao }: { script: string; t
     '  "sinaisAlerta": ["<sinal, ex.: reclamação, pedido para não ligar mais, dado sensível compartilhado>"],',
     '  "retorno": { "necessario": <true ou false>, "data": "<AAAA-MM-DD ou null>" },',
     '  "voto": { "romero": <"sim"|"nao"|"naoDeclarou"|null>, "andressa": <"sim"|"nao"|"naoDeclarou"|null> },',
+    '  "votoEvidencia": { "romero": <"trecho curto da transcrição"|null>, "andressa": <"trecho curto da transcrição"|null> },',
     '  "observacoesExtraidas": "<observações relevantes extraídas da conversa>"',
     '}',
     '',
     'Se não houver nenhum sinal de alerta, devolva "sinaisAlerta": []. Se o lead não combinou um retorno, devolva "retorno": { "necessario": false, "data": null }.',
     'Se a transcrição não deixar clara a intenção de voto de um candidato, devolva null para ele — não chute.',
+    'Se não houver um trecho da transcrição que embase a leitura do voto de um candidato, devolva null em "votoEvidencia" pra ele — nunca invente uma citação.',
   ].join('\n');
 
   return { system, prompt };
@@ -244,6 +256,7 @@ function resultadoFalhaTecnica(): ResultadoAnalise {
     retorno: { necessario: false, data: null },
     observacoesExtraidas: '',
     voto: { romero: null, andressa: null },
+    votoEvidencia: { romero: null, andressa: null },
     falhaTecnica: true,
   };
 }
@@ -251,6 +264,19 @@ function resultadoFalhaTecnica(): ResultadoAnalise {
 /** Coage um valor bruto do LLM para `VotoIA` — só aceita as 3 escolhas válidas; qualquer outra coisa (inclusive null/ausente) vira null. */
 function normalizarVotoIA(v: unknown): VotoIA {
   return v === 'sim' || v === 'nao' || v === 'naoDeclarou' ? v : null;
+}
+
+/**
+ * Coage um valor bruto do LLM (`votoEvidencia.<candidato>`) para `string | null`
+ * (D2, quick-260815-oq4): só aceita string NÃO-vazia (aparada); qualquer outra
+ * coisa (ausente, vazia, número, objeto) vira `null` — nunca chuta uma
+ * evidência. Campo ausente NÃO marca `falhaTecnica` (o LLM respondeu, só não
+ * completou este campo).
+ */
+function normalizarEvidencia(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const aparado = v.trim();
+  return aparado.length > 0 ? aparado : null;
 }
 
 /**
@@ -286,6 +312,7 @@ export function parseResultadoAnalise(textoLLM: string): ResultadoAnalise {
       ? null
       : String(retornoBruto.data);
   const votoBruto = obj.voto && typeof obj.voto === 'object' ? obj.voto : {};
+  const votoEvidenciaBruto = obj.votoEvidencia && typeof obj.votoEvidencia === 'object' ? obj.votoEvidencia : {};
 
   return {
     aderencia,
@@ -294,6 +321,10 @@ export function parseResultadoAnalise(textoLLM: string): ResultadoAnalise {
     retorno: { necessario: Boolean(retornoBruto.necessario), data: retornoData },
     observacoesExtraidas: typeof obj.observacoesExtraidas === 'string' ? obj.observacoesExtraidas : '',
     voto: { romero: normalizarVotoIA(votoBruto.romero), andressa: normalizarVotoIA(votoBruto.andressa) },
+    votoEvidencia: {
+      romero: normalizarEvidencia(votoEvidenciaBruto.romero),
+      andressa: normalizarEvidencia(votoEvidenciaBruto.andressa),
+    },
     falhaTecnica: false,
   };
 }
@@ -336,6 +367,79 @@ export function decidirAcaoVoto(ia: VotoIA, atual: VotoIA): AcaoVoto {
   if (ia === null) return 'ignorar';
   if (atual === null) return 'preencher';
   return ia === atual ? 'manter' : 'divergencia';
+}
+
+// ===== Log de voto (IA × closer) — quick-260815-oq4, D1/D2 =====
+//
+// Hoje só a divergência deixa rastro no ANALISE_IA da Ligação (preencheu e
+// concordam não guardam nada). D1: passar a registrar SEMPRE, por candidato,
+// uma linha de log com o que o closer marcou + o que a IA ouviu + o status.
+// D2: na divergência a linha carrega a evidência (trecho da transcrição).
+// Funções puras — sem I/O, sem log — o processador é quem decide onde
+// gravar (ANALISE_IA da Ligação, D3) e nunca loga a evidência (LGPD).
+
+/** Rótulo PT-BR de uma escolha de voto da IA — usado nas linhas do log (mesmo vocabulário de `ROTULO_VOTO` em processador.ts). */
+export const ROTULO_VOTO_IA: Record<'sim' | 'nao' | 'naoDeclarou', string> = {
+  sim: 'Sim',
+  nao: 'Não',
+  naoDeclarou: 'Não declarou',
+};
+
+/**
+ * Monta UMA linha do log de voto (IA × closer) para um candidato (D1/D2).
+ * Pura/determinística — sem I/O. Regras:
+ * - `closerIrressoluvel` (valor manual que não traduziu p/ EscolhaVoto): a
+ *   parte do closer vira "marcou (valor não reconhecido)" e o status é
+ *   honesto "sem comparação" — NUNCA "diverge" (evita falso-positivo, borda
+ *   do CONTEXT); não passa por `decidirAcaoVoto`.
+ * - `ia === null`: a parte da IA vira "IA não identificou" e o status é
+ *   "IA sem base" (a IA não teve base pra ler o voto).
+ * - Caso normal: status vem de `decidirAcaoVoto(ia, closerDefinido ?
+ *   closerEscolha : null)` — preencher→"preencheu", manter→"concordam",
+ *   divergencia→"diverge" (ignorar não ocorre aqui pois `ia !== null`).
+ * A evidência (quando não-null) é anexada ao final da linha — o gatilho
+ * pedido é a divergência, mas ela aparece em qualquer status se vier (D2).
+ */
+export function montarLinhaLogVoto(opts: {
+  candidato: string;
+  ia: VotoIA;
+  closerDefinido: boolean;
+  closerEscolha: VotoIA;
+  closerIrressoluvel: boolean;
+  evidencia: string | null;
+}): string {
+  const { candidato, ia, closerDefinido, closerEscolha, closerIrressoluvel, evidencia } = opts;
+
+  const parteCloser = closerIrressoluvel
+    ? 'marcou (valor não reconhecido)'
+    : closerDefinido && closerEscolha !== null
+      ? `marcou "${ROTULO_VOTO_IA[closerEscolha]}"`
+      : 'não marcou';
+
+  const parteIa = ia === null ? 'IA não identificou' : `IA ouviu "${ROTULO_VOTO_IA[ia]}"`;
+
+  let status: string;
+  if (closerIrressoluvel) {
+    status = 'sem comparação';
+  } else if (ia === null) {
+    status = 'IA sem base';
+  } else {
+    const acao = decidirAcaoVoto(ia, closerDefinido ? closerEscolha : null);
+    status = acao === 'preencher' ? 'preencheu' : acao === 'manter' ? 'concordam' : 'diverge';
+  }
+
+  const sufixoEvidencia = evidencia !== null ? ` — ${evidencia}` : '';
+  return `Voto — ${candidato}: ${parteCloser} | ${parteIa} → ${status}${sufixoEvidencia}`;
+}
+
+/**
+ * Compõe a seção "Voto (IA × closer)" a partir das linhas montadas por
+ * `montarLinhaLogVoto` — `''` quando não há linhas (nada a anexar ao
+ * ANALISE_IA). Pura/determinística.
+ */
+export function montarSecaoLogVoto(linhas: string[]): string {
+  if (linhas.length === 0) return '';
+  return `\n\n— Voto (IA × closer) —\n${linhas.join('\n')}`;
 }
 
 function ehDiaUtil(data: Date): boolean {
