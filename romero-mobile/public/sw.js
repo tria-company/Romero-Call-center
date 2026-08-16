@@ -18,7 +18,7 @@
    ══════════════════════════════════════════════════════════════════════════ */
 
 /* Subir a versão invalida todos os caches antigos no `activate`. */
-const VERSAO = "central-animal-v7";
+const VERSAO = "central-animal-v8";
 const CACHE_SHELL = `${VERSAO}-shell`;
 const CACHE_ESTATICO = `${VERSAO}-static`;
 const CACHE_DINAMICO = `${VERSAO}-dyn`;
@@ -79,6 +79,9 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return; // login e afins sempre na rede
+  // Discador/admin (proxied pro Mastra) tem SW proprio em `/discador/sw.js`: o
+  // SW do painel nao pode interceptar a porta/assets/SW do discador.
+  if (url.pathname === "/discador" || url.pathname.startsWith("/discador/") || url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return;
 
   /* 1) Navegação — network-first */
   if (req.mode === "navigate") {
