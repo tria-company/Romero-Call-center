@@ -3,9 +3,8 @@
 import * as React from "react";
 import Link from "next/link";
 import { Search, X } from "lucide-react";
-// Só o helper PURO de iniciais — direto do schema, NÃO do barrel `@/lib/db`
-// (que arrasta o store localStorage). A Base agora vive fora do localStorage.
-import { iniciais } from "@/lib/db/schema";
+// Helper PURO de iniciais — fora de qualquer store/localStorage.
+import { iniciais } from "@/lib/leads-util";
 import { useLeadsReais } from "@/lib/leads-real";
 import { Autobox, Esqueleto, Vhead } from "./blocos";
 

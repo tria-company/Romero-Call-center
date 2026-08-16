@@ -1,9 +1,8 @@
 "use client";
 
 import * as React from "react";
-// Só o helper PURO de iniciais — direto do schema, NÃO do barrel `@/lib/db`
-// (que arrasta o store localStorage). A Fila agora vive fora do localStorage.
-import { iniciais } from "@/lib/db/schema";
+// Helper PURO de iniciais — fora de qualquer store/localStorage.
+import { iniciais } from "@/lib/leads-util";
 import type { ItemFilaReal } from "@/lib/discador-servidor";
 import { useFilaReal } from "@/lib/fila-real";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";

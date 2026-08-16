@@ -3,9 +3,8 @@
 import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-// Só o helper PURO de iniciais — direto do schema, NÃO do barrel `@/lib/db`
-// (que arrastaria o store localStorage para o bundle).
-import { iniciais } from "@/lib/db/schema";
+// Helper PURO de iniciais — fora de qualquer store/localStorage.
+import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { useLeadReal, salvarVotoReal, salvarAnotacaoReal } from "@/lib/leads-real";
 import type { VotoReal } from "@/lib/discador-servidor";

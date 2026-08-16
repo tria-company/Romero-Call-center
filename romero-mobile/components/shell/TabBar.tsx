@@ -4,7 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { DESTINOS, rotaAtiva } from "./navegacao";
-import { useFila } from "@/lib/db";
 import { Marca } from "@/components/brand/Marca";
 
 /**
@@ -60,10 +59,9 @@ function useBarraRecolhida(ativo: boolean): boolean {
 
 export function TabBar() {
   const pathname = usePathname();
-  // O selo da barra conta o que falta na fila do dia — é o número que decide
-  // se ainda há trabalho, e a razão de a aba existir.
-  const { total, feitas } = useFila();
-  const restante = total - feitas;
+  // Sem selo de contagem na aba Fila: a única fonte ao vivo é o backend do
+  // discador (useFilaReal), que não vale um fetch aqui no chrome. A contagem
+  // aparece dentro da própria tela de Fila.
   const trilhoRef = React.useRef<HTMLDivElement>(null);
   const [pill, setPill] = React.useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [rail, setRail] = React.useState(false);
@@ -191,7 +189,6 @@ export function TabBar() {
         {DESTINOS.map((d) => {
           const ativo = rotaAtiva(pathname, d);
           const Icone = d.icon;
-          const badge = d.href === "/fila" && restante > 0;
           return (
             <Link
               key={d.href}
@@ -228,26 +225,6 @@ export function TabBar() {
                 }}
               >
                 <Icone size={rail ? 17 : 19} strokeWidth={ativo ? 2.3 : 1.9} />
-                {/* No rail o selo vai no fim da linha (abaixo); sobre o ícone
-                    ele cobriria a primeira letra do rótulo. */}
-                {badge && !rail && (
-                  <span
-                    aria-label={`${restante} na fila`}
-                    className="ds-count"
-                    style={{
-                      position: "absolute",
-                      top: -6,
-                      left: 10,
-                      height: 16,
-                      minWidth: 16,
-                      fontSize: 10,
-                      padding: "0 4px",
-                      boxShadow: "0 0 0 2px var(--panel)",
-                    }}
-                  >
-                    {restante > 99 ? "99+" : restante}
-                  </span>
-                )}
               </span>
               {/* Recolhida, o rótulo colapsa em altura em vez de sumir de uma
                   vez: some junto com a barra encurtando, num movimento só. */}
@@ -266,15 +243,6 @@ export function TabBar() {
               >
                 {rail ? d.labelLongo : d.label}
               </span>
-              {badge && rail && (
-                <span
-                  aria-label={`${restante} na fila`}
-                  className="ds-count"
-                  style={{ marginLeft: "auto", height: 18, minWidth: 18, fontSize: 11 }}
-                >
-                  {restante > 99 ? "99+" : restante}
-                </span>
-              )}
             </Link>
           );
         })}

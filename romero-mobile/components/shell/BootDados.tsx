@@ -1,8 +1,5 @@
 "use client";
 
-import { useEffect } from "react";
-import { inicializar } from "@/lib/db";
-
 /** Nome do operador logado, gravado pelo login. */
 export function operadorAtual(): string {
   if (typeof window === "undefined") return "Equipe";
@@ -14,12 +11,11 @@ export function operadorAtual(): string {
 }
 
 /**
- * Semeia a base na primeira visita. Fica aqui (e não dentro de cada tela)
- * para que o custo da semente aconteça uma vez só, logo após a hidratação.
+ * Antes semeava a base local (store localStorage). Sem store — todo dado vem
+ * do backend do discador — não há mais o que inicializar. Fica como no-op para
+ * não mexer no ponto de montagem; pode ser removido quando o layout deixar de
+ * referenciá-lo.
  */
 export function BootDados() {
-  useEffect(() => {
-    inicializar();
-  }, []);
   return null;
 }
