@@ -1,111 +1,128 @@
 "use client";
 
 import * as React from "react";
-import { fmtDiaPorExtenso, saudacao } from "@/lib/format";
+import { CANDIDATOS, type CandidatoInfo } from "@/lib/candidatos-config";
+import { fmtDiaPorExtenso, fmtInt, saudacao } from "@/lib/format";
 import { operadorAtual } from "@/components/shell/BootDados";
 import { InstallBanner } from "@/components/shell/InstallPrompt";
 import { useFilaReal } from "@/lib/fila-real";
-import { useMetricasReais } from "@/lib/metricas-real";
-import { BlocoLista, Contador, Metrica, Skels, Vhead } from "./blocos";
+import { useNumerosCampanha } from "@/lib/numeros-campanha";
+import { Contador, Metrica, Vhead } from "./blocos";
+import { Foguete } from "./Foguete";
 
-/* TELA 01 · INÍCIO
-   Só tiles com fonte REAL: a fila de hoje (do discador) e a operação ao vivo
-   (métricas agregadas do call center). Sem números de campanha mocados
-   (Instagram, urnas, foguete, metas) — esses saíram. Depois dos tiles vem a
-   Central de Campanha, que chega por `children`.
+/* TELA 01 · INÍCIO (dashboard rico, u10 — SÓ dado real)
+   Faixa do Instagram (seguidores reais, config — sem integração automática),
+   as métricas de operação (cadastros/apoiadores/fila) do ClickUp ao vivo, e as
+   duas urnas com o foguete (votos confirmados vs meta). Nada de mock.
 
-   O `children` NÃO É ENFEITE: ele é o que permite a seção de campanha ser um
-   componente de SERVIDOR dentro desta tela, que é cliente. Importá-la aqui a
-   arrastaria para o cliente. Quem monta o par é `app/(app)/page.tsx`.
+   Votos/apoiadores contam no ESPELHO (Postgres rápido). Enquanto o espelho não
+   estiver backfillado (reload do PostgREST pendente), esses números aparecem
+   como "—" (honesto), não como zero enganoso. Cadastros e fila já são reais.
 
-   Por isso o `{children}` fica SEMPRE no último índice do `.view`, FORA de
-   qualquer condicional de carregamento: enquanto os tiles reais hidratam/pedem
-   os dados, só eles viram barras; a campanha já está desenhada embaixo e não
-   pisca junto (o "esqueleto eterno" que a versão antiga evitava). */
+   A Central de Campanha chega por `children` (componente de servidor). */
 
 export function Inicio({ children }: { children?: React.ReactNode }) {
   const [nome, setNome] = React.useState("");
   const relogio = useRelogio();
   const fila = useFilaReal();
+  const num = useNumerosCampanha();
 
   React.useEffect(() => setNome(operadorAtual()), []);
 
   return (
-    <div className="view" aria-busy={fila.carregando || undefined}>
+    <div className="view">
       <Vhead
         titulo={`${saudacao()}, ${nome || "equipe"}`}
         sub={fmtDiaPorExtenso()}
         live={relogio}
       />
 
-      {/* fila de hoje — contagem real do discador */}
-      <div className="mrow">
-        {fila.carregando ? (
-          <Skels alturas={[132]} />
-        ) : (
-          <Metrica
-            valor={<Contador valor={fila.itens.length} />}
-            label="Sua fila de hoje"
-            delta={fila.erro ? "não foi possível carregar" : undefined}
-            alerta={fila.erro}
-            href="/fila"
-            full
-          />
-        )}
+      {/* faixa do instagram — seguidores REAIS (config, você atualiza) */}
+      <div className="igrow">
+        {CANDIDATOS.map((c) => (
+          <div key={c.id} className={c.id === "romero" ? "ig r" : "ig a"}>
+            <div className="iga" style={{ backgroundImage: `url(${c.foto})` }} />
+            <div style={{ minWidth: 0 }}>
+              <div className="igh">{c.instagram}</div>
+              <div className="igv">
+                <Contador valor={c.seguidores} />
+              </div>
+              <div className="igd">seguidores</div>
+            </div>
+          </div>
+        ))}
       </div>
 
-      {/* operação ao vivo — métricas agregadas do call center */}
-      <OperacaoAoVivo />
+      {/* métricas — cadastros (ClickUp) · apoiadores (espelho) · fila (ao vivo) */}
+      <div className="mrow">
+        <Metrica
+          valor={num.cadastros === null ? "—" : <Contador valor={num.cadastros} />}
+          label="Cadastros na base"
+          href="/base"
+        />
+        <Metrica
+          valor={num.votosPopulados ? <Contador valor={num.apoiadores} /> : "—"}
+          label="Apoiadores ativos"
+          delta={num.votosPopulados ? undefined : "aguardando base rápida"}
+        />
+        <Metrica
+          valor={<Contador valor={fila.itens.length} />}
+          label="Sua fila de hoje"
+          delta={fila.erro ? "não foi possível carregar" : undefined}
+          alerta={fila.erro}
+          href="/fila"
+          full
+        />
+      </div>
 
       {/* convite de instalação — some quando dispensado ou já instalado */}
       <InstallBanner />
 
-      {/* a Central de Campanha, depois de tudo o que já existia.
-          FORA do condicional de propósito — ver o comentário acima. */}
+      {/* as duas urnas com o foguete — votos confirmados (real) vs meta */}
+      {CANDIDATOS.map((c) => (
+        <CardCandidato
+          key={c.id}
+          c={c}
+          apoio={c.id === "romero" ? num.votosRomero : num.votosAndressa}
+          populado={num.votosPopulados}
+        />
+      ))}
+
+      {/* a Central de Campanha (componente de servidor via children) */}
       {children}
     </div>
   );
 }
 
-/**
- * Bloco "Operação ao vivo": quatro números do backend do discador. Nunca quebra
- * a Home — some quando dá erro; mostra esqueleto discreto enquanto carrega ou
- * quando o operador não tem acesso à métrica (o resto da tela segue de pé).
- */
-function OperacaoAoVivo() {
-  const { metricas, semAcesso, erro } = useMetricasReais();
-
-  // Erro de rede/backend: o bloco some — a fila e a campanha continuam.
-  if (erro) return null;
-
+function CardCandidato({
+  c,
+  apoio,
+  populado,
+}: {
+  c: CandidatoInfo;
+  apoio: number;
+  populado: boolean;
+}) {
+  const pct = populado && c.meta > 0 ? (apoio / c.meta) * 100 : 0;
   return (
-    <BlocoLista titulo="Operação ao vivo">
-      {metricas === null || semAcesso ? (
-        <div className="mrow">
-          <Skels alturas={[92, 92, 92, 92]} />
+    <div className={c.id === "romero" ? "cand r" : "cand a"}>
+      <div className="cand-main">
+        <div className="who">
+          {c.emoji} {c.cargo}
         </div>
-      ) : (
-        <div className="mrow">
-          <Metrica
-            valor={<Contador valor={metricas.atendentesOnline} />}
-            label="Atendentes online"
-          />
-          <Metrica
-            valor={<Contador valor={metricas.chamadasAtivas} />}
-            label="Chamadas ativas"
-          />
-          <Metrica
-            valor={<Contador valor={metricas.profundidadeFila} />}
-            label="Profundidade da fila"
-          />
-          <Metrica
-            valor={<Contador valor={metricas.errosDia} />}
-            label="Erros hoje"
-            alerta={metricas.errosDia > 0}
-          />
+        <div className="nm">{c.nome}</div>
+        <div className="num">{c.numero}</div>
+        <div className="big">{populado ? <Contador valor={apoio} /> : "—"}</div>
+        <div className="goal">
+          apoio confirmado · rumo a <b>{fmtInt(c.meta)}</b>
+          {populado
+            ? ` · ${pct.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`
+            : ""}
         </div>
-      )}
-    </BlocoLista>
+        {!populado && <div className="today">votos aparecem quando a base rápida ligar</div>}
+      </div>
+      <Foguete pct={pct} />
+    </div>
   );
 }
 
