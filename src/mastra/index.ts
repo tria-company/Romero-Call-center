@@ -107,6 +107,7 @@ import {
   marcarEventoWebhook,
   listarLeadsEspelho,
   atualizarVotoEspelho,
+  contarVotosEspelho,
   type RecorteEspelho,
 } from './supabase';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
@@ -658,6 +659,29 @@ export const mastra = new Mastra({
             console.error('[discador] erro ao listar leads:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao carregar os leads' }, 502);
           }
+        },
+      },
+      {
+        // Números do DASHBOARD do gestor (u10): cadastros na base (task_count do
+        // ClickUp, barato) + votos confirmados/apoiadores (contagem no espelho).
+        // `populado:false` = espelho ainda não backfillado -> a UI mostra "—".
+        path: '/api/discador/painel-numeros',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
+          const [cadastros, votos] = await Promise.all([
+            contarLeadsDaLista().catch(() => null),
+            contarVotosEspelho().catch(() => ({ populado: false, romero: 0, andressa: 0, apoiadores: 0 })),
+          ]);
+          return c.json({
+            cadastros,
+            votosPopulados: votos.populado,
+            votosRomero: votos.romero,
+            votosAndressa: votos.andressa,
+            apoiadores: votos.apoiadores,
+          });
         },
       },
       {

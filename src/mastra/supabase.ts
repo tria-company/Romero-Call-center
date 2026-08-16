@@ -616,6 +616,53 @@ export async function listarLeadsEspelho(opts: {
 }
 
 /**
+ * Contagem de votos/apoiadores no ESPELHO (u10) — números do dashboard do gestor.
+ * Usa `count=exact` (Content-Range) por recorte: rápido no Postgres. `populado`
+ * distingue "espelho vazio/ausente" (backfill/reload do PostgREST ainda pendente ->
+ * mostrar "—", não zero enganoso) de "populado com 0 votos" (aí zero é verdade).
+ * Sem Supabase/tabela -> populado:false. Erro de rede NÃO lança (dashboard degrada).
+ */
+export async function contarVotosEspelho(): Promise<{
+  populado: boolean;
+  romero: number;
+  andressa: number;
+  apoiadores: number;
+}> {
+  const vazio = { populado: false, romero: 0, andressa: 0, apoiadores: 0 };
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return vazio;
+
+  const contar = async (filtro: string): Promise<number | null> => {
+    try {
+      const res = await fetchTimeout(
+        `${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?select=clickup_task_id${filtro ? '&' + filtro : ''}`,
+        { headers: { ...headers(), Prefer: 'count=exact', Range: '0-0' } },
+      );
+      if (!res.ok) return null; // 404 = tabela ainda fora do cache do PostgREST
+      const cr = res.headers.get('content-range') || ''; // "0-0/1234" ou "*/0"
+      const m = cr.match(/\/(\d+)$/);
+      return m ? Number(m[1]) : 0;
+    } catch {
+      return null;
+    }
+  };
+
+  const total = await contar('');
+  if (total === null || total === 0) return vazio; // vazio/ausente -> não populado
+
+  const [romero, andressa, apoiadores] = await Promise.all([
+    contar('confirmou_romero=eq.sim'),
+    contar('confirmou_andressa=eq.sim'),
+    contar('or=(confirmou_romero.eq.sim,confirmou_andressa.eq.sim)'),
+  ]);
+  return {
+    populado: true,
+    romero: romero ?? 0,
+    andressa: andressa ?? 0,
+    apoiadores: apoiadores ?? 0,
+  };
+}
+
+/**
  * Write-through do voto no espelho: atualiza `confirmou_romero`/`confirmou_andressa`
  * da linha (por `clickup_task_id`) pra o voto aparecer NA HORA na Base. No-op sem
  * Supabase; 404 (linha/tabela ausente) é tolerado. Erro de rede/HTTP LANÇA (WR-03) —
