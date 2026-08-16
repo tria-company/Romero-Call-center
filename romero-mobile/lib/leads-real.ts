@@ -2,7 +2,7 @@
 
 import * as React from "react";
 // `import type` OBRIGATÓRIO: importar como valor arrastaria o código de
-// credencial (`obterTokenDiscador`/`chamarDiscador`) para o bundle do cliente.
+// servidor (`chamarDiscador`) para o bundle do cliente.
 import type {
   LeadResumoReal,
   LeadFichaReal,
