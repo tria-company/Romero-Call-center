@@ -16,6 +16,10 @@
   function $(id){return document.getElementById(id);}
   function getToken(){return localStorage.getItem(tokenKey)||'';}
   function setToken(t){if(t){localStorage.setItem(tokenKey,t);}else{localStorage.removeItem(tokenKey);}}
+  // Handoff do app mobile (quick-260815-r3): o token e o taskId chegam no
+  // FRAGMENTO (#token=...&task=...) — fragmento nao vai ao servidor (nao aparece
+  // em log/Referer). Le so 'token' e 'task'; ignora o resto.
+  function lerParamsDoHash(){var h=(location.hash||'').replace(/^#/,'');var out={};if(!h){return out;}var ps=h.split('&');for(var i=0;i<ps.length;i++){var kv=ps[i].split('=');var k=kv[0];var v=kv.length>1?decodeURIComponent(kv[1]):'';if(k==='token'){out.token=v;}else if(k==='task'){out.task=v;}}return out;}
   function show(v){$('login-view').style.display=(v==='login')?'flex':'none';$('fila-view').style.display=(v==='fila')?'block':'none';}
   function api(path){
     var opts={headers:{}};var t=getToken();if(t){opts.headers['Authorization']='Bearer '+t;}
@@ -117,6 +121,10 @@
     carregarScriptDoPreview(item.taskId);
   }
   function fecharPreview(){$('preview-overlay').style.display='none';previewAtualItem=null;}
+  // Deep-link &task (quick-260815-r3): abre o preview da Ligacao exata pelo
+  // taskId vindo do handoff. Ownership validado no backend (GET /ligacao/:taskId,
+  // CR-01) — status !=200 (ex. 404 de outro operador) so nao abre, sem erro.
+  function abrirLigacaoPorTask(taskId){api('/api/discador/ligacao/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,data:d};});}).then(function(r){if(r.status===200&&r.data.ligacao){abrirPreview({taskId:taskId,nome:r.data.ligacao.nome,telefone:r.data.ligacao.telefone});}}).catch(function(){});}
   function carregarContextoDoPreview(taskId){
     var el=$('preview-contexto');if(!el){return;}
     api('/api/discador/contexto/'+encodeURIComponent(taskId)).then(function(res){
@@ -344,7 +352,12 @@
     document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&emChamada&&!wakeLock){pedirWakeLock();}});
     window.addEventListener('offline',function(){if(emChamada){setCallStatus('Sem internet — a ligação pode cair');}});
     window.addEventListener('online',function(){if(emChamada){setCallStatus('Conexão restabelecida');}});
-    if(getToken()){startFila();}else{show('login');}
+    // Handoff (quick-260815-r3): consome #token (auto-login) e &task (deep-link)
+    // e LIMPA o fragmento do historico (o token nao pode vazar em back/forward).
+    var hp=lerParamsDoHash();
+    if(hp.token){setToken(hp.token);}
+    try{history.replaceState(null,'',location.pathname+location.search);}catch(e){}
+    if(getToken()){startFila();if(hp.task){abrirLigacaoPorTask(hp.task);}}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){});}
   });
 })();
