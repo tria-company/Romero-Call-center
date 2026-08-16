@@ -21,7 +21,7 @@ import { adquirirToken } from './rate-limiter-clickup.ts';
 import { obterFilaCache, guardarFilaCache, obterLigacaoCache, guardarLigacaoCache } from './cache-fila.ts';
 import { mapearFilaLigacao, parseLeadDaTask } from './lote.ts';
 import type { ItemFila } from './lote.ts';
-import { mascararTelefone } from './mascarar.ts';
+import { mascararTelefone, scrubPii } from './mascarar.ts';
 import { registrar429ClickUp } from './metricas.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
@@ -1527,9 +1527,16 @@ export async function lerTimelineDaLigacao(
   const leadId = await resolverLeadPelaTask(task);
   if (!leadId) return [];
   const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
-  // Visão do gestor (quick 260815-r12): timeline crua — o dono autenticado pode
-  // ver tudo. LGPD: exibir ≠ logar; nenhum PII vai pra log aqui.
-  return await buscarLigacoesDoLead(leadId, telefone);
+  // Rota gated por DONO (path-fila, não-gestor): re-scrubar PII (quick 260815-rev3).
+  // Diferente da ficha do gestor (`lerLeadDetalhe`, CRUA), aqui um atendente comum
+  // pode consumir a timeline — `resumoAnalise`/`motivoFalha` são texto livre de IA
+  // e podem conter CPF/telefone. Mascarar os dois campos antes de devolver.
+  const timeline = await buscarLigacoesDoLead(leadId, telefone);
+  return timeline.map((item) => ({
+    ...item,
+    resumoAnalise: scrubPii(item.resumoAnalise),
+    motivoFalha: scrubPii(item.motivoFalha),
+  }));
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
