@@ -175,9 +175,11 @@ export const DISCADOR_LEAD_BROWSE = process.env.DISCADOR_LEAD_BROWSE || '';
 // URL do painel do gestor (romero-mobile). O discador é a PORTA de todos: o
 // login devolve `panelUrl` e a rota /api/discador/me também — o front redireciona
 // o GESTOR pra cá (já logado, token no fragmento) e mantém o ATENDENTE na fila.
-// Vazio DE PROPÓSITO (degradação graciosa): sem painel configurado, ninguém é
-// redirecionado — todos caem na fila (não quebra). Nunca logar o token no redirect.
-export const DISCADOR_PANEL_URL = process.env.DISCADOR_PANEL_URL || '';
+// Default = o painel em produção (Vercel, u10). O env sobrescreve (ex.: domínio
+// próprio ou local http://localhost:3011). Se ficar vazio, degrada gracioso: ninguém
+// é redirecionado — todos caem na fila (não quebra). Nunca logar o token no redirect.
+export const DISCADOR_PANEL_URL =
+  process.env.DISCADOR_PANEL_URL || 'https://romero-call-center.vercel.app';
 
 // ===== Lote diario priorizado (LOTE-01, Fase 02 Plano 01) =====
 //
