@@ -61,9 +61,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Painel é GESTOR-ONLY (U5c): atendente não cria sessão aqui — usa o discador.
+  if (dados.papel !== "gestor") {
+    return NextResponse.json(
+      { error: "O painel é só para gestores. Atendentes usam o discador para ligar." },
+      { status: 403 },
+    );
+  }
+
   const login = (dados.usuario || usuario).toLowerCase();
   const nome = dados.usuario || usuario;
-  const papel = dados.papel === "gestor" ? "gestor" : "atendente";
+  const papel = "gestor" as const;
 
   const jwt = await criarSessao(login, nome, papel, dados.token);
   if (!jwt) {
