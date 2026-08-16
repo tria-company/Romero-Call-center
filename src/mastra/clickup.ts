@@ -19,7 +19,7 @@ import {
 import { fetchTimeout } from './http.ts';
 import { adquirirToken } from './rate-limiter-clickup.ts';
 import { obterFilaCache, guardarFilaCache, obterLigacaoCache, guardarLigacaoCache } from './cache-fila.ts';
-import { mapearFilaLigacao } from './lote.ts';
+import { mapearFilaLigacao, parseLeadDaTask } from './lote.ts';
 import type { ItemFila } from './lote.ts';
 import { mascararTelefone } from './mascarar.ts';
 import { registrar429ClickUp } from './metricas.ts';
@@ -980,10 +980,25 @@ function formatarDataLigacao(epochMs: string): string {
   }).format(new Date(n));
 }
 
+/**
+ * Um item da timeline de ligações de um lead — shape EXATO que
+ * `buscarLigacoesDoLead` já produzia (Seção 4 do dossiê). Só nomeia o tipo pra
+ * reuso pelas rotas do app do Romero (B1); NÃO muda o comportamento em runtime.
+ * `data` já vem formatada em Brasília; `atendeu` é boolean; os demais são
+ * string possivelmente vazia. Sem CPF/telefone — só metadados da ligação.
+ */
+export type ItemTimeline = {
+  data: string;
+  atendeu: boolean;
+  aderencia: string;
+  resumoAnalise: string;
+  motivoFalha: string;
+};
+
 export async function buscarLigacoesDoLead(
   leadTaskId: string,
   telefone: string,
-): Promise<Array<{ data: string; atendeu: boolean; aderencia: string; resumoAnalise: string; motivoFalha: string }>> {
+): Promise<ItemTimeline[]> {
   const CAP = 10;
 
   // Pagina a Lista 02 inteira COM as fechadas (mesmo shape de lerTodasAsTasks).
@@ -1283,6 +1298,159 @@ export async function consolidarLead(leadTaskId: string, patch: PatchConsolidarL
  */
 export async function fecharLigacao(taskId: string): Promise<void> {
   await atualizarTask(taskId, { status: OPER_STATUS_FECHADO });
+}
+
+// ===== Lista 01 LEADS — rotas do app do Romero (B1, quick 260815-b1) =====
+//
+// Choke point (D-07/D-09) das novas rotas de leitura/escrita da Lista 01 pelo
+// app mobile do Romero: mascaramento de telefone, validação de lista (anti-IDOR
+// de escrita) e resolução de lead vivem AQUI — `index.ts` só faz o wiring HTTP.
+// LGPD: CPF NUNCA é lido/retornado por nenhum destes helpers; telefone só sai
+// mascarado no resumo (`listarLeadsResumo`) e em claro no detalhe
+// (`lerLeadDetalhe`, o operador precisa discar). Nunca loga telefone/CPF.
+
+/** Lê um custom field da Lista 01 por field-id (D-07), sempre como string ('' se ausente). */
+function valorCampoLead(task: TaskClickUp, fieldId: string): string {
+  const v = task.custom_fields?.find((c) => c.id === fieldId)?.value;
+  return v === null || v === undefined ? '' : String(v);
+}
+
+/**
+ * Valida (anti-IDOR de escrita/leitura de detalhe) que `leadTaskId` é uma task
+ * da Lista 01 LEADS — espelho de `validarLigacaoDoOperador` para a Lista 01.
+ * Sem assignee (a Lista 01 não é por-operador; a autorização single-tenant do
+ * Romero vive na ponte Next `exigirRomero`, B2, + no kill-switch
+ * `DISCADOR_LEAD_BROWSE` do backend). Sem este guard, `definirVotoLeadCampo`/
+ * `comentarTask` gravariam voto/comentário em QUALQUER task da workspace só
+ * trocando o `:leadTaskId` da URL. LANÇA quando a task não existe / não é da
+ * Lista 01 (o caller mapeia pra 404). Retorna a task já lida pra reaproveitar.
+ */
+export async function validarLeadDaLista01(leadTaskId: string): Promise<TaskClickUp> {
+  const task = await lerTask(leadTaskId);
+  if (!task) {
+    throw new Error(`[clickup] lead ${leadTaskId} nao encontrada`);
+  }
+  if (task.list?.id !== CLICKUP_LIST_LEADS) {
+    throw new Error(`[clickup] task ${leadTaskId} nao e um Lead da Lista 01`);
+  }
+  return task;
+}
+
+/** Resumo de um lead da Lista 01 para a listagem do app (telefone SEMPRE mascarado; NUNCA CPF). */
+export interface LeadResumo {
+  leadTaskId: string;
+  nome: string;
+  telefoneMascarado: string;
+  bairro: string;
+  cidade: string;
+  confirmouRomero: EscolhaVoto | null;
+  confirmouAndressa: EscolhaVoto | null;
+  militante: string;
+  /** true = nunca atendido (QTD_ATENDIMENTOS vazio/0). */
+  semContato: boolean;
+}
+
+/**
+ * Lista os leads da Lista 01 (resumo) para o app do Romero — telefone SEMPRE
+ * mascarado (`mascararTelefone`), NUNCA CPF. Filtra por `q` (substring
+ * case-insensitive no NOME) NO SERVIDOR (nunca devolve não-casados). Paginação
+ * por page opaca (`cursor = String(page+1)` a menos que `lastPage`); corta em
+ * `limit` (default 30, teto 100). `listarTasks` LANÇA em falha de infra (WR-03)
+ * — o caller mapeia pro 502. Sem log de PII (D-09/D-10).
+ */
+export async function listarLeadsResumo(
+  opts: { page?: number; q?: string; limit?: number } = {},
+): Promise<{ leads: LeadResumo[]; cursor?: string }> {
+  const page = opts.page ?? 0;
+  const limit = Math.min(Math.max(1, opts.limit ?? 30), 100);
+  const q = (opts.q ?? '').trim().toLowerCase();
+  const { tasks, lastPage } = await listarTasks(CLICKUP_LIST_LEADS, { page });
+  const leads: LeadResumo[] = [];
+  for (const task of tasks) {
+    const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
+    if (q && !parsed.nome.toLowerCase().includes(q)) continue;
+    const voto = resolverVotoAtualLead(task);
+    leads.push({
+      leadTaskId: task.id,
+      nome: parsed.nome,
+      telefoneMascarado: mascararTelefone(parsed.telefone),
+      bairro: valorCampoLead(task, CAMPOS_LEADS.BAIRRO),
+      cidade: valorCampoLead(task, CAMPOS_LEADS.CIDADE),
+      confirmouRomero: voto.romero.escolha,
+      confirmouAndressa: voto.andressa.escolha,
+      militante: valorCampoLead(task, CAMPOS_LEADS.MILITANTE),
+      semContato: !(Number(valorCampoLead(task, CAMPOS_LEADS.QTD_ATENDIMENTOS)) > 0),
+    });
+    if (leads.length >= limit) break;
+  }
+  return { leads, cursor: lastPage ? undefined : String(page + 1) };
+}
+
+/** Detalhe de um lead da Lista 01 para o app (telefone EM CLARO — operador disca; NUNCA CPF). */
+export interface LeadDetalhe {
+  leadTaskId: string;
+  nome: string;
+  telefone: string;
+  bairro: string;
+  cidade: string;
+  uf: string;
+  confirmouRomero: EscolhaVoto | null;
+  confirmouAndressa: EscolhaVoto | null;
+  militante: string;
+  observacao: string;
+  ultimoContato: string;
+  proximoContato: string;
+}
+
+/**
+ * Lê o detalhe completo de um lead da Lista 01 para o app do Romero: valida a
+ * lista (`validarLeadDaLista01`, anti-IDOR), monta `LeadDetalhe` (telefone EM
+ * CLARO pra discar, NUNCA CPF; datas legíveis em Brasília), o dossiê (descrição
+ * nativa da task — igual `lerContextoLead`) e a timeline de ligações. LANÇA em
+ * infra/autz (WR-03) — o caller mapeia 404/502.
+ */
+export async function lerLeadDetalhe(
+  leadTaskId: string,
+): Promise<{ lead: LeadDetalhe; dossie: string; timeline: ItemTimeline[] }> {
+  const task = await validarLeadDaLista01(leadTaskId);
+  const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
+  const voto = resolverVotoAtualLead(task);
+  const lead: LeadDetalhe = {
+    leadTaskId: task.id,
+    nome: parsed.nome,
+    telefone: parsed.telefone,
+    bairro: valorCampoLead(task, CAMPOS_LEADS.BAIRRO),
+    cidade: valorCampoLead(task, CAMPOS_LEADS.CIDADE),
+    uf: valorCampoLead(task, CAMPOS_LEADS.UF),
+    confirmouRomero: voto.romero.escolha,
+    confirmouAndressa: voto.andressa.escolha,
+    militante: valorCampoLead(task, CAMPOS_LEADS.MILITANTE),
+    observacao: valorCampoLead(task, CAMPOS_LEADS.OBSERVACAO_CONSOLIDADA),
+    ultimoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.ULTIMO_CONTATO)),
+    proximoContato: formatarDataLigacao(valorCampoLead(task, CAMPOS_LEADS.PROXIMO_CONTATO)),
+  };
+  const dossie = task.description ?? task.text_content ?? '';
+  const timeline = await buscarLigacoesDoLead(leadTaskId, parsed.telefone);
+  return { lead, dossie, timeline };
+}
+
+/**
+ * Lê a timeline de ligações do lead ligado a uma Ligação (Lista 02) do operador
+ * logado — espelho de `lerContextoLead`, IDOR-safe: `validarLigacaoDoOperador`
+ * garante que a Ligação é da Lista 02 E do próprio operador (`assigneeIdEsperado`,
+ * resolvido de `sess.usuario` via `assigneeDoOperador`), depois resolve o lead
+ * (LEAD_REL → fallback telefone) e devolve a timeline. Lead não resolvido → `[]`.
+ * LANÇA em infra/autz (WR-03) — o caller mapeia 404/502. Sem log de PII.
+ */
+export async function lerTimelineDaLigacao(
+  taskId: string,
+  assigneeIdEsperado: string,
+): Promise<ItemTimeline[]> {
+  const task = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  const leadId = await resolverLeadPelaTask(task);
+  if (!leadId) return [];
+  const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
+  return buscarLigacoesDoLead(leadId, telefone);
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
