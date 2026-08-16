@@ -836,8 +836,8 @@ export const mastra = new Mastra({
       // ============ API ADMIN (painel operacional) — Fase 10, OBS-01/02/D-02 ============
       {
         // Mesmo shape de /api/discador/config: verificarToken -> 401 sem
-        // sessao valida. Per D-02, qualquer sessao valida do discador e
-        // autorizada (sem novo nivel de acesso gestor/atendente). Retorna so
+        // sessao valida, 403 quando o papel nao e gestor (mesmo gate das rotas
+        // de lead — o painel de metricas e visao de gestor). Retorna so
         // o MetricasSnapshot agregado (numeros) + os thresholds configurados
         // (T-10-05-I1: NUNCA telefone/CPF/voto) — o front usa os thresholds
         // pra decidir accent/destructive sem hardcode.
@@ -846,6 +846,7 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const m = await lerMetricas();
           return c.json({
             ...m,
