@@ -163,8 +163,10 @@
     });
   }
   // Desfecho best-effort (RETENTION-BY-OUTCOME): idempotente por chamada
-  // (desfechoEnviado) — atendida so no peerAccept, recusou so no peerReject;
-  // nunca bloqueia a UI. Nao-atendida/hangup NAO chamam (task fica na fila).
+  // (desfechoEnviado, first-wins) — atendida so no peerAccept, recusou so no
+  // peerReject. Nao-atendida/hangup (quick-260815-w6h) votam 'nao_atendida':
+  // a task fica na fila mas e RE-ORDENADA (afunda pro fim) e o proximo lead
+  // aparece; se 'atendida'/'recusou' ja venceu o guard, e no-op (nao sobrescreve).
   function enviarDesfecho(resultado){
     if(desfechoEnviado||!chamadaTaskId){return;}
     desfechoEnviado=true;
@@ -260,14 +262,15 @@
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
     on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');setCallStatus('Em ligação');startTimer();});
     on(call,'peerReject',function(){enviarDesfecho('recusou');setCallStatus('Recusada');endCallUI();});
-    on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
-    on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
+    on(call,'unanswered',function(){enviarDesfecho('nao_atendida');setCallStatus('Não atendida');endCallUI();});
+    on(call,'ended',function(){enviarDesfecho('nao_atendida');setCallStatus('Encerrada');endCallUI();});
     on(call,'connectivityIssue',function(){setCallStatus('Problema de conexão');});
   }
   function hangup(){
     wantHangup=true; // se pressionado antes do startCall resolver, encerra ao resolver
     var c=currentCall;
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
+    enviarDesfecho('nao_atendida');// se ja atendeu, 'atendida' ja venceu o guard (no-op aqui)
     setCallStatus('Encerrada');endCallUI();
   }
   // Chamadas de 30-90 min: manter a tela acordada (no celular, apagar a tela
