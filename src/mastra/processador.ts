@@ -73,6 +73,8 @@ import {
   necessitaRevisao,
   extrairRetorno,
   decidirAcaoVoto,
+  montarLinhaLogVoto,
+  montarSecaoLogVoto,
   type VotoIA,
 } from './analise.ts';
 
@@ -144,6 +146,10 @@ async function consolidarEFecharLigacao(
     retorno: { necessario: boolean; data: Date | null };
     /** Voto extraído pela IA (só no caminho ATENDIDO/transcrito) — preenche vazio, valida preenchido; ausente = não mexe no voto. */
     voto?: { romero: VotoIA; andressa: VotoIA };
+    /** Evidência (trecho da transcrição) por candidato que embasou a leitura da IA — D2, quick-260815-oq4. Ausente = linha de log sem evidência. */
+    votoEvidencia?: { romero: string | null; andressa: string | null };
+    /** Texto BASE do ANALISE_IA (resumoAnalise cru, sem sinaisTexto) sobre o qual a seção "Voto (IA × closer)" é composta — D3, quick-260815-oq4. Ausente = não grava a seção (mantém o comportamento de hoje). */
+    analiseIaBase?: string;
   },
 ): Promise<void> {
   try {
@@ -161,6 +167,10 @@ async function consolidarEFecharLigacao(
       // entra no resumo consolidado, sem alterar o voto. Log-e-segue: nunca
       // trava a consolidação/fechamento (WR-03/D-P3-08). Sem PII em log.
       const divergenciasVoto: string[] = [];
+      // D1 (quick-260815-oq4): uma linha de log por candidato SEMPRE (não só
+      // na divergência) — montada aqui, gravada no ANALISE_IA da Ligação
+      // depois do loop (log-e-segue, nunca trava a consolidação/fechamento).
+      const linhasLog: string[] = [];
       if (opts.voto) {
         try {
           const votoAtual = resolverVotoAtualLead(lead);
@@ -171,9 +181,34 @@ async function consolidarEFecharLigacao(
           for (const { chave, nome } of candidatos) {
             const ia = opts.voto[chave];
             const { definido, escolha } = votoAtual[chave];
+            const evidencia = opts.votoEvidencia?.[chave] ?? null;
             // Campo com valor que não conseguimos traduzir: não arrisca
-            // sobrescrever nem gerar falso-positivo de divergência — pula.
-            if (definido && escolha === null) continue;
+            // sobrescrever nem gerar falso-positivo de divergência — registra
+            // honestamente no log ("valor não reconhecido") e segue pro
+            // próximo candidato SEM chamar decidirAcaoVoto.
+            if (definido && escolha === null) {
+              linhasLog.push(
+                montarLinhaLogVoto({
+                  candidato: nome,
+                  ia,
+                  closerDefinido: definido,
+                  closerEscolha: escolha,
+                  closerIrressoluvel: true,
+                  evidencia,
+                }),
+              );
+              continue;
+            }
+            linhasLog.push(
+              montarLinhaLogVoto({
+                candidato: nome,
+                ia,
+                closerDefinido: definido,
+                closerEscolha: escolha,
+                closerIrressoluvel: false,
+                evidencia,
+              }),
+            );
             const acao = decidirAcaoVoto(ia, definido ? escolha : null);
             if (acao === 'preencher') {
               await definirVotoLeadCampo(leadTaskId, chave, ia as EscolhaVoto);
@@ -184,6 +219,24 @@ async function consolidarEFecharLigacao(
           }
         } catch (e) {
           console.error('[processador] falha ao preencher/validar voto pela IA (segue):', e instanceof Error ? e.message : String(e));
+        }
+      }
+
+      // D1/D3 (quick-260815-oq4): compõe base + seção "Voto (IA × closer)" e
+      // grava no ANALISE_IA da Ligação — SEMPRE que houve leitura de voto
+      // (não só na divergência). Esta escrita SOBRESCREVE intencionalmente a
+      // base já gravada em processarRecordJob (~linha 490): aquela gravação
+      // continua sendo a rede de segurança pro caso do lead não resolver
+      // (leadTaskId ausente, bloco acima nem roda); quando o lead resolve, o
+      // resultado final do campo é base + seção de voto. Log-e-segue (WR-03/
+      // D-P3-08): nunca trava a consolidação/fechamento. LGPD: a evidência
+      // (trecho da transcrição) só vai pro ClickUp, nunca pro console.
+      if (linhasLog.length > 0 && opts.analiseIaBase !== undefined) {
+        try {
+          const analiseComLog = opts.analiseIaBase + montarSecaoLogVoto(linhasLog);
+          await setCustomField(taskLigacaoId, CAMPOS_LIGACOES.ANALISE_IA, analiseComLog);
+        } catch (e) {
+          console.error('[processador] falha ao gravar log de voto no ANALISE_IA (segue):', e instanceof Error ? e.message : String(e));
         }
       }
 
@@ -520,6 +573,8 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     aderencia: resultadoAnalise?.aderencia ?? null,
     retorno: retornoAnalise ?? { necessario: false, data: null },
     voto: resultadoAnalise?.voto,
+    votoEvidencia: resultadoAnalise?.votoEvidencia,
+    analiseIaBase: resultadoAnalise?.resumoAnalise,
   });
 
   // CR-02: limpa a entrada telefone->task apos consolidar/fechar — uma
