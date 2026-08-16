@@ -5,7 +5,8 @@
    `node:crypto`) porque o middleware roda no runtime Edge.
 
    Diferenças em relação ao original, de propósito:
-   · usuários vêm de LOGIN_USERS (vários), não de um par fixo no código;
+   · o login é contra o cadastro do discador (POST /api/discador/login); aqui só
+     se assina/valida o cookie de sessão (HMAC) — não há base de usuários local;
    · em produção, segredo fraco/ausente derruba a validação (fail-closed) em
      vez de cair silenciosamente num literal comitado.
    ══════════════════════════════════════════════════════════════════════════ */
@@ -113,42 +114,4 @@ export async function lerSessao(token: string | undefined | null): Promise<Sessa
   } catch {
     return null;
   }
-}
-
-/* ── Usuários ──────────────────────────────────────────────────────────── */
-
-export type UsuarioConfig = { usuario: string; senha: string; nome: string };
-
-/**
- * LOGIN_USERS = "email:senha:Nome, outro@x.com:senha2:Outro Nome"
- * (vírgula ou quebra de linha separam os registros)
- *
- * O identificador pode ser e-mail ou usuário simples — o split pega só os dois
- * primeiros ":", então o Nome de Exibição pode conter ":" à vontade.
- */
-export function usuariosConfigurados(): UsuarioConfig[] {
-  const cru = process.env.LOGIN_USERS?.trim();
-  if (!cru) return [];
-  return cru
-    .split(/[\n,]+/)
-    .map((linha) => linha.trim())
-    .filter(Boolean)
-    .map((linha) => {
-      const [usuario, senha, ...resto] = linha.split(":");
-      if (!usuario || !senha) return null;
-      return {
-        usuario: usuario.trim().toLowerCase(),
-        senha,
-        nome: resto.join(":").trim() || usuario.trim(),
-      };
-    })
-    .filter((x): x is UsuarioConfig => x !== null);
-}
-
-export function autenticar(usuario: string, senha: string): UsuarioConfig | null {
-  const alvo = usuario.trim().toLowerCase();
-  const achado = usuariosConfigurados().find(
-    (u) => u.usuario === alvo && iguaisSeguro(u.senha, senha),
-  );
-  return achado ?? null;
 }
