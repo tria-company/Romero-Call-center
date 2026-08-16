@@ -1431,7 +1431,11 @@ export async function listarLeadsResumo(
   opts: { page?: number; q?: string; limit?: number } = {},
 ): Promise<{ leads: LeadResumo[]; cursor?: string }> {
   const page = opts.page ?? 0;
-  const limit = Math.min(Math.max(1, opts.limit ?? 30), 100);
+  // O cursor avanca UMA pagina do ClickUp por vez (~100 tasks). Se o limit for
+  // menor que a pagina do ClickUp, os leads acima do limit sao PULADOS (o cursor
+  // ja pulou pra proxima pagina). Por isso o default = 100 (tamanho da pagina do
+  // ClickUp), pra nao perder nenhum lead. (u9)
+  const limit = Math.min(Math.max(1, opts.limit ?? 100), 100);
   const q = (opts.q ?? '').trim().toLowerCase();
   const { tasks, lastPage } = await listarTasks(CLICKUP_LIST_LEADS, { page });
   const leads: LeadResumo[] = [];
@@ -1454,6 +1458,26 @@ export async function listarLeadsResumo(
     if (leads.length >= limit) break;
   }
   return { leads, cursor: lastPage ? undefined : String(page + 1) };
+}
+
+/**
+ * Conta o total REAL de leads da Lista 01 (u9): o `task_count` que o ClickUp já
+ * mantém na lista — UMA chamada barata (GET /list/:id), sem paginar milhares de
+ * páginas. Usado só pro cabeçalho da Base mostrar o valor real (não o "100+").
+ * LANÇA em infra/HTTP (WR-03) — o caller trata como opcional.
+ */
+export async function contarLeadsDaLista(): Promise<number> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para contar leads');
+  }
+  const res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${CLICKUP_LIST_LEADS}`, {
+    headers: headers(),
+  });
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /list/${CLICKUP_LIST_LEADS} falhou (${res.status})`);
+  }
+  const data = await res.json();
+  return Number(data?.task_count) || 0;
 }
 
 /** Detalhe de um lead da Lista 01 para o app (visão do gestor: telefone e CPF em claro). */

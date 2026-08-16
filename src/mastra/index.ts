@@ -57,6 +57,7 @@ import {
   // Rotas da Lista 01 LEADS pro app do Romero (quick 260815-b1): choke point de
   // mascaramento/validacao/resolucao vive em clickup.ts — aqui so o wiring HTTP.
   listarLeadsResumo,
+  contarLeadsDaLista,
   lerLeadDetalhe,
   validarLeadDaLista01,
   lerTimelineDaLigacao,
@@ -607,6 +608,16 @@ export const mastra = new Mastra({
           const page = Number(cursor) || 0;
           try {
             const r = await listarLeadsResumo({ page, q, limit });
+            // Total REAL da base (task_count do ClickUp) so na 1a pagina SEM
+            // busca — 1 call barata; a UI usa pro cabecalho (nao o "100+"). u9
+            if (page === 0 && !q) {
+              try {
+                const total = await contarLeadsDaLista();
+                return c.json({ ...r, total });
+              } catch {
+                /* total e opcional — degrada pro count carregado */
+              }
+            }
             return c.json(r);
           } catch (e) {
             // LGPD: nunca logar PII — so a mensagem generica de erro.
