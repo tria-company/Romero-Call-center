@@ -64,12 +64,26 @@ function iguaisSeguro(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export type Sessao = { usuario: string; nome: string; exp: number };
+export type Papel = "gestor" | "atendente";
 
-export async function criarSessao(usuario: string, nome: string): Promise<string | null> {
+export type Sessao = {
+  usuario: string;
+  nome: string;
+  papel: Papel;
+  /** Token do discador do próprio usuário (Bearer emitido pelo backend). */
+  dToken: string;
+  exp: number;
+};
+
+export async function criarSessao(
+  usuario: string,
+  nome: string,
+  papel: Papel,
+  dToken: string,
+): Promise<string | null> {
   const chave = segredo();
   if (!chave) return null;
-  const dados: Sessao = { usuario, nome, exp: Date.now() + ttlMs() };
+  const dados: Sessao = { usuario, nome, papel, dToken, exp: Date.now() + ttlMs() };
   const payload = b64url(enc.encode(JSON.stringify(dados)));
   return `${payload}.${await hmac(payload, chave)}`;
 }
@@ -90,6 +104,10 @@ export async function lerSessao(token: string | undefined | null): Promise<Sessa
   try {
     const dados = JSON.parse(new TextDecoder().decode(deB64url(payload))) as Sessao;
     if (!dados?.usuario || typeof dados.exp !== "number") return null;
+    // Login unificado (U1+U2): sessões antigas sem papel/dToken são inválidas —
+    // força relogin contra o cadastro do discador.
+    if (dados.papel !== "gestor" && dados.papel !== "atendente") return null;
+    if (!dados.dToken) return null;
     if (dados.exp < Date.now()) return null;
     return dados;
   } catch {
