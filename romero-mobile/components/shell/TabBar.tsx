@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { DESTINOS, rotaAtiva } from "./navegacao";
+import { destinosVisiveis, rotaAtiva } from "./navegacao";
 import { Marca } from "@/components/brand/Marca";
 
 /**
@@ -57,8 +57,9 @@ function useBarraRecolhida(ativo: boolean): boolean {
   return recolhida;
 }
 
-export function TabBar() {
+export function TabBar({ papel }: { papel: "gestor" | "atendente" }) {
   const pathname = usePathname();
+  const destinos = destinosVisiveis(papel);
   // Sem selo de contagem na aba Fila: a única fonte ao vivo é o backend do
   // discador (useFilaReal), que não vale um fetch aqui no chrome. A contagem
   // aparece dentro da própria tela de Fila.
@@ -186,7 +187,7 @@ export function TabBar() {
           />
         )}
 
-        {DESTINOS.map((d) => {
+        {destinos.map((d) => {
           const ativo = rotaAtiva(pathname, d);
           const Icone = d.icon;
           return (

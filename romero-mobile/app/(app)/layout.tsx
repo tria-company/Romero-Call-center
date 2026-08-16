@@ -1,7 +1,9 @@
+import { cookies } from "next/headers";
 import { TabBar } from "@/components/shell/TabBar";
 import { PageTransition } from "@/components/shell/PageTransition";
 import { BootDados } from "@/components/shell/BootDados";
 import { RegisterSW } from "@/components/shell/RegisterSW";
+import { COOKIE_SESSAO, lerSessao } from "@/lib/sessao";
 
 /**
  * Casca do app autenticado.
@@ -16,14 +18,16 @@ import { RegisterSW } from "@/components/shell/RegisterSW";
  * registrado no /login, o precache pegava só redirecionamentos para o próprio
  * login — e o app não abria offline.
  */
-export default function AppLayout({ children }: { children: React.ReactNode }) {
+export default async function AppLayout({ children }: { children: React.ReactNode }) {
+  const sessao = await lerSessao((await cookies()).get(COOKIE_SESSAO)?.value);
+  const papel = sessao?.papel ?? "atendente";
   return (
     <>
       <BootDados />
       <main className="app-main">
         <PageTransition>{children}</PageTransition>
       </main>
-      <TabBar />
+      <TabBar papel={papel} />
       <RegisterSW />
     </>
   );

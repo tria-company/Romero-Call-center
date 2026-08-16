@@ -18,14 +18,21 @@ export type Destino = {
   icon: LucideIcon;
   /** true = ativo só na rota exata (a raiz casaria com tudo) */
   exato?: boolean;
+  /** true = aba visível só para o gestor (atendente não a vê) */
+  soGestor?: boolean;
 };
 
 export const DESTINOS: readonly Destino[] = [
-  { href: "/", label: "Início", labelLongo: "Início", icon: House, exato: true },
+  { href: "/", label: "Início", labelLongo: "Início", icon: House, exato: true, soGestor: true },
   { href: "/fila", label: "Fila", labelLongo: "Fila de hoje", icon: Target },
-  { href: "/base", label: "Base", labelLongo: "Base", icon: Users },
+  { href: "/base", label: "Base", labelLongo: "Base", icon: Users, soGestor: true },
   { href: "/perfil", label: "Perfil", labelLongo: "Perfil", icon: UserRound },
 ];
+
+/** Abas que o papel enxerga: atendente perde as marcadas `soGestor`. */
+export function destinosVisiveis(papel: "gestor" | "atendente"): Destino[] {
+  return DESTINOS.filter((d) => papel === "gestor" || !d.soGestor);
+}
 
 export function rotaAtiva(pathname: string, d: Destino): boolean {
   return d.exato ? pathname === d.href : pathname === d.href || pathname.startsWith(`${d.href}/`);
