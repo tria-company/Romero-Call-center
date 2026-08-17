@@ -10,7 +10,7 @@
   // discar (senão erro puro não abre a telinha de motivo); encerrandoUI guarda
   // o roteamento pós-chamada pra rodar UMA vez. motivo* = seleção da telinha.
   var discagemStart=0, tentativaDiscada=false, encerrandoUI=false;
-  var motivoTaskId=null, motivoCat=null, motivoTentSeg=0;
+  var motivoTaskId=null, motivoCat=null, motivoTentSeg=0, motivoResultado='nao_atendida';
   // Tom de chamada (WebAudio) — o Wavoip não entrega ringback ao navegador.
   var ringCtx=null, ringOsc=null, ringGain=null, ringTO=null;
   var previewAtualItem=null;
@@ -311,7 +311,11 @@
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
     on(call,'status',function(s){var k=mapEstado(s);if(k){setCallEstado(k);}});
     on(call,'peerAccept',function(active){limparTimeoutConectando();if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallEstado('atendida');startTimer();});
-    on(call,'peerReject',function(){enviarDesfecho('recusou');setCallEstado('recusada');endCallUI();});
+    // u23: reject (lead negou) também abre o motivo — como não-atendida, mas
+    // envia 'recusou' (terminal, tira da fila) via motivoResultado. Antes
+    // desfechava sozinho (fire-and-forget) e não pedia motivo; se dava 502 a
+    // recusa se perdia. Agora passa pelo enviarMotivo (mostra erro + reenvia).
+    on(call,'peerReject',function(){setCallEstado('recusada');motivoResultado='recusou';endCallUI();});
     // u13: não-atendida NÃO desfecha automático — endCallUI abre a telinha de
     // motivo (o operador escolhe a categoria e aí conclui/sai da fila).
     on(call,'unanswered',function(){setCallEstado('naoAtendida');endCallUI();});
@@ -338,7 +342,7 @@
     }catch(e){}
   }
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
-  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallEstado(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
+  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;motivoResultado='nao_atendida';chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallEstado(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
   // u22: estados visuais da chamada, em linguagem de atendente (não de tech):
   // PALAVRA grande + COR (verde=atendeu, azul=chamando, vermelho=não atendeu,
   // âmbar=aviso) + FRASE do que fazer. Centraliza a tradução do jargão do SDK.
@@ -392,7 +396,7 @@
   function enviarMotivo(){
     if(!motivoCat){$('motivo-err').textContent='Escolha um motivo.';return;}
     var btn=$('motivo-salvar');btn.disabled=true;btn.textContent='Concluindo...';
-    var obsEl=$('motivo-obs');var body={taskId:motivoTaskId,resultado:'nao_atendida',categoria:motivoCat,observacao:obsEl?obsEl.value.trim():'',duracao:motivoTentSeg};
+    var obsEl=$('motivo-obs');var body={taskId:motivoTaskId,resultado:motivoResultado,categoria:motivoCat,observacao:obsEl?obsEl.value.trim():'',duracao:motivoTentSeg};
     apiPost('/api/discador/desfecho',body).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,d:d};});}).then(function(r){
       btn.disabled=false;btn.textContent='Concluir ligação';
       if(r.status!==200){$('motivo-err').textContent='Não deu para concluir. Tente de novo.';return;}
