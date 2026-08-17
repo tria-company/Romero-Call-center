@@ -16,8 +16,17 @@ export const BASE_DISCADOR = (
 /**
  * Contrato de um item da fila real — espelha o `ItemFila` do backend do discador
  * (`src/mastra/lote.ts`). Consumido pela rota-ponte e (só como tipo) pelo hook.
+ * `leadTaskId` é o task-id REAL do lead (Lista 01) — a chave da ficha /base/:id;
+ * `idLead` é a chave de dedupe (id GHL na maioria) e NÃO abre ficha. Opcional
+ * porque um backend anterior ao campo pode ainda não mandá-lo.
  */
-export type ItemFilaReal = { taskId: string; nome: string; telefone: string; idLead: string };
+export type ItemFilaReal = {
+  taskId: string;
+  nome: string;
+  telefone: string;
+  idLead: string;
+  leadTaskId?: string;
+};
 
 /* ══════════════════════════════════════════════════════════════════════════
    PONTE GENÉRICA para as rotas de LEAD do backend do discador (B1).

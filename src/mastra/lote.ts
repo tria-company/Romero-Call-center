@@ -60,10 +60,13 @@ export interface PayloadCriarTask {
 }
 
 /** Mapa de field-ids da Lista 02 (LIGACOES) que `montarTaskLigacao`/`deveCriar` precisam
- * (subconjunto de CAMPOS_LIGACOES, injetado pelo caller — D-07). */
+ * (subconjunto de CAMPOS_LIGACOES, injetado pelo caller — D-07).
+ * `LEAD_REL` é opcional (só `mapearFilaLigacao` usa, p/ deep-link de ficha):
+ * quem monta payload de criação não precisa fornecê-lo. */
 export interface CamposLigacoesLike {
   ID_LEAD: string;
   TELEFONE: string;
+  LEAD_REL?: string;
 }
 
 /**
@@ -387,6 +390,11 @@ export interface ItemFila {
   nome: string;
   telefone: string;
   idLead: string;
+  /** Task-id REAL do lead na Lista 01 (LEAD_REL → fallback ID_LEAD com cara de
+   * task-id) — a chave que a ficha `/base/:id` do painel aceita. `idLead` NÃO
+   * serve para isso: é a chave de dedupe (id GHL na maioria). Opcional para
+   * caches serializados antes do campo existirem continuarem parseáveis. */
+  leadTaskId?: string;
 }
 
 function valorCampoTexto(task: TaskLike, fieldId: string): string {
@@ -410,7 +418,30 @@ export function mapearFilaLigacao(tasks: TaskLike[], campos: CamposLigacoesLike)
       nome: paraString(task.name) || telefone,
       telefone,
       idLead: valorCampoTexto(task, campos.ID_LEAD),
+      leadTaskId: leadTaskIdDe(task, campos),
     });
   }
   return itens;
+}
+
+/**
+ * Task-id do lead (Lista 01) para o deep-link de ficha do painel. Fonte
+ * primária: `LEAD_REL` (relationship nativo; valor lido = array de tasks
+ * vinculadas, cada uma com `id`) — é o que gerar-lote.mjs e a Ligação avulsa
+ * gravam. Fallback: `ID_LEAD` quando o valor tem cara de task-id do ClickUp
+ * (lead sem id GHL guarda o próprio task-id na chave de dedupe); ids GHL
+ * (~20 chars) ficam de fora — chave errada não abre ficha, então `''`.
+ */
+function leadTaskIdDe(task: TaskLike, campos: CamposLigacoesLike): string {
+  const rel = campos.LEAD_REL ? valorCampo(task, campos.LEAD_REL) : undefined;
+  if (Array.isArray(rel) && rel.length > 0) {
+    const primeiro: unknown = rel[0];
+    const id =
+      typeof primeiro === 'object' && primeiro !== null
+        ? paraString((primeiro as { id?: unknown }).id)
+        : paraString(primeiro);
+    if (id) return id;
+  }
+  const idLead = valorCampoTexto(task, campos.ID_LEAD);
+  return /^[a-z0-9]{6,15}$/i.test(idLead) ? idLead : '';
 }

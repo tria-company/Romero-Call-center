@@ -115,10 +115,11 @@ function CardFila({
   indice: number;
   onLigar: (item: ItemFilaReal) => void;
 }) {
-  // Toque no nome/avatar abre a ficha real (u12). Ligações sem lead vinculado
-  // (idLead vazio no ClickUp) ficam sem link — resta o botão Ligar.
-  const hrefFicha = item.idLead
-    ? `/base/${encodeURIComponent(item.idLead)}?de=fila`
+  // Toque no nome/avatar abre a ficha real (u12). A chave é `leadTaskId`
+  // (LEAD_REL — task-id real do lead), NUNCA `idLead` (chave de dedupe/GHL,
+  // que a ficha /base/:id não aceita). Sem vínculo → sem link, resta o Ligar.
+  const hrefFicha = item.leadTaskId
+    ? `/base/${encodeURIComponent(item.leadTaskId)}?de=fila`
     : null;
 
   const corpo = (
