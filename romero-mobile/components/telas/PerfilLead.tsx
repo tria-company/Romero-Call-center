@@ -5,14 +5,18 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 // Helper PURO de iniciais — fora de qualquer store/localStorage.
 import { iniciais } from "@/lib/leads-util";
-import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
+import { fmtTelefone, urlCallCenter, urlWhatsApp, vibrar } from "@/lib/contato";
 import { useLeadReal, salvarVotoReal, salvarAnotacaoReal, iniciarLigacaoReal } from "@/lib/leads-real";
 import type { VotoReal } from "@/lib/discador-servidor";
 import { Autobox, BlocoLista, Esqueleto, Voltar } from "./blocos";
 
 /* TELA 03 · FICHA DO LEAD (dado REAL)
    Fonte: `useLeadReal` (ClickUp via /api/mobile/lead/:id). Sem localStorage,
-   sem pets/atendimentos/solicitações/bloqueio-de-repetição/WhatsApp.
+   sem pets/atendimentos/solicitações/bloqueio-de-repetição.
+
+   Dois canais no rodapé (u12, pedido do gestor): WhatsApp (`wa.me` — abre a
+   conversa no aparelho e o áudio sai do número do PRÓPRIO operador, fora do
+   circuito gravado) e Ligar (call center — gravado/transcrito/analisado).
 
    Duas gravações de volta no ClickUp: o APOIO (voto Romero/Andressa) e a
    ANOTAÇÃO (comentário append-only). O telefone aparece em claro para o
@@ -79,6 +83,15 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
         window.open(url, "_blank");
       }
     });
+  }
+
+  // WhatsApp do PRÓPRIO aparelho (wa.me): abre a conversa com o lead e o áudio
+  // sai do número do operador. Síncrono no gesto do toque (pop-up blocker).
+  function abrirWhatsapp() {
+    const url = urlWhatsApp(ficha?.lead.telefone);
+    if (!url) return;
+    vibrar();
+    window.open(url, "_blank", "noopener");
   }
 
   async function votar(patch: { romero?: VotoReal; andressa?: VotoReal }) {
@@ -248,7 +261,17 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
 
       <div className="grow" />
 
+      {/* Canais lado a lado, como no mockup original: WhatsApp (áudio do número
+          do próprio operador) + Ligar (circuito gravado do call center). */}
       <div className="acts">
+        <button
+          type="button"
+          className="act wa"
+          onClick={abrirWhatsapp}
+          disabled={!urlWhatsApp(lead.telefone)}
+        >
+          <span className="ai">💬</span>WhatsApp
+        </button>
         <button type="button" className="act cl" onClick={ligar}>
           <span className="ai">📞</span>Ligar
         </button>

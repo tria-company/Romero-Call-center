@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 // Helper PURO de iniciais — fora de qualquer store/localStorage.
 import { iniciais } from "@/lib/leads-util";
 import type { ItemFilaReal } from "@/lib/discador-servidor";
@@ -12,7 +13,11 @@ import { Autobox, Esqueleto, Vhead } from "./blocos";
    Fonte: a fila REAL do discador (Ligações abertas do dia do Romero), servida
    por /api/mobile/fila. Sem localStorage, sem selo de motivo (o backend não
    manda), sem marcar-feito: quando a Ligação recebe desfecho ela some no
-   próximo fetch. O visual (Vhead, qbar, cards `.task`) segue o mockup. */
+   próximo fetch. O visual (Vhead, qbar, cards `.task`) segue o mockup.
+
+   u12 (pedido do gestor): tocar no NOME abre a ficha do lead (`/base/:id?de=fila`
+   — o voltar devolve pra cá), onde vivem o WhatsApp e o resto do contexto.
+   O botão "Ligar" continua como atalho direto pro call center. */
 
 export function Fila() {
   const { itens, carregando, erro, semMapeamento, recarregar } = useFilaReal();
@@ -110,13 +115,14 @@ function CardFila({
   indice: number;
   onLigar: (item: ItemFilaReal) => void;
 }) {
-  return (
-    <div
-      className="task"
-      style={{
-        animation: `reveal-up 380ms var(--ease-out-soft) ${Math.min(indice, 8) * 40}ms backwards`,
-      }}
-    >
+  // Toque no nome/avatar abre a ficha real (u12). Ligações sem lead vinculado
+  // (idLead vazio no ClickUp) ficam sem link — resta o botão Ligar.
+  const hrefFicha = item.idLead
+    ? `/base/${encodeURIComponent(item.idLead)}?de=fila`
+    : null;
+
+  const corpo = (
+    <>
       <div className="av">{iniciais(item.nome)}</div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -124,9 +130,36 @@ function CardFila({
         {/* Telefone exibido ao operador autorizado — nunca logar (LGPD). */}
         <div className="tm trunc">{fmtTelefone(item.telefone)}</div>
       </div>
+    </>
+  );
 
-      {/* Ação primária = Ligar. NÃO navega para /base/:id (fictício até Fase B).
-          TODO Fase B: abrir a ficha do lead. */}
+  return (
+    <div
+      className="task"
+      style={{
+        animation: `reveal-up 380ms var(--ease-out-soft) ${Math.min(indice, 8) * 40}ms backwards`,
+      }}
+    >
+      {hrefFicha ? (
+        <Link
+          href={hrefFicha}
+          aria-label={`Abrir a ficha de ${item.nome}`}
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: "inherit",
+            flex: 1,
+            minWidth: 0,
+            color: "inherit",
+            textDecoration: "none",
+          }}
+        >
+          {corpo}
+        </Link>
+      ) : (
+        corpo
+      )}
+
       <button type="button" onClick={() => onLigar(item)} className="go" aria-label="Ligar">
         Ligar
       </button>

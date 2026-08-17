@@ -1,9 +1,11 @@
 /* ══════════════════════════════════════════════════════════════════════════
-   CONTATO — `tel:`, formatação de telefone e link do call center.
+   CONTATO — `tel:`, formatação de telefone, WhatsApp (wa.me) e link do call
+   center.
 
-   O canal WhatsApp saiu (B4) junto com o store local; sobraram os utilitários
-   de telefone (E.164, máscara) e a URL autenticada do call center. Nada aqui
-   depende de tipos do store.
+   O canal WhatsApp saiu no B4 junto com o store local e VOLTOU no u12 como
+   link `wa.me` puro (pedido do gestor): abre a conversa no aplicativo do
+   PRÓPRIO aparelho, e o áudio sai do número do operador — fora do circuito
+   gravado do call center, por escolha. Nada aqui depende de tipos do store.
    ══════════════════════════════════════════════════════════════════════════ */
 
 const DDI_BR = "55";
@@ -61,6 +63,14 @@ export function fmtTelefone(bruto: string | undefined | null): string {
   if (local.length === 11) return `(${local.slice(0, 2)}) ${local.slice(2, 7)}-${local.slice(7)}`;
   if (local.length === 10) return `(${local.slice(0, 2)}) ${local.slice(2, 6)}-${local.slice(6)}`;
   return bruto ?? "—";
+}
+
+/** Conversa no WhatsApp do PRÓPRIO aparelho (`wa.me`) — o áudio sai do número
+ *  do operador. Sem texto pré-preenchido: o recado É o áudio. `null` quando o
+ *  telefone não vira E.164 (o botão desabilita em vez de abrir conversa errada). */
+export function urlWhatsApp(bruto: string | undefined | null): string | null {
+  const e164 = paraE164(bruto);
+  return e164 ? `https://wa.me/${e164}` : null;
 }
 
 /** SEM CHAMADOR desde que "Ligar" passou a abrir o call center. Fica porque
