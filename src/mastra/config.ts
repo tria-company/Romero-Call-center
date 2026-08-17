@@ -89,6 +89,22 @@ if (!WAVOIP_WEBHOOK_TOKEN) {
   );
 }
 
+// ===== API de GERENCIA da Wavoip (auto-descoberta de dispositivos + auto-webhook) =====
+//
+// Diferente do WAVOIP_DEVICE_TOKEN (por-device, client-side): aqui e o login da
+// CONTA (email+senha) que autentica na API REST `api.wavoip.com/v2` e devolve um
+// JWT. Com ele o painel de admin LISTA todos os aparelhos (nome/numero/status) e
+// GRAVA o webhook automaticamente nos conectados. Server-side only; NUNCA logar.
+export const WAVOIP_API_EMAIL = process.env.WAVOIP_API_EMAIL || '';
+export const WAVOIP_API_PASSWORD = process.env.WAVOIP_API_PASSWORD || '';
+export const WAVOIP_API_BASE = (process.env.WAVOIP_API_BASE || 'https://api.wavoip.com/v2').replace(/\/+$/, '');
+
+// URL PUBLICA do webhook de producao (pra onde a Wavoip manda os eventos). O
+// backend anexa `?token=WAVOIP_WEBHOOK_TOKEN` sozinho. Ex.:
+// "https://SEU-BACKEND/api/webhook/wavoip". Vazio = auto-webhook desabilitado
+// (o painel ainda LISTA os aparelhos, so nao grava webhook).
+export const WAVOIP_WEBHOOK_URL = (process.env.WAVOIP_WEBHOOK_URL || '').replace(/\/+$/, '');
+
 // Deepgram — transcricao da gravacao da call (a partir da record_url do evento
 // RECORD). A API pre-recorded aceita a URL direto (nao baixamos o audio).
 export const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || '';
@@ -161,6 +177,12 @@ if (!CLICKUP_API_TOKEN) {
 export const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
 export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
 
+// Workspace (team) cujos MEMBROS aparecem no painel de admin (dropdown do
+// vínculo clickup_member_id). Default = Gabinete 509 (9014971829, a mesma das
+// listas). O token enxerga várias workspaces; sem esse filtro o painel mistura
+// membros de todas elas. Vazio ('') = todas (comportamento antigo).
+export const CLICKUP_TEAM_ID = process.env.CLICKUP_TEAM_ID ?? '9014971829';
+
 // [SEM EFEITO desde quick 260815-r12] Antiga trava de env (kill-switch) da
 // Lista 01 LEADS (quick 260815-b1). A trava do backend agora é o gate de PAPEL
 // gestor (papelDoOperador em operadores.ts): as rotas de leads (GET/POST
@@ -179,7 +201,7 @@ export const DISCADOR_LEAD_BROWSE = process.env.DISCADOR_LEAD_BROWSE || '';
 // próprio ou local http://localhost:3011). Se ficar vazio, degrada gracioso: ninguém
 // é redirecionado — todos caem na fila (não quebra). Nunca logar o token no redirect.
 export const DISCADOR_PANEL_URL =
-  process.env.DISCADOR_PANEL_URL || 'https://romero-call-center.vercel.app';
+  process.env.DISCADOR_PANEL_URL ?? 'https://romero-call-center.vercel.app';
 
 // ===== Lote diario priorizado (LOTE-01, Fase 02 Plano 01) =====
 //

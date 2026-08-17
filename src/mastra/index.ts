@@ -28,6 +28,7 @@ import {
   removerUsuario,
   buscarUsuario,
   papelDoUsuario,
+  donoDoDevice,
 } from './usuarios.ts';
 
 // Lista de leads qualificados (GHL, pipeline COMERCIAL USI) — legado, ver nota
@@ -143,6 +144,16 @@ import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts'
 // pelo branch CALL do webhook pra derivar o deviceId de origem da chamada
 // (payload.caller, DD-07-10).
 import { resolverConfigDoUsuario, alocarDevice, liberarDevice, deviceIdPorNumero, inventarioPublico } from './dispositivos.ts';
+import {
+  listarDispositivosWavoip,
+  lerWebhookDispositivo,
+  configurarWebhookDispositivo,
+  webhookBate,
+  urlWebhookProd,
+  autoWebhookConfigurado,
+  wavoipApiConfigurada,
+  garantirInventarioWavoip,
+} from './wavoip-api.ts';
 
 /**
  * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
@@ -504,9 +515,13 @@ export const mastra = new Mastra({
       {
         path: '/api/discador/config',
         method: 'GET',
-        handler: (c) => {
+        handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          // Aquece o inventário vivo da Wavoip (TTL 60s) pra resolver o token do
+          // device dedicado do operador. Não-fatal: se a API cair, resolve pelo
+          // env/pool/global como sempre (garantirInventarioWavoip nunca lança).
+          await garantirInventarioWavoip();
           const cfg = resolverConfigDoUsuario(sess.usuario);
           return c.json(cfg);
         },
@@ -1004,6 +1019,12 @@ export const mastra = new Mastra({
           if (!usuario || !senha || (papel !== 'gestor' && papel !== 'atendente')) {
             return c.json({ erro: 'Campos usuario/senha/papel (gestor|atendente) sao obrigatorios' }, 400);
           }
+          // Exclusividade device↔operador: um número Wavoip é de UM operador só.
+          const deviceNovo = body.wavoip_device_id != null ? String(body.wavoip_device_id) : '';
+          if (deviceNovo) {
+            const dono = donoDoDevice(deviceNovo);
+            if (dono) return c.json({ erro: `Este número já está associado ao operador "${dono}". Libere lá primeiro.` }, 409);
+          }
           try {
             const criado = await criarUsuario({
               usuario,
@@ -1029,6 +1050,14 @@ export const mastra = new Mastra({
           if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
           const id = c.req.param('id');
           const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          // Exclusividade device↔operador (ignora o próprio operador em edição).
+          if ('wavoip_device_id' in body && body.wavoip_device_id != null) {
+            const deviceNovo = String(body.wavoip_device_id);
+            if (deviceNovo) {
+              const dono = donoDoDevice(deviceNovo, id);
+              if (dono) return c.json({ erro: `Este número já está associado ao operador "${dono}". Libere lá primeiro.` }, 409);
+            }
+          }
           try {
             if (typeof body.senha === 'string' && body.senha) {
               await atualizarSenha(id, body.senha);
@@ -1103,6 +1132,74 @@ export const mastra = new Mastra({
           } catch (e) {
             console.error('[admin] erro ao listar devices:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao carregar devices' }, 500);
+          }
+        },
+      },
+      {
+        // Auto-descoberta Wavoip: lista TODOS os aparelhos da conta (nome/numero/
+        // status) + se o webhook de prod já está gravado nos conectados. Só
+        // gestor. LGPD: número sai pro dono autenticado, nunca a log.
+        path: '/api/admin/wavoip/dispositivos',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          if (!wavoipApiConfigurada()) return c.json({ naoConfig: true, dispositivos: [], autoWebhook: false });
+          try {
+            const dispositivos = await listarDispositivosWavoip();
+            const alvo = urlWebhookProd();
+            // Checa o webhook SÓ dos conectados (read-only), com throttle leve.
+            if (alvo) {
+              for (const d of dispositivos) {
+                if (!d.conectado) continue;
+                try {
+                  d.webhookOk = webhookBate(await lerWebhookDispositivo(d.id), alvo);
+                } catch {
+                  d.webhookOk = null;
+                }
+                await new Promise((r) => setTimeout(r, 60));
+              }
+            }
+            return c.json({ dispositivos, autoWebhook: Boolean(alvo) });
+          } catch (e) {
+            console.error('[admin] erro ao listar dispositivos Wavoip:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao consultar a Wavoip' }, 502);
+          }
+        },
+      },
+      {
+        // Grava o webhook de prod nos aparelhos CONECTADOS que ainda não têm.
+        // Só gestor. Idempotente (só escreve o que falta). Nunca toca em
+        // não-conectado, então não mexe em reserva/hibernando.
+        path: '/api/admin/wavoip/webhooks/sincronizar',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          if (!autoWebhookConfigurado()) return c.json({ erro: 'WAVOIP_WEBHOOK_URL não configurada no servidor' }, 400);
+          try {
+            const dispositivos = await listarDispositivosWavoip();
+            const alvo = urlWebhookProd();
+            let gravados = 0;
+            let jaOk = 0;
+            let falhas = 0;
+            for (const d of dispositivos) {
+              if (!d.conectado) continue;
+              try {
+                if (webhookBate(await lerWebhookDispositivo(d.id), alvo)) jaOk++;
+                else {
+                  await configurarWebhookDispositivo(d.id);
+                  gravados++;
+                }
+              } catch {
+                falhas++;
+              }
+              await new Promise((r) => setTimeout(r, 80));
+            }
+            return c.json({ status: 'ok', gravados, jaOk, falhas });
+          } catch (e) {
+            console.error('[admin] erro ao sincronizar webhooks Wavoip:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao sincronizar webhooks' }, 502);
           }
         },
       },

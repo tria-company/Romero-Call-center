@@ -70,6 +70,25 @@ export const ADMIN_HTML = `<!doctype html>
   #login-view h2{text-align:center;margin:0 0 4px;font-weight:800;letter-spacing:-.02em}
   #login-view .sub{text-align:center;color:var(--dim-2);margin:0 0 12px;font-size:14px}
   .field{padding:14px 16px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.05);color:var(--ink);width:100%;font-size:clamp(16px,4vw,18px);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+  /* combobox de membro: clica -> abre todos; digita -> filtra */
+  .combo{position:relative}
+  .combo-lista{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:40;max-height:260px;overflow:auto;background:#0e3260;border:1px solid var(--line-2);border-radius:12px;box-shadow:0 12px 32px rgba(2,6,16,.55)}
+  .combo-item{padding:12px 14px;cursor:pointer;font-size:15px;color:var(--ink);border-bottom:1px solid var(--line)}
+  .combo-item:last-child{border-bottom:none}
+  .combo-item:hover,.combo-item.sel{background:rgba(61,139,255,.22)}
+  .combo-item.vazio{color:var(--dim)}
+  /* conexoes wavoip: cada aparelho + selo de status */
+  .wdev{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);margin-bottom:8px}
+  .wdot{width:11px;height:11px;border-radius:50%;flex:none}
+  .wdot.on{background:#2ec46b;box-shadow:0 0 8px rgba(46,196,107,.6)}
+  .wdot.mid{background:#f0b429}
+  .wdot.off{background:#ff5c5c}
+  .wdot.zzz{background:#6e86a8}
+  .wbadge{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+  .wbadge.ok{color:#2ec46b;border-color:rgba(46,196,107,.45)}
+  .wbadge.no{color:#f0b429;border-color:rgba(240,180,41,.45)}
+  .wowner{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid rgba(61,139,255,.45);color:#7fb0ff;white-space:nowrap;font-weight:700}
+  .wowner.livre{color:var(--dim-2);border-color:var(--line);font-weight:400}
   .field::placeholder{color:var(--dim-2)}
   .field:focus{outline:none;border-color:var(--romero)}
   .primary{background:linear-gradient(90deg,#3d8bff,#2bb6a0);color:#04122a;border:0;border-radius:15px;padding:14px;font-weight:800;width:100%;letter-spacing:.01em}
@@ -178,14 +197,20 @@ export const ADMIN_HTML = `<!doctype html>
             <option value="atendente">Atendente</option>
             <option value="gestor">Gestor</option>
           </select>
-          <select id="sel-membro" class="field">
-            <option value="">— carregando membros do ClickUp —</option>
-          </select>
+          <div id="wrap-membro"></div>
           <select id="sel-device" class="field">
             <option value="">— pool/global —</option>
           </select>
           <button type="submit" class="primary">Criar operador</button>
         </form>
+      </section>
+
+      <section id="wavoip-bloco" class="bloco" style="display:none">
+        <div class="bloco-title">Conexões Wavoip</div>
+        <p class="muted" style="margin:0">Aparelhos da conta Wavoip — status ao vivo e webhook de produção.</p>
+        <div id="wavoip-erro" class="erro-bloco" style="display:none"></div>
+        <div id="wavoip-acoes" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0"></div>
+        <div id="wavoip-lista"></div>
       </section>
     </main>
   </div>
@@ -286,8 +311,9 @@ export const ADMIN_APP_JS = `(function(){
     show('painel');
     iniciarPolling();
     carregarMembros();
-    carregarDevices();
     carregarUsuarios();
+    // Os devices (números Wavoip) do dropdown de operador são carregados ao
+    // abrir a aba Usuários (carregarWavoip) — junto com a seção Conexões.
   }
   document.addEventListener('visibilitychange',function(){
     if(document.visibilityState==='visible'){if(getToken()){iniciarPolling();}}
@@ -297,13 +323,82 @@ export const ADMIN_APP_JS = `(function(){
   // ============ Usuários (gestão de operadores — Fase 11) ============
   // Aba visível só para gestor: a autoridade real é o gate server-side em
   // /api/admin/usuarios* (403 pra atendente) — o hide aqui é so conveniencia de UI.
-  var MEMBROS=[], DEVICES=[];
+  var MEMBROS=[], DEVICES=[], comboMembroForm=null;
+  // Último snapshot dos aparelhos Wavoip (pra repintar a lista de Conexões
+  // quando a lista de operadores muda — os "donos" vêm de ULTIMA_LISTA).
+  var WAVOIP_DEVS=[], WAVOIP_AUTO=false;
   function esc(s){
     return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
   function mostrarTab(tab){
     $('painel-tab').style.display=(tab==='painel')?'block':'none';
     $('usuarios-bloco').style.display=(tab==='usuarios')?'flex':'none';
+    $('wavoip-bloco').style.display=(tab==='usuarios')?'flex':'none';
+  }
+  // ===== Conexões Wavoip (auto-descoberta + status + auto-webhook) =====
+  function statusWavoip(s){
+    s=String(s||'').toLowerCase();
+    if(s==='open'){return {dot:'on',txt:'Conectado'};}
+    if(s==='connecting'||s==='building'||s==='restarting'){return {dot:'mid',txt:'Conectando'};}
+    if(s==='hibernating'){return {dot:'zzz',txt:'Hibernando'};}
+    return {dot:'off',txt:'Caiu'};
+  }
+  function fmtNumWav(n){n=String(n||'');return n?('+'+n):'(sem número)';}
+  function carregarWavoip(){
+    var lista=$('wavoip-lista'),acoes=$('wavoip-acoes'),erro=$('wavoip-erro');
+    erro.style.display='none';acoes.innerHTML='';lista.innerHTML='<p class="muted">Carregando aparelhos…</p>';
+    api('/api/admin/wavoip/dispositivos').then(function(res){return res.json().then(function(j){return {status:res.status,j:j};});}).then(function(r){
+      if(r.status!==200){setDevices([]);lista.innerHTML='';erro.textContent='Não foi possível consultar a Wavoip agora.';erro.style.display='block';return;}
+      if(r.j.naoConfig){setDevices([]);lista.innerHTML='';erro.textContent='Conta Wavoip não configurada (WAVOIP_API_EMAIL / WAVOIP_API_PASSWORD no .env do servidor).';erro.style.display='block';return;}
+      var devs=r.j.dispositivos||[];
+      // Mesma lista alimenta o dropdown de device do operador (associação).
+      setDevices(devs.map(function(d){return {deviceId:String(d.id),numero:d.numero||'',nome:d.nome||'',status:d.status||'',conectado:!!d.conectado};}));
+      renderWavoip(devs,!!r.j.autoWebhook);
+    }).catch(function(e){if(e&&e.message==='401'){return;}setDevices([]);lista.innerHTML='';erro.textContent='Erro ao consultar a Wavoip.';erro.style.display='block';});
+  }
+  // Atualiza o inventário de devices e re-renderiza o que depende dele
+  // (dropdown do formulário + rótulo "Device" nos cards de operador).
+  function setDevices(lista){DEVICES=lista||[];preencherSelectDevices();renderUsuarios(ULTIMA_LISTA);}
+  function renderWavoip(devs,autoWebhook){WAVOIP_DEVS=devs||[];WAVOIP_AUTO=!!autoWebhook;pintarWavoip();}
+  function pintarWavoip(){
+    var devs=WAVOIP_DEVS,autoWebhook=WAVOIP_AUTO;
+    var lista=$('wavoip-lista'),acoes=$('wavoip-acoes');
+    if(!lista||!acoes){return;}
+    var conectados=devs.filter(function(d){return d.conectado;}).length;
+    var faltando=devs.filter(function(d){return d.conectado&&d.webhookOk===false;}).length;
+    acoes.innerHTML='';
+    var resumo=document.createElement('span');resumo.className='muted';resumo.textContent=conectados+' conectado(s) de '+devs.length+' aparelho(s)';acoes.appendChild(resumo);
+    if(!autoWebhook){var av=document.createElement('span');av.className='wbadge no';av.textContent='auto-webhook off (defina WAVOIP_WEBHOOK_URL)';acoes.appendChild(av);}
+    else if(faltando>0){var b=document.createElement('button');b.type='button';b.className='primary';b.textContent='Configurar webhook em '+faltando+' conectado(s)';b.onclick=function(){sincronizarWebhooks(b);};acoes.appendChild(b);}
+    else if(conectados>0){var ok=document.createElement('span');ok.className='wbadge ok';ok.textContent='webhook ok em todos os conectados';acoes.appendChild(ok);}
+    lista.innerHTML='';
+    devs.slice().sort(function(a,b){return (b.conectado?1:0)-(a.conectado?1:0);}).forEach(function(d){
+      var st=statusWavoip(d.status);
+      var row=document.createElement('div');row.className='wdev';
+      var dot=document.createElement('span');dot.className='wdot '+st.dot;row.appendChild(dot);
+      var info=document.createElement('div');info.style.flex='1';info.style.minWidth='0';
+      info.innerHTML='<div style="font-weight:700">'+esc(d.nome||'(sem nome)')+'</div><div class="muted" style="font-size:12px">'+esc(fmtNumWav(d.numero))+' · '+esc(st.txt)+'</div>';
+      row.appendChild(info);
+      // Quem está com este número (exclusividade device↔operador).
+      var dono=donoDevice(d.id);
+      var donoEl=document.createElement('span');donoEl.className='wowner'+(dono?'':' livre');donoEl.textContent=dono?('👤 '+dono):'livre';row.appendChild(donoEl);
+      if(d.conectado&&autoWebhook){
+        var wb=document.createElement('span');
+        if(d.webhookOk===true){wb.className='wbadge ok';wb.textContent='webhook ✓';}
+        else if(d.webhookOk===false){wb.className='wbadge no';wb.textContent='webhook faltando';}
+        else{wb.className='wbadge';wb.textContent='webhook ?';}
+        row.appendChild(wb);
+      }
+      lista.appendChild(row);
+    });
+    if(!devs.length){lista.innerHTML='<p class="muted">Nenhum aparelho na conta.</p>';}
+  }
+  function sincronizarWebhooks(btn){
+    btn.disabled=true;btn.textContent='Configurando…';$('wavoip-erro').style.display='none';
+    apiEnvio('/api/admin/wavoip/webhooks/sincronizar','POST',{}).then(function(r){
+      if(!r.ok){$('wavoip-erro').textContent=(r.j&&r.j.erro)||'Erro ao configurar webhooks.';$('wavoip-erro').style.display='block';btn.disabled=false;return;}
+      carregarWavoip();
+    }).catch(function(e){if(e&&e.message==='401'){return;}btn.disabled=false;$('wavoip-erro').textContent='Erro ao configurar webhooks.';$('wavoip-erro').style.display='block';});
   }
   function apiEnvio(path,method,body){
     var t=getToken();
@@ -320,39 +415,102 @@ export const ADMIN_APP_JS = `(function(){
     for(var i=0;i<MEMBROS.length;i++){if(String(MEMBROS[i].id)===String(id)){return MEMBROS[i].nome||MEMBROS[i].email||id;}}
     return id;
   }
+  // Combobox de membro: UM campo so. Clicar abre a lista com TODOS; digitar
+  // filtra; clicar num nome seleciona (o id fica em lerId). A selecao so muda
+  // ao clicar num item — digitar sem escolher volta ao valor anterior no blur.
+  // Vanilla, dentro de template literal: sem crase nem cifrao-chave.
+  function criarComboMembro(valorInicialId){
+    var wrap=document.createElement('div');wrap.className='combo';
+    var inp=document.createElement('input');inp.className='field';inp.autocomplete='off';
+    inp.placeholder='Clique para ver todos ou digite o nome...';
+    var lista=document.createElement('div');lista.className='combo-lista';lista.style.display='none';
+    wrap.appendChild(inp);wrap.appendChild(lista);
+    var selId=(valorInicialId!=null&&valorInicialId!=='')?String(valorInicialId):'';
+    if(selId){inp.value=nomeMembro(selId);}
+    var aberto=false;
+    function render(filtro){
+      lista.innerHTML='';
+      var q=(filtro||'').trim().toLowerCase();
+      var itens=[{id:'',rot:'— sem vínculo —',vazio:true}];
+      for(var i=0;i<MEMBROS.length;i++){var m=MEMBROS[i];var rot=(m.nome||m.email||m.id);
+        if(q&&String(rot).toLowerCase().indexOf(q)===-1&&String(m.email||'').toLowerCase().indexOf(q)===-1){continue;}
+        itens.push({id:String(m.id),rot:rot,vazio:false});}
+      if(itens.length===1&&q){itens.push({id:'',rot:'nenhum membro encontrado',vazio:true,nao:true});}
+      for(var k=0;k<itens.length;k++){(function(it){
+        var d=document.createElement('div');
+        d.className='combo-item'+(it.vazio?' vazio':'')+(it.id&&it.id===selId?' sel':'');
+        d.textContent=it.rot;
+        d.onmousedown=function(e){e.preventDefault();if(it.nao){return;}selId=it.id;inp.value=it.id?it.rot:'';fechar();};
+        lista.appendChild(d);
+      })(itens[k]);}
+    }
+    function abrir(filtro){aberto=true;render(filtro||'');lista.style.display='block';}
+    function fechar(){aberto=false;lista.style.display='none';}
+    inp.addEventListener('focus',function(){try{inp.select();}catch(e){}abrir('');});
+    inp.addEventListener('click',function(){if(!aberto){abrir('');}});
+    inp.addEventListener('input',function(){abrir(inp.value);});
+    inp.addEventListener('blur',function(){setTimeout(function(){fechar();inp.value=selId?nomeMembro(selId):'';},160);});
+    wrap.lerId=function(){return selId;};
+    return wrap;
+  }
+  // Rótulo legível de um device Wavoip: "Romero 01 · +55… · Conectado". O nome
+  // default da Wavoip ("Nome do dispositivo") é tratado como sem-nome.
+  function rotDevice(d){
+    var nome=(d.nome&&d.nome!=='Nome do dispositivo')?d.nome:'';
+    var num=d.numero?('+'+d.numero):'';
+    var base=nome||num||('device '+d.deviceId);
+    var partes=[base];
+    if(nome&&num){partes.push(num);}
+    partes.push(statusWavoip(d.status).txt);
+    return partes.join(' · ');
+  }
   function nomeDevice(id){
     if(!id){return '— pool/global —';}
-    for(var i=0;i<DEVICES.length;i++){if(String(DEVICES[i].deviceId)===String(id)){return DEVICES[i].numero||id;}}
-    return id;
+    for(var i=0;i<DEVICES.length;i++){if(String(DEVICES[i].deviceId)===String(id)){return rotDevice(DEVICES[i]);}}
+    return 'device '+id;
+  }
+  // Operador (usuario) já associado a este deviceId, ou '' se livre. Fonte:
+  // a lista de operadores (ULTIMA_LISTA), campo wavoip_device_id.
+  function donoDevice(id){
+    var alvo=String(id||'');if(!alvo){return '';}
+    for(var i=0;i<ULTIMA_LISTA.length;i++){if(String(ULTIMA_LISTA[i].wavoip_device_id||'')===alvo){return ULTIMA_LISTA[i].usuario;}}
+    return '';
+  }
+  // Monta as <option> de um <select> de device: pool/global + os aparelhos
+  // ASSOCIÁVEIS (com número), conectados primeiro. Esconde os já associados a
+  // OUTRO operador (exclusividade). Mantém sempre o já-selecionado (alvo), pra
+  // edição não perder o vínculo atual nem esconder o próprio número.
+  function montarOpcoesDevice(sel,valorAtual){
+    sel.innerHTML='';
+    var op0=document.createElement('option');op0.value='';op0.textContent='— pool/global —';sel.appendChild(op0);
+    var alvo=(valorAtual==null)?'':String(valorAtual);
+    var ordenados=DEVICES.slice().sort(function(a,b){return (b.conectado?1:0)-(a.conectado?1:0);});
+    for(var i=0;i<ordenados.length;i++){
+      var d=ordenados[i];var idd=String(d.deviceId);
+      if(idd===alvo){/* o próprio: sempre entra */}
+      else if(!d.numero){continue;}        // sem número: não é associável
+      else if(donoDevice(idd)){continue;}   // já é de outro operador: esconde
+      var op=document.createElement('option');op.value=d.deviceId;op.textContent=rotDevice(d);
+      if(idd===alvo){op.selected=true;}
+      sel.appendChild(op);
+    }
   }
   function preencherSelectMembros(valorAtual){
-    var sel=$('sel-membro');sel.innerHTML='';
-    var op0=document.createElement('option');op0.value='';op0.textContent='— selecione o membro ClickUp —';sel.appendChild(op0);
-    for(var i=0;i<MEMBROS.length;i++){
-      var m=MEMBROS[i];var op=document.createElement('option');op.value=m.id;op.textContent=(m.nome||m.email||m.id);
-      if(valorAtual!=null&&String(valorAtual)===String(m.id)){op.selected=true;}
-      sel.appendChild(op);
-    }
+    // (Re)cria o combobox do formulário no contêiner fixo. Chamado quando os
+    // membros carregam e ao resetar o form após criar um operador.
+    var wrap=$('wrap-membro');if(!wrap){return;}
+    wrap.innerHTML='';
+    comboMembroForm=criarComboMembro(valorAtual!=null?valorAtual:'');
+    wrap.appendChild(comboMembroForm);
   }
   function preencherSelectDevices(valorAtual){
-    var sel=$('sel-device');sel.innerHTML='';
-    var op0=document.createElement('option');op0.value='';op0.textContent='— pool/global —';sel.appendChild(op0);
-    for(var i=0;i<DEVICES.length;i++){
-      var d=DEVICES[i];var op=document.createElement('option');op.value=d.deviceId;op.textContent=(d.numero||d.deviceId);
-      if(valorAtual!=null&&String(valorAtual)===String(d.deviceId)){op.selected=true;}
-      sel.appendChild(op);
-    }
+    var sel=$('sel-device');if(!sel){return;}
+    montarOpcoesDevice(sel,valorAtual);
   }
   function carregarMembros(){
     api('/api/admin/clickup-membros').then(function(res){
       if(!res.ok){return;}
       return res.json().then(function(j){MEMBROS=j.membros||[];preencherSelectMembros();renderUsuarios(ULTIMA_LISTA);});
-    }).catch(function(){});
-  }
-  function carregarDevices(){
-    api('/api/admin/devices').then(function(res){
-      if(!res.ok){return;}
-      return res.json().then(function(j){DEVICES=j.devices||[];preencherSelectDevices();renderUsuarios(ULTIMA_LISTA);});
     }).catch(function(){});
   }
   var ULTIMA_LISTA=[];
@@ -361,7 +519,6 @@ export const ADMIN_APP_JS = `(function(){
     var lista=$('usuarios-lista');lista.innerHTML='';
     if(!ULTIMA_LISTA.length){
       var vazio=document.createElement('div');vazio.className='muted';vazio.textContent='Nenhum operador cadastrado ainda.';lista.appendChild(vazio);
-      return;
     }
     for(var i=0;i<ULTIMA_LISTA.length;i++){
       (function(u){
@@ -386,6 +543,10 @@ export const ADMIN_APP_JS = `(function(){
         lista.appendChild(card);
       })(ULTIMA_LISTA[i]);
     }
+    // Donos mudaram: repinta as Conexões (chip do operador) e re-filtra o
+    // dropdown do formulário preservando a seleção atual (exclusividade).
+    if(WAVOIP_DEVS.length){pintarWavoip();}
+    var selForm=$('sel-device');if(selForm){montarOpcoesDevice(selForm,selForm.value||'');}
   }
   function ativarEdicao(card,u){
     card.innerHTML='';
@@ -393,13 +554,10 @@ export const ADMIN_APP_JS = `(function(){
     var selPapel=document.createElement('select');selPapel.className='field';selPapel.style.marginTop='8px';
     ['atendente','gestor'].forEach(function(p){var op=document.createElement('option');op.value=p;op.textContent=(p==='gestor'?'Gestor':'Atendente');if(p===u.papel){op.selected=true;}selPapel.appendChild(op);});
     card.appendChild(selPapel);
-    var selMembro=document.createElement('select');selMembro.className='field';selMembro.style.marginTop='8px';
-    var opM0=document.createElement('option');opM0.value='';opM0.textContent='— sem vínculo —';selMembro.appendChild(opM0);
-    MEMBROS.forEach(function(m){var op=document.createElement('option');op.value=m.id;op.textContent=(m.nome||m.email||m.id);if(String(u.clickup_member_id)===String(m.id)){op.selected=true;}selMembro.appendChild(op);});
+    var selMembro=criarComboMembro(u.clickup_member_id);selMembro.style.marginTop='8px';
     card.appendChild(selMembro);
     var selDevice=document.createElement('select');selDevice.className='field';selDevice.style.marginTop='8px';
-    var opD0=document.createElement('option');opD0.value='';opD0.textContent='— pool/global —';selDevice.appendChild(opD0);
-    DEVICES.forEach(function(d){var op=document.createElement('option');op.value=d.deviceId;op.textContent=(d.numero||d.deviceId);if(String(u.wavoip_device_id)===String(d.deviceId)){op.selected=true;}selDevice.appendChild(op);});
+    montarOpcoesDevice(selDevice,u.wavoip_device_id);
     card.appendChild(selDevice);
     var linhaBtns=document.createElement('div');linhaBtns.style.cssText='display:flex;gap:8px;margin-top:10px';
     var btnSalvar=document.createElement('button');btnSalvar.type='button';btnSalvar.className='ghost';btnSalvar.textContent='Salvar';
@@ -407,7 +565,7 @@ export const ADMIN_APP_JS = `(function(){
     linhaBtns.appendChild(btnSalvar);linhaBtns.appendChild(btnCancelar);card.appendChild(linhaBtns);
     btnCancelar.onclick=function(){renderUsuarios(ULTIMA_LISTA);};
     btnSalvar.onclick=function(){
-      editarUsuario(u.id,{papel:selPapel.value,clickup_member_id:selMembro.value||null,wavoip_device_id:selDevice.value||null});
+      editarUsuario(u.id,{papel:selPapel.value,clickup_member_id:selMembro.lerId()||null,wavoip_device_id:selDevice.value||null});
     };
   }
   function mostrarErroUsuarios(msg){
@@ -430,7 +588,7 @@ export const ADMIN_APP_JS = `(function(){
     var usuario=$('f-usuario').value.trim();
     var senha=$('f-senha').value;
     var papel=$('f-papel').value;
-    var membro=$('sel-membro').value;
+    var membro=comboMembroForm?comboMembroForm.lerId():'';
     var device=$('sel-device').value;
     $('usuarios-erro').style.display='none';
     if(!usuario||!senha){mostrarErroUsuarios('Usuário e senha são obrigatórios.');return;}
@@ -465,7 +623,7 @@ export const ADMIN_APP_JS = `(function(){
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
     $('logout-btn').onclick=function(){pararPolling();setToken('');show('login');};
     $('nav-painel-btn').onclick=function(){mostrarTab('painel');};
-    $('nav-usuarios-btn').onclick=function(){mostrarTab('usuarios');carregarUsuarios();};
+    $('nav-usuarios-btn').onclick=function(){mostrarTab('usuarios');carregarUsuarios();carregarWavoip();};
     $('usuario-form').addEventListener('submit',criarUsuario);
     if(getToken()){iniciarPainel();}else{show('login');}
   });

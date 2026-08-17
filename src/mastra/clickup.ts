@@ -13,6 +13,7 @@ import {
   CLICKUP_API_TOKEN,
   CLICKUP_LIST_LEADS,
   CLICKUP_LIST_LIGACOES,
+  CLICKUP_TEAM_ID,
   OPER_STATUS_EM_PROCESSAMENTO,
   OPER_STATUS_FECHADO,
 } from './config.ts';
@@ -425,11 +426,14 @@ export interface MembroClickUp {
  * dedupa por `id`. Entrada ausente/malformada -> `[]` (NUNCA lança — molde
  * "PURA, nunca lança" para funções de mapeamento, D-03).
  */
-export function mapearMembrosTeam(data: unknown): MembroClickUp[] {
+export function mapearMembrosTeam(data: unknown, teamIdFiltro?: string): MembroClickUp[] {
   const teams = (data as { teams?: unknown })?.teams;
   if (!Array.isArray(teams)) return [];
   const vistos = new Map<string, MembroClickUp>();
   for (const team of teams) {
+    // Filtro por workspace (Gabinete 509): o token enxerga várias workspaces —
+    // com `teamIdFiltro` setado, só os membros DAQUELA entram. Vazio = todas.
+    if (teamIdFiltro && String((team as { id?: unknown })?.id) !== teamIdFiltro) continue;
     const members = (team as { members?: unknown })?.members;
     if (!Array.isArray(members)) continue;
     for (const membro of members) {
@@ -470,8 +474,8 @@ export async function listarMembrosWorkspace(): Promise<MembroClickUp[]> {
   if (!res.ok) {
     throw new Error(`[clickup] GET /team falhou (${res.status})`);
   }
-  const membros = mapearMembrosTeam(await res.json());
-  console.log(`[clickup] listarMembrosWorkspace: ${membros.length} membro(s)`);
+  const membros = mapearMembrosTeam(await res.json(), CLICKUP_TEAM_ID);
+  console.log(`[clickup] listarMembrosWorkspace: ${membros.length} membro(s)${CLICKUP_TEAM_ID ? ` (team ${CLICKUP_TEAM_ID})` : ''}`);
   return membros;
 }
 
@@ -713,13 +717,15 @@ export async function registrarDesfecho(
       });
       // Comentário é best-effort: não pode impedir a conclusão da Ligação.
       // LGPD: só a categoria + a frase do operador — nunca telefone/CPF.
-      const tempo =
-        motivo.duracao && motivo.duracao > 0
-          ? ` · tentativa de ${formatarDuracaoMinutos(motivo.duracao)}`
-          : '';
-      const obs = motivo.observacao ? `: ${motivo.observacao}` : '';
+      // Multi-linha, legível no ClickUp (u13b): classificação no cabeçalho, a
+      // frase do operador e o tempo de tentativa, cada um em sua linha.
+      const linhas = [`📵 Não atendida — ${motivo.categoria}`];
+      if (motivo.observacao) linhas.push(`📝 ${motivo.observacao}`);
+      if (motivo.duracao && motivo.duracao > 0) {
+        linhas.push(`⏱️ Tentou por ${formatarDuracaoCurta(motivo.duracao)}`);
+      }
       try {
-        await comentarTask(taskId, `Não atendida — ${motivo.categoria}${obs}${tempo}`);
+        await comentarTask(taskId, linhas.join('\n'));
       } catch (e) {
         console.warn(
           '[clickup] desfecho não-atendida: comentário falhou (segue concluindo):',
@@ -872,6 +878,22 @@ export function formatarDuracaoMinutos(segundos: number): string {
   const minutos = Math.floor(totalSegundos / 60);
   const restante = totalSegundos % 60;
   return `${minutos}min ${restante}s`;
+}
+
+/**
+ * Duração "humana" e curta pra LEITURA (comentário do ClickUp): abaixo de 1min
+ * mostra só "33s" (sem o "0min " que polui); a partir de 1min mostra "2min" ou
+ * "2min 5s" (omite os segundos quando são 0). Função PURA. Entrada não-finita
+ * ou <= 0 retorna "0s". Distinta de formatarDuracaoMinutos (essa é o formato
+ * FIXO "Xmin Ys" do campo DURACAO, que outros consumidores esperam).
+ */
+export function formatarDuracaoCurta(segundos: number): string {
+  if (!Number.isFinite(segundos) || segundos <= 0) return '0s';
+  const total = Math.round(segundos);
+  if (total < 60) return `${total}s`;
+  const minutos = Math.floor(total / 60);
+  const restante = total % 60;
+  return restante ? `${minutos}min ${restante}s` : `${minutos}min`;
 }
 
 /**

@@ -275,6 +275,23 @@ export function papelDoUsuario(usuario: string): 'gestor' | 'atendente' | null {
   return SNAPSHOT.get(u)?.papel ?? null;
 }
 
+/**
+ * Exclusividade device↔operador: `usuario` que já usa este `wavoip_device_id`,
+ * ignorando `excetoId` (o próprio operador em edição). null se o device está
+ * livre. Lê o snapshot em memória — a MESMA fonte que resolverConfigDoUsuario
+ * usa pro roteamento — então a checagem é consistente com quem realmente liga.
+ */
+export function donoDoDevice(deviceId: string, excetoId?: string): string | null {
+  const alvo = String(deviceId || '');
+  if (!alvo) return null;
+  for (const u of SNAPSHOT.values()) {
+    if (u.wavoip_device_id && String(u.wavoip_device_id) === alvo && u.id !== excetoId) {
+      return u.usuario;
+    }
+  }
+  return null;
+}
+
 // ===== Migração-seed idempotente env→Postgres (D-02/D-06/USER-05) =====
 
 export interface LinhaSeed {
