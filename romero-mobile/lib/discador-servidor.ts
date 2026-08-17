@@ -109,6 +109,9 @@ export type ItemTimelineReal = {
   aderencia: string;
   resumoAnalise: string;
   motivoFalha: string;
+  /** DURACAO formatada ("Xmin Ys"): atendida = tempo de conversa; não atendida
+   * = tempo de tentativa (u13). '' quando o ClickUp ainda não tem a duração. */
+  duracao: string;
 };
 
 /** Ficha completa de um lead (`GET /api/discador/lead/:id`). Visão do gestor: telefone e CPF em claro. */

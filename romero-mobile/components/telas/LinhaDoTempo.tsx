@@ -54,6 +54,13 @@ export function LinhaDoTempo({ id }: { id: string }) {
             >
               <div className="tld">{item.data}</div>
               <div className="tlt">{item.atendeu ? "Atendeu" : "Não atendeu"}</div>
+              {/* Duração: atendeu = tempo de conversa; não atendeu = tempo que
+                  o operador ficou tentando (u13). Só aparece quando há valor. */}
+              {item.duracao && (
+                <div className="tls">
+                  {item.atendeu ? "Conversa" : "Tentativa"}: {item.duracao}
+                </div>
+              )}
               {item.aderencia && (
                 <div className="tls">Aderência: {item.aderencia}</div>
               )}
