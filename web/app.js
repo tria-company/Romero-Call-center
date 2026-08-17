@@ -5,6 +5,12 @@
   var timerInt=null, timerStart=0;
   var wakeLock=null, emChamada=false, retornoPainel=null;
   var foiAtendida=false, desfechoEnviado=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
+  // u13: tentativa não-atendida — discagemStart marca quando começou a chamar
+  // (pra medir "quanto tempo tentou"); tentativaDiscada = a chamada chegou a
+  // discar (senão erro puro não abre a telinha de motivo); encerrandoUI guarda
+  // o roteamento pós-chamada pra rodar UMA vez. motivo* = seleção da telinha.
+  var discagemStart=0, tentativaDiscada=false, encerrandoUI=false;
+  var motivoTaskId=null, motivoCat=null, motivoTentSeg=0;
   var previewAtualItem=null;
   // Multi-device pool (DEVICE-02): deviceModo aprendido uma vez via /config
   // ('dedicado'|'pool'|'global'); leaseDeviceId guarda o device alocado na
@@ -114,7 +120,7 @@
   // MESMO ENDERECO (u7): se veio do painel (deep-link de gestor), volta pra FILA
   // DELE no painel — nao pra fila do discador. retornoPainel so e setado no init
   // quando /me diz gestor + panelUrl.
-  function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';if(retornoPainel){window.location.href=retornoPainel;return;}carregarFilaSilencioso();}
+  function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';$('motivo-overlay').style.display='none';if(retornoPainel){window.location.href=retornoPainel;return;}carregarFilaSilencioso();}
   // Preview do lead antes de ligar (T-m3v): abre ao tocar "Ligar" na fila,
   // mostra CONTEXTO (dossie nativo) + SCRIPT; a chamada so comeca ao tocar
   // "Ligar" DENTRO do preview (delega pra iniciarLigacao existente).
@@ -266,6 +272,7 @@
       currentCall=(r&&r.call)?r.call:r;
       if(wantHangup){ hangup(); return; }
       setCallStatus('Chamando...');
+      tentativaDiscada=true;discagemStart=Date.now();// u13: começou a tentativa
       wireCallEvents(currentCall);
     }).catch(function(e){
       if(e&&e.semDeviceLivre){setCallStatus('Sem número livre, tente em instantes');endCallUI();return;}
@@ -281,15 +288,18 @@
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
     on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');setCallStatus('Em ligação');startTimer();});
     on(call,'peerReject',function(){enviarDesfecho('recusou');setCallStatus('Recusada');endCallUI();});
-    on(call,'unanswered',function(){enviarDesfecho('nao_atendida');setCallStatus('Não atendida');endCallUI();});
-    on(call,'ended',function(){enviarDesfecho('nao_atendida');setCallStatus('Encerrada');endCallUI();});
+    // u13: não-atendida NÃO desfecha automático — endCallUI abre a telinha de
+    // motivo (o operador escolhe a categoria e aí conclui/sai da fila).
+    on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
+    on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
     on(call,'connectivityIssue',function(){setCallStatus('Problema de conexão');});
   }
   function hangup(){
     wantHangup=true; // se pressionado antes do startCall resolver, encerra ao resolver
     var c=currentCall;
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
-    enviarDesfecho('nao_atendida');// se ja atendeu, 'atendida' ja venceu o guard (no-op aqui)
+    // u13: NÃO desfecha aqui. Se atendeu, endCallUI vai pro voto; se só tentou,
+    // vai pra telinha de motivo. Se nem discou (erro), volta pra fila.
     setCallStatus('Encerrada');endCallUI();
   }
   // Chamadas de 30-90 min: manter a tela acordada (no celular, apagar a tela
@@ -304,10 +314,35 @@
     }catch(e){}
   }
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
-  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
+  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
-  function endCallUI(){liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;var atendida=foiAtendida,tid=chamadaTaskId;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else{voltarParaFila();}},1400);}
+  function endCallUI(){liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;if(encerrandoUI){return;}encerrandoUI=true;var atendida=foiAtendida,tid=chamadaTaskId,discou=tentativaDiscada;var tentSeg=(discou&&discagemStart)?Math.round((Date.now()-discagemStart)/1000):0;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else if(discou&&tid){mostrarMotivo(tid,tentSeg);}else{voltarParaFila();}},1400);}
+  // u13: telinha de motivo do não-atendimento. Mostra quanto tempo tentou e
+  // pede a categoria (+ frase opcional). Só ao concluir dispara o desfecho —
+  // que grava o motivo, o tempo de tentativa, comenta e fecha (sai da fila).
+  function fmtTentativa(seg){var m=Math.floor(seg/60),s=seg%60;return m+'min '+(s<10?'0':'')+s+'s';}
+  function mostrarMotivo(taskId,tentSeg){
+    motivoTaskId=taskId;motivoCat=null;motivoTentSeg=tentSeg||0;
+    $('motivo-nome').textContent=$('call-nome').textContent||'';
+    $('motivo-tentativa').textContent='Tentou por '+fmtTentativa(motivoTentSeg);
+    var obs=$('motivo-obs');if(obs){obs.value='';}
+    $('motivo-err').textContent='';
+    var btns=document.querySelectorAll('#motivo-cats .seg-btn');
+    for(var i=0;i<btns.length;i++){btns[i].classList.remove('sel');}
+    $('call-overlay').style.display='none';
+    $('motivo-overlay').style.display='flex';
+  }
+  function enviarMotivo(){
+    if(!motivoCat){$('motivo-err').textContent='Escolha um motivo.';return;}
+    var btn=$('motivo-salvar');btn.disabled=true;btn.textContent='Concluindo...';
+    var obsEl=$('motivo-obs');var body={taskId:motivoTaskId,resultado:'nao_atendida',categoria:motivoCat,observacao:obsEl?obsEl.value.trim():'',duracao:motivoTentSeg};
+    apiPost('/api/discador/desfecho',body).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,d:d};});}).then(function(r){
+      btn.disabled=false;btn.textContent='Concluir ligação';
+      if(r.status!==200){$('motivo-err').textContent='Não deu para concluir. Tente de novo.';return;}
+      $('motivo-overlay').style.display='none';voltarParaFila();
+    }).catch(function(e){btn.disabled=false;btn.textContent='Concluir ligação';if(e&&e.message==='401'){return;}$('motivo-err').textContent='Não deu para concluir. Tente de novo.';});
+  }
   // Pos-ligacao (SO quando ATENDIDA): pergunta a confirmacao de voto dos
   // candidatos ainda nao preenchidos no lead (Lista 01) e grava. Se o lead ja
   // tem os dois definidos, ou nao ha lead resolvido, so fecha a overlay da
@@ -357,6 +392,10 @@
     if(vo){vo.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var grp=b.parentNode;var cand=grp.getAttribute('data-cand');var all=grp.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');votoSel[cand]=b.getAttribute('data-v');});}
     $('voto-salvar').onclick=salvarVoto;
     $('voto-pular').onclick=voltarParaFila;
+    // u13: seleção de motivo (chips) + concluir a não-atendida.
+    var mc=$('motivo-cats');
+    if(mc){mc.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var all=mc.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');motivoCat=b.getAttribute('data-cat');$('motivo-err').textContent='';});}
+    var ms=$('motivo-salvar');if(ms){ms.onclick=enviarMotivo;}
     // Chamadas longas: evitar perder a ligacao por refresh/fechar/logout sem querer
     // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
     window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});
