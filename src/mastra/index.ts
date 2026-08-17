@@ -464,8 +464,21 @@ export const mastra = new Mastra({
           if (resultado !== 'atendida' && resultado !== 'recusou' && resultado !== 'nao_atendida') {
             return c.json({ erro: 'resultado inválido' }, 400);
           }
+          // u13: motivo do não-atendimento anotado pelo operador (categoria +
+          // frase + segundos de tentativa). Limites defensivos; ausente quando
+          // o cliente não manda (mantém compat). LGPD: nada disso vai a log.
+          const categoria = body.categoria ? String(body.categoria).slice(0, 60) : '';
+          const motivo = categoria
+            ? {
+                categoria,
+                observacao: body.observacao ? String(body.observacao).slice(0, 500) : undefined,
+                duracao: Number.isFinite(Number(body.duracao))
+                  ? Math.max(0, Math.round(Number(body.duracao)))
+                  : undefined,
+              }
+            : undefined;
           try {
-            await registrarDesfecho(taskId, assignee, resultado);
+            await registrarDesfecho(taskId, assignee, resultado, motivo);
             // Espelha no cache do OPERADOR a saida da fila — a MESMA eviction
             // que saiu do /ligando (D-04/D-03, belt-and-suspenders). Ambas
             // no-op sem Redis (SC5) e nunca lancam — fica fora do caminho

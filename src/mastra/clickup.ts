@@ -676,10 +676,22 @@ export type ResultadoDesfecho = 'atendida' | 'recusou' | 'nao_atendida';
  * pode desfechar a Ligação de outro operador. Erros de infra/HTTP ou de
  * autorização LANÇAM (WR-03) — nunca mascarados como sucesso.
  */
+/** Motivo do não-atendimento anotado pelo operador (u13). Presente só quando o
+ * operador preenche a telinha de motivo ao desligar sem o lead atender. */
+export interface MotivoNaoAtendida {
+  /** Categoria fixa (contável em relatório): "Não atende", "Caixa postal"… */
+  categoria: string;
+  /** Frase livre opcional do operador. */
+  observacao?: string;
+  /** Segundos que o operador ficou tentando (discagem → desligar). */
+  duracao?: number;
+}
+
 export async function registrarDesfecho(
   taskId: string,
   assigneeIdEsperado: string,
   resultado: ResultadoDesfecho,
+  motivo?: MotivoNaoAtendida,
 ): Promise<void> {
   await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
   if (resultado === 'atendida') {
@@ -689,8 +701,34 @@ export async function registrarDesfecho(
     return;
   }
   if (resultado === 'nao_atendida') {
-    // Não fecha, não muda status — só carimba a última tentativa. A task
-    // continua na fila; buscarFilaLigacoes a reordena pro fim.
+    // u13: com motivo do operador → CONCLUI (grava categoria em MOTIVO_FALHA,
+    // o tempo de tentativa em DURACAO, comenta e fecha — sai da fila). Sem
+    // motivo (cliente legado) → comportamento antigo: só carimba a última
+    // tentativa e a task PERMANECE na fila (buscarFilaLigacoes a reordena).
+    if (motivo?.categoria) {
+      await gravarMetadadosLigacao(taskId, {
+        atendeu: false,
+        motivoFalha: motivo.categoria,
+        duracao: motivo.duracao,
+      });
+      // Comentário é best-effort: não pode impedir a conclusão da Ligação.
+      // LGPD: só a categoria + a frase do operador — nunca telefone/CPF.
+      const tempo =
+        motivo.duracao && motivo.duracao > 0
+          ? ` · tentativa de ${formatarDuracaoMinutos(motivo.duracao)}`
+          : '';
+      const obs = motivo.observacao ? `: ${motivo.observacao}` : '';
+      try {
+        await comentarTask(taskId, `Não atendida — ${motivo.categoria}${obs}${tempo}`);
+      } catch (e) {
+        console.warn(
+          '[clickup] desfecho não-atendida: comentário falhou (segue concluindo):',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+      await fecharLigacao(taskId);
+      return;
+    }
     await setCustomField(taskId, CAMPOS_LIGACOES.INICIO, Date.now());
     return;
   }
@@ -1046,6 +1084,9 @@ export type ItemTimeline = {
   aderencia: string;
   resumoAnalise: string;
   motivoFalha: string;
+  /** DURACAO já formatada ("Xmin Ys"). Atendida = tempo de conversa; não
+   * atendida = tempo que o operador ficou tentando (u13). '' quando ausente. */
+  duracao: string;
 };
 
 export async function buscarLigacoesDoLead(
@@ -1090,6 +1131,7 @@ export async function buscarLigacoesDoLead(
     aderencia: paraString(campo(task, CAMPOS_LIGACOES.ADERENCIA_SCRIPT)),
     resumoAnalise: paraString(campo(task, CAMPOS_LIGACOES.ANALISE_IA)),
     motivoFalha: paraString(campo(task, CAMPOS_LIGACOES.MOTIVO_FALHA)),
+    duracao: paraString(campo(task, CAMPOS_LIGACOES.DURACAO)),
   }));
 
   // Ordena por data (INICIO, epoch ms) DESC — mais recente primeiro; ausentes
