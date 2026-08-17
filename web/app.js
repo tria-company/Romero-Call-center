@@ -76,7 +76,7 @@
   function renderFila(itens){
     if(!itens||!itens.length){
       $('fila-contador').textContent='';
-      mostrarStatus('Sem ligações na sua fila hoje.');
+      mostrarStatus('Você está em dia! Sem ligações na fila agora.');
       return;
     }
     $('fila-status').style.display='none';
@@ -84,6 +84,9 @@
     var lista=$('fila-lista');
     lista.textContent='';
     lista.style.display='block';
+    // u22: dica pro atendente leigo saber o que fazer na fila.
+    var hint=document.createElement('div');hint.className='fila-hint';hint.textContent='Toque em Ligar para começar o atendimento.';
+    lista.appendChild(hint);
     lista.appendChild(criarItemFila(itens[0]));
   }
   function criarItemFila(item){
@@ -261,7 +264,7 @@
     return '';
   }
   function iniciarLigacao(lead){
-    openCall(lead,'Pedindo microfone...');
+    openCall(lead,'preparando');
     prepararAudio();// desbloqueia o áudio DENTRO do gesto do toque (iOS)
     tocarChamando();// tom já começa aqui (no gesto) — mais confiável p/ autoplay
     // iOS: o prompt de microfone SO aparece se getUserMedia rodar DENTRO do
@@ -272,7 +275,7 @@
     catch (e) { mic = Promise.reject(e); }
     mic.then(function(stream){
       try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
-      setCallStatus('Conectando...');
+      setCallEstado('chamando');
       return garantirWavoip();
     }).then(function(w){
       // D-P3-01/DEVICE-03: reporta a task ativa ao backend (grava
@@ -284,33 +287,36 @@
       apiPost('/api/discador/ligando',{taskId:lead.taskId,deviceId:deviceIdCorrente()}).catch(function(){});
       return w.startCall({ to: lead.telefone });
     }).then(function(r){
-      if(r && r.err){ setCallStatus('Erro: '+((r.err&&r.err.message)?r.err.message:'falha ao iniciar')); endCallUI(); return; }
+      if(r && r.err){ setCallEstado('erro'); endCallUI(); return; }
       currentCall=(r&&r.call)?r.call:r;
       if(wantHangup){ hangup(); return; }
-      setCallStatus('Chamando...');
+      setCallEstado('chamando');
       tentativaDiscada=true;discagemStart=Date.now();// u13: começou a tentativa
       iniciarTimeoutConectando();// #1: teto de 90s sem atender
       tocarChamando();// reforça o tom (já iniciado no gesto) agora que discou
       wireCallEvents(currentCall);
     }).catch(function(e){
-      if(e&&e.semDeviceLivre){setCallStatus('Sem número livre, tente em instantes');endCallUI();return;}
+      if(e&&e.semDeviceLivre){setCallEstado('erro','Sem número livre agora. Tente de novo em instantes.');endCallUI();return;}
       var neg=(e&&(e.name==='NotAllowedError'||e.name==='SecurityError'));
-      setCallStatus(neg?'Permita o microfone pra ligar':('Falha: '+((e&&e.message)?e.message:'erro')));
+      if(neg){setCallEstado('microfone');}else{setCallEstado('erro');}
       endCallUI();
     });
   }
   function on(call,ev,fn){try{if(call&&call.on){call.on(ev,fn);}}catch(e){}}
-  function mapStatus(s){var m={CALLING:'Chamando...',RINGING:'Tocando...',ACTIVE:'Em ligação',ACCEPT:'Em ligação',ENDED:'Encerrada',NOT_ANSWERED:'Não atendida',UNANSWERED:'Não atendida',REJECTED:'Recusada'};return m[String(s).toUpperCase()]||String(s||'');}
+  // u22: mapeia o status técnico do SDK pro ESTADO visual do atendente (palavra
+  // grande + cor + frase-guia). CALLING/RINGING viram "chamando" (o leigo não
+  // precisa distinguir); ACTIVE/ACCEPT = "atendida" (verde, fale agora).
+  function mapEstado(s){var m={CALLING:'chamando',RINGING:'chamando',ACTIVE:'atendida',ACCEPT:'atendida',ENDED:'encerrada',NOT_ANSWERED:'naoAtendida',UNANSWERED:'naoAtendida',REJECTED:'recusada'};return m[String(s).toUpperCase()]||'';}
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
-    on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(active){limparTimeoutConectando();if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallStatus('Em ligação');startTimer();});
-    on(call,'peerReject',function(){enviarDesfecho('recusou');setCallStatus('Recusada');endCallUI();});
+    on(call,'status',function(s){var k=mapEstado(s);if(k){setCallEstado(k);}});
+    on(call,'peerAccept',function(active){limparTimeoutConectando();if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallEstado('atendida');startTimer();});
+    on(call,'peerReject',function(){enviarDesfecho('recusou');setCallEstado('recusada');endCallUI();});
     // u13: não-atendida NÃO desfecha automático — endCallUI abre a telinha de
     // motivo (o operador escolhe a categoria e aí conclui/sai da fila).
-    on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
-    on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
-    on(call,'connectivityIssue',function(){setCallStatus('Problema de conexão');});
+    on(call,'unanswered',function(){setCallEstado('naoAtendida');endCallUI();});
+    on(call,'ended',function(){setCallEstado('encerrada');endCallUI();});
+    on(call,'connectivityIssue',function(){setCallEstado('problema');});
   }
   function hangup(){
     wantHangup=true; // se pressionado antes do startCall resolver, encerra ao resolver
@@ -318,7 +324,7 @@
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
     // u13: NÃO desfecha aqui. Se atendeu, endCallUI vai pro voto; se só tentou,
     // vai pra telinha de motivo. Se nem discou (erro), volta pra fila.
-    setCallStatus('Encerrada');endCallUI();
+    setCallEstado('encerrada');endCallUI();
   }
   // Chamadas de 30-90 min: manter a tela acordada (no celular, apagar a tela
   // suspende o WebRTC e derruba o audio). Wake Lock e best-effort e cai sozinho
@@ -332,11 +338,32 @@
     }catch(e){}
   }
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
-  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
-  function setCallStatus(s){$('call-status').textContent=s;}
+  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallEstado(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
+  // u22: estados visuais da chamada, em linguagem de atendente (não de tech):
+  // PALAVRA grande + COR (verde=atendeu, azul=chamando, vermelho=não atendeu,
+  // âmbar=aviso) + FRASE do que fazer. Centraliza a tradução do jargão do SDK.
+  var CALL_ESTADOS={
+    preparando:{txt:'Preparando…',cor:'azul',guia:'Se o celular pedir, toque em Permitir o microfone'},
+    chamando:{txt:'Chamando…',cor:'azul',guia:'Aguarde — o cliente vai atender'},
+    atendida:{txt:'No telefone',cor:'verde',guia:'Fale agora! Siga o roteiro abaixo'},
+    naoAtendida:{txt:'Não atendeu',cor:'vermelho',guia:'Sem resposta. Vamos registrar o motivo.'},
+    recusada:{txt:'Não atendeu',cor:'vermelho',guia:'Sem resposta. Vamos registrar o motivo.'},
+    encerrada:{txt:'Ligação encerrada',cor:'cinza',guia:''},
+    problema:{txt:'Conexão instável',cor:'ambar',guia:'A ligação pode cair'},
+    microfone:{txt:'Libere o microfone',cor:'ambar',guia:'Toque em Permitir e tente de novo'},
+    erro:{txt:'Não deu certo',cor:'ambar',guia:'Toque em Desligar e tente de novo'}
+  };
+  // 2º arg (detalhe) troca a frase-guia quando precisa (ex.: erro específico).
+  function setCallEstado(key,detalhe){
+    var e=CALL_ESTADOS[key],box=$('call-estado'),st=$('call-status'),gu=$('call-guia');
+    if(!e){if(st){st.textContent=String(key||'');}if(gu){gu.textContent=detalhe||'';}return;}
+    if(st){st.textContent=e.txt;}
+    if(gu){gu.textContent=(detalhe!=null&&detalhe!=='')?detalhe:e.guia;}
+    if(box){box.className='est-'+e.cor;}
+  }
   // #1: se ficar 90s sem ser atendida, a chamada encerra sozinha e cai na telinha
   // de motivo (o operador é obrigado a escolher o motivo pra seguir pro próximo).
-  function iniciarTimeoutConectando(){limparTimeoutConectando();conectandoTO=setTimeout(function(){if(!foiAtendida){setCallStatus('Não atendida (90s)');hangup();}},90000);}
+  function iniciarTimeoutConectando(){limparTimeoutConectando();conectandoTO=setTimeout(function(){if(!foiAtendida){setCallEstado('naoAtendida');hangup();}},90000);}
   function limparTimeoutConectando(){if(conectandoTO){clearTimeout(conectandoTO);conectandoTO=null;}}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
   // Tom de chamada ("chamando..."): o Wavoip não entrega ringback ao navegador,
@@ -429,8 +456,8 @@
     // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
     window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});
     document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&emChamada&&!wakeLock){pedirWakeLock();}});
-    window.addEventListener('offline',function(){if(emChamada){setCallStatus('Sem internet — a ligação pode cair');}});
-    window.addEventListener('online',function(){if(emChamada){setCallStatus('Conexão restabelecida');}});
+    window.addEventListener('offline',function(){if(emChamada){setCallEstado('problema','Sem internet — a ligação pode cair');}});
+    window.addEventListener('online',function(){if(emChamada){setCallEstado(foiAtendida?'atendida':'chamando');}});
     // Handoff (quick-260815-r3): consome #token (auto-login) e &task (deep-link)
     // e LIMPA o fragmento do historico (o token nao pode vazar em back/forward).
     var hp=lerParamsDoHash();

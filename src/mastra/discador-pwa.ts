@@ -20,10 +20,10 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE discador-v32: SW passou a ser NETWORK-FIRST (online sempre pega a última
-// versão; offline cai no cache) — evita servir app.js velho a cada mudança e
-// acaba com o "reload não atualiza". quick-260817-u20
-export const DISCADOR_SW_JS = `const CACHE='discador-v32';
+// CACHE discador-v33: SW NETWORK-FIRST (online sempre pega a última versão;
+// offline cai no cache) — evita servir app.js velho a cada mudança e acaba com
+// o "reload não atualiza". quick-260817-u20 · bump v33 (nova UI da chamada) u22
+export const DISCADOR_SW_JS = `const CACHE='discador-v33';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -119,14 +119,38 @@ export const DISCADOR_HTML = `<!doctype html>
   .primary{background:var(--accent);color:var(--bg);border:0;border-radius:14px;padding:14px;font-weight:800;width:100%;box-shadow:0 8px 22px rgba(61,139,255,.38);letter-spacing:.01em}
   .primary:active{transform:translateY(1px);box-shadow:0 4px 14px rgba(61,139,255,.32)}
   .err{color:#ff9b9b;text-align:center;font-size:14px;min-height:18px}
+  /* dicas curtas pro atendente leigo (u22) */
+  .fila-hint{color:var(--dim);font-size:13.5px;line-height:1.45;text-align:center;margin:2px 4px 14px}
+  .preview-hint{color:var(--dim);font-size:13.5px;line-height:1.45;text-align:center;max-width:340px;margin:0 auto 16px}
+  .voto-hint{color:var(--dim);font-size:13.5px;line-height:1.45;margin:-10px 0 18px}
   /* call overlay — leve durante chamadas longas (avatar no meio, controles embaixo) */
   #call-overlay{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:space-between;z-index:20;padding:calc(52px + env(safe-area-inset-top)) 24px calc(40px + env(safe-area-inset-bottom));background:radial-gradient(600px 500px at 50% 12%,rgba(61,139,255,.22),transparent 60%),radial-gradient(520px 460px at 50% 108%,rgba(61,139,255,.12),transparent 60%),linear-gradient(180deg,#0a2547,#04122a)}
   .call-top{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
   #call-avatar{width:124px;height:124px;border-radius:50%;background:linear-gradient(150deg,#3d8bff,#1b4fa0);display:flex;align-items:center;justify-content:center;font-size:46px;font-weight:800;color:#fff;margin-bottom:22px;box-shadow:0 14px 40px rgba(61,139,255,.4);text-transform:uppercase}
   #call-nome{font-size:26px;font-weight:800;text-transform:capitalize;letter-spacing:-.01em}
   #call-tel{color:var(--dim);margin-top:2px}
-  #call-status{margin-top:16px;font-size:14px;color:var(--romero);letter-spacing:.14em;text-transform:uppercase}
-  #call-timer{font-size:20px;font-variant-numeric:tabular-nums;margin-top:6px;color:var(--dim)}
+  /* estado da chamada (u22): palavra grande + cor + frase-guia — leigo-friendly */
+  #call-estado{margin-top:18px;display:inline-flex;align-items:center;gap:9px;padding:9px 18px 9px 15px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid var(--line);transition:background .25s ease,border-color .25s ease}
+  #call-dot{width:10px;height:10px;border-radius:50%;background:var(--dim);flex:0 0 auto;transition:background .25s ease}
+  #call-status{font-size:19px;font-weight:800;letter-spacing:-.01em;color:var(--ink)}
+  #call-guia{margin-top:12px;font-size:15px;line-height:1.45;color:var(--dim);max-width:300px;min-height:21px}
+  #call-timer{font-size:20px;font-variant-numeric:tabular-nums;margin-top:14px;color:var(--dim-2)}
+  #call-estado.est-azul{background:rgba(61,139,255,.15);border-color:rgba(61,139,255,.42)}
+  #call-estado.est-azul #call-status{color:#a8ccff}
+  #call-estado.est-azul #call-dot{background:#3d8bff;animation:call-dot-pulse 1.1s ease-in-out infinite}
+  #call-estado.est-verde{background:rgba(43,182,160,.16);border-color:rgba(43,182,160,.5)}
+  #call-estado.est-verde #call-status{color:#57ddc8}
+  #call-estado.est-verde #call-dot{background:#2bd6bd;box-shadow:0 0 9px rgba(43,214,189,.85)}
+  #call-estado.est-vermelho{background:rgba(255,107,107,.14);border-color:rgba(255,107,107,.45)}
+  #call-estado.est-vermelho #call-status{color:#ffb3b3}
+  #call-estado.est-vermelho #call-dot{background:#ff6b6b}
+  #call-estado.est-ambar{background:rgba(245,196,61,.14);border-color:rgba(245,196,61,.42)}
+  #call-estado.est-ambar #call-status{color:#f5d074}
+  #call-estado.est-ambar #call-dot{background:#f5c43d}
+  #call-estado.est-cinza{background:rgba(255,255,255,.05);border-color:var(--line)}
+  #call-estado.est-cinza #call-status{color:var(--dim)}
+  #call-estado.est-cinza #call-dot{background:var(--dim)}
+  @keyframes call-dot-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.55)}}
   /* script visivel durante a chamada (SCRIPT-IN-OVERLAY) — rolavel p/ chamadas de 30-90min */
   .call-script{width:100%;max-width:560px;max-height:38vh;overflow:auto;white-space:pre-wrap;background:rgba(255,255,255,.03);border:1px solid var(--line);border-left:3px solid var(--romero);border-radius:11px;padding:12px 14px;font-size:14px;line-height:1.55;margin:8px 0;flex:0 0 auto}
   .call-controls{display:flex;align-items:center;justify-content:center;gap:48px}
@@ -134,6 +158,7 @@ export const DISCADOR_HTML = `<!doctype html>
   .ctrl .ic{width:68px;height:68px;border-radius:50%;background:var(--card-2);border:1px solid var(--line);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;font-size:26px;transition:background .15s,color .15s,transform .15s}
   .ctrl.hangup .ic{background:var(--alert);border-color:var(--alert);color:#fff;transform:rotate(135deg);box-shadow:0 10px 26px rgba(255,107,107,.45)}
   .ctrl.hangup:active .ic{transform:rotate(135deg) scale(.94)}
+  .ctrl.hangup{color:#ffb3b3;font-weight:700}
   /* preview do lead antes de ligar (CONTEXTO + SCRIPT) — estilo cartao de contato iOS, quick 260813-n46 */
   #preview-overlay{position:fixed;inset:0;display:none;z-index:20;overflow:auto;padding:calc(20px + env(safe-area-inset-top)) 20px calc(28px + env(safe-area-inset-bottom));background:radial-gradient(600px 500px at 50% 8%,rgba(61,139,255,.18),transparent 60%),linear-gradient(180deg,#0a2547,#04122a)}
   .preview-card{width:100%;max-width:560px;margin:0 auto}
@@ -241,6 +266,7 @@ export const DISCADOR_HTML = `<!doctype html>
           <div id="preview-tel" class="lig-tel"></div>
         </div>
       </div>
+      <div class="preview-hint">Confira o roteiro abaixo. Quando estiver pronto, toque em Ligar.</div>
       <button id="preview-ligar" class="primary call-lg" type="button">\u{1F4DE} Ligar</button>
       <div class="preview-info-card">
         <div class="lig-script-wrap">
@@ -260,12 +286,13 @@ export const DISCADOR_HTML = `<!doctype html>
       <div id="call-avatar"></div>
       <div id="call-nome"></div>
       <div id="call-tel"></div>
-      <div id="call-status"></div>
+      <div id="call-estado"><span id="call-dot"></span><span id="call-status"></span></div>
+      <div id="call-guia"></div>
       <div id="call-timer"></div>
     </div>
     <div id="call-script" class="call-script"></div>
     <div class="call-controls">
-      <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">\u{1F4DE}</span></button>
+      <button id="hangup-btn" class="ctrl hangup" aria-label="Desligar"><span class="ic">\u{1F4DE}</span>Desligar</button>
     </div>
   </div>
 
@@ -273,6 +300,7 @@ export const DISCADOR_HTML = `<!doctype html>
     <div class="voto-card">
       <div class="voto-title">Confirmação de voto</div>
       <div id="voto-nome" class="voto-sub"></div>
+      <div class="voto-hint">Marque o que o cliente disse durante a ligação.</div>
       <div class="voto-q" id="voto-q-romero">
         <div class="voto-label">Confirmou voto no <b>Romero</b>?</div>
         <div class="seg" data-cand="romero">
@@ -398,7 +426,7 @@ export const DISCADOR_APP_JS = `(function(){
   function renderFila(itens){
     if(!itens||!itens.length){
       $('fila-contador').textContent='';
-      mostrarStatus('Sem ligações na sua fila hoje.');
+      mostrarStatus('Você está em dia! Sem ligações na fila agora.');
       return;
     }
     $('fila-status').style.display='none';
@@ -406,6 +434,9 @@ export const DISCADOR_APP_JS = `(function(){
     var lista=$('fila-lista');
     lista.textContent='';
     lista.style.display='block';
+    // u22: dica pro atendente leigo saber o que fazer na fila.
+    var hint=document.createElement('div');hint.className='fila-hint';hint.textContent='Toque em Ligar para começar o atendimento.';
+    lista.appendChild(hint);
     lista.appendChild(criarItemFila(itens[0]));
   }
   function criarItemFila(item){
@@ -583,7 +614,7 @@ export const DISCADOR_APP_JS = `(function(){
     return '';
   }
   function iniciarLigacao(lead){
-    openCall(lead,'Pedindo microfone...');
+    openCall(lead,'preparando');
     prepararAudio();// desbloqueia o áudio DENTRO do gesto do toque (iOS)
     tocarChamando();// tom já começa aqui (no gesto) — mais confiável p/ autoplay
     // iOS: o prompt de microfone SO aparece se getUserMedia rodar DENTRO do
@@ -594,7 +625,7 @@ export const DISCADOR_APP_JS = `(function(){
     catch (e) { mic = Promise.reject(e); }
     mic.then(function(stream){
       try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
-      setCallStatus('Conectando...');
+      setCallEstado('chamando');
       return garantirWavoip();
     }).then(function(w){
       // D-P3-01/DEVICE-03: reporta a task ativa ao backend (grava
@@ -606,33 +637,36 @@ export const DISCADOR_APP_JS = `(function(){
       apiPost('/api/discador/ligando',{taskId:lead.taskId,deviceId:deviceIdCorrente()}).catch(function(){});
       return w.startCall({ to: lead.telefone });
     }).then(function(r){
-      if(r && r.err){ setCallStatus('Erro: '+((r.err&&r.err.message)?r.err.message:'falha ao iniciar')); endCallUI(); return; }
+      if(r && r.err){ setCallEstado('erro'); endCallUI(); return; }
       currentCall=(r&&r.call)?r.call:r;
       if(wantHangup){ hangup(); return; }
-      setCallStatus('Chamando...');
+      setCallEstado('chamando');
       tentativaDiscada=true;discagemStart=Date.now();// u13: começou a tentativa
       iniciarTimeoutConectando();// #1: teto de 90s sem atender
       tocarChamando();// reforça o tom (já iniciado no gesto) agora que discou
       wireCallEvents(currentCall);
     }).catch(function(e){
-      if(e&&e.semDeviceLivre){setCallStatus('Sem número livre, tente em instantes');endCallUI();return;}
+      if(e&&e.semDeviceLivre){setCallEstado('erro','Sem número livre agora. Tente de novo em instantes.');endCallUI();return;}
       var neg=(e&&(e.name==='NotAllowedError'||e.name==='SecurityError'));
-      setCallStatus(neg?'Permita o microfone pra ligar':('Falha: '+((e&&e.message)?e.message:'erro')));
+      if(neg){setCallEstado('microfone');}else{setCallEstado('erro');}
       endCallUI();
     });
   }
   function on(call,ev,fn){try{if(call&&call.on){call.on(ev,fn);}}catch(e){}}
-  function mapStatus(s){var m={CALLING:'Chamando...',RINGING:'Tocando...',ACTIVE:'Em ligação',ACCEPT:'Em ligação',ENDED:'Encerrada',NOT_ANSWERED:'Não atendida',UNANSWERED:'Não atendida',REJECTED:'Recusada'};return m[String(s).toUpperCase()]||String(s||'');}
+  // u22: mapeia o status técnico do SDK pro ESTADO visual do atendente (palavra
+  // grande + cor + frase-guia). CALLING/RINGING viram "chamando" (o leigo não
+  // precisa distinguir); ACTIVE/ACCEPT = "atendida" (verde, fale agora).
+  function mapEstado(s){var m={CALLING:'chamando',RINGING:'chamando',ACTIVE:'atendida',ACCEPT:'atendida',ENDED:'encerrada',NOT_ANSWERED:'naoAtendida',UNANSWERED:'naoAtendida',REJECTED:'recusada'};return m[String(s).toUpperCase()]||'';}
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
-    on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(active){limparTimeoutConectando();if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallStatus('Em ligação');startTimer();});
-    on(call,'peerReject',function(){enviarDesfecho('recusou');setCallStatus('Recusada');endCallUI();});
+    on(call,'status',function(s){var k=mapEstado(s);if(k){setCallEstado(k);}});
+    on(call,'peerAccept',function(active){limparTimeoutConectando();if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallEstado('atendida');startTimer();});
+    on(call,'peerReject',function(){enviarDesfecho('recusou');setCallEstado('recusada');endCallUI();});
     // u13: não-atendida NÃO desfecha automático — endCallUI abre a telinha de
     // motivo (o operador escolhe a categoria e aí conclui/sai da fila).
-    on(call,'unanswered',function(){setCallStatus('Não atendida');endCallUI();});
-    on(call,'ended',function(){setCallStatus('Encerrada');endCallUI();});
-    on(call,'connectivityIssue',function(){setCallStatus('Problema de conexão');});
+    on(call,'unanswered',function(){setCallEstado('naoAtendida');endCallUI();});
+    on(call,'ended',function(){setCallEstado('encerrada');endCallUI();});
+    on(call,'connectivityIssue',function(){setCallEstado('problema');});
   }
   function hangup(){
     wantHangup=true; // se pressionado antes do startCall resolver, encerra ao resolver
@@ -640,7 +674,7 @@ export const DISCADOR_APP_JS = `(function(){
     if(c&&typeof c.end==='function'){try{c.end();}catch(e){}}
     // u13: NÃO desfecha aqui. Se atendeu, endCallUI vai pro voto; se só tentou,
     // vai pra telinha de motivo. Se nem discou (erro), volta pra fila.
-    setCallStatus('Encerrada');endCallUI();
+    setCallEstado('encerrada');endCallUI();
   }
   // Chamadas de 30-90 min: manter a tela acordada (no celular, apagar a tela
   // suspende o WebRTC e derruba o audio). Wake Lock e best-effort e cai sozinho
@@ -654,11 +688,32 @@ export const DISCADOR_APP_JS = `(function(){
     }catch(e){}
   }
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
-  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
-  function setCallStatus(s){$('call-status').textContent=s;}
+  function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallEstado(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
+  // u22: estados visuais da chamada, em linguagem de atendente (não de tech):
+  // PALAVRA grande + COR (verde=atendeu, azul=chamando, vermelho=não atendeu,
+  // âmbar=aviso) + FRASE do que fazer. Centraliza a tradução do jargão do SDK.
+  var CALL_ESTADOS={
+    preparando:{txt:'Preparando…',cor:'azul',guia:'Se o celular pedir, toque em Permitir o microfone'},
+    chamando:{txt:'Chamando…',cor:'azul',guia:'Aguarde — o cliente vai atender'},
+    atendida:{txt:'No telefone',cor:'verde',guia:'Fale agora! Siga o roteiro abaixo'},
+    naoAtendida:{txt:'Não atendeu',cor:'vermelho',guia:'Sem resposta. Vamos registrar o motivo.'},
+    recusada:{txt:'Não atendeu',cor:'vermelho',guia:'Sem resposta. Vamos registrar o motivo.'},
+    encerrada:{txt:'Ligação encerrada',cor:'cinza',guia:''},
+    problema:{txt:'Conexão instável',cor:'ambar',guia:'A ligação pode cair'},
+    microfone:{txt:'Libere o microfone',cor:'ambar',guia:'Toque em Permitir e tente de novo'},
+    erro:{txt:'Não deu certo',cor:'ambar',guia:'Toque em Desligar e tente de novo'}
+  };
+  // 2º arg (detalhe) troca a frase-guia quando precisa (ex.: erro específico).
+  function setCallEstado(key,detalhe){
+    var e=CALL_ESTADOS[key],box=$('call-estado'),st=$('call-status'),gu=$('call-guia');
+    if(!e){if(st){st.textContent=String(key||'');}if(gu){gu.textContent=detalhe||'';}return;}
+    if(st){st.textContent=e.txt;}
+    if(gu){gu.textContent=(detalhe!=null&&detalhe!=='')?detalhe:e.guia;}
+    if(box){box.className='est-'+e.cor;}
+  }
   // #1: se ficar 90s sem ser atendida, a chamada encerra sozinha e cai na telinha
   // de motivo (o operador e obrigado a escolher o motivo pra seguir pro proximo).
-  function iniciarTimeoutConectando(){limparTimeoutConectando();conectandoTO=setTimeout(function(){if(!foiAtendida){setCallStatus('Não atendida (90s)');hangup();}},90000);}
+  function iniciarTimeoutConectando(){limparTimeoutConectando();conectandoTO=setTimeout(function(){if(!foiAtendida){setCallEstado('naoAtendida');hangup();}},90000);}
   function limparTimeoutConectando(){if(conectandoTO){clearTimeout(conectandoTO);conectandoTO=null;}}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
   // Tom de chamada ("chamando..."): o Wavoip não entrega ringback ao navegador,
@@ -751,8 +806,8 @@ export const DISCADOR_APP_JS = `(function(){
     // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
     window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});
     document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&emChamada&&!wakeLock){pedirWakeLock();}});
-    window.addEventListener('offline',function(){if(emChamada){setCallStatus('Sem internet — a ligação pode cair');}});
-    window.addEventListener('online',function(){if(emChamada){setCallStatus('Conexão restabelecida');}});
+    window.addEventListener('offline',function(){if(emChamada){setCallEstado('problema','Sem internet — a ligação pode cair');}});
+    window.addEventListener('online',function(){if(emChamada){setCallEstado(foiAtendida?'atendida':'chamando');}});
     // Handoff (quick-260815-r3): consome #token (auto-login) e &task (deep-link)
     // e LIMPA o fragmento do historico (o token nao pode vazar em back/forward).
     var hp=lerParamsDoHash();
