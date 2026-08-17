@@ -21,6 +21,10 @@ sincronia manual** até as rotas antigas serem removidas. Ao mudar a UI:
 origem. O `app.js` chama caminhos relativos (`/api/discador/fila` etc.). Auth por **Bearer
 token** (header `Authorization`, nunca cookie) — por isso cross-origin não exige mudança.
 
+**Heartbeat de presença:** enquanto logado, `app.js` faz `POST /api/discador/presenca` a cada
+60s (fetch cru, ignora 401 pra não deslogar) — inclusive durante a chamada. É o que alimenta
+"Atendentes online" / "Operação ao vivo" no painel do gestor.
+
 ## Restrições PWA / offline
 
 - **Self-contained:** nada de libs/fontes externas no shell (a única exceção é o SDK Wavoip,

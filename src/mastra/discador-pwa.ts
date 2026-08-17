@@ -23,7 +23,7 @@ export const DISCADOR_MANIFEST = JSON.stringify({
 // CACHE bump (discador-v24 -> discador-v25): discador manda TODO MUNDO pro painel
 // (login unico u8: gestor -> painel, atendente -> /fila) — app.js mudou, precisa
 // propagar. quick-260816-u8
-export const DISCADOR_SW_JS = `const CACHE='discador-v28';
+export const DISCADOR_SW_JS = `const CACHE='discador-v29';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
