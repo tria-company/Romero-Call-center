@@ -8,7 +8,7 @@ Servidor HTTP único (Mastra/Hono, porta 4111) que roda na VPS. Faz **API do dis
 
 | Arquivo | Responsabilidade |
 |---|---|
-| [index.ts](index.ts) | Rotas: PWA legado (`/discador/*`), API (`/api/discador/*`), webhook (`/api/webhook/wavoip`). O handler do webhook usa `estado-webhook.ts` e persiste o evento cru antes de processar. |
+| [index.ts](index.ts) | Rotas: PWA legado (`/discador/*`), API (`/api/discador/*`), webhook (`/api/webhook/wavoip`) e **painel do gestor** (`/admin`, `/api/admin/*`: métricas, operação ao vivo, chamadas por número, usuários). O handler do webhook usa `estado-webhook.ts` e persiste o evento cru antes de processar. |
 | [config.ts](config.ts) | Env vars + IDs de listas/campos ClickUp, `REDIS_URL`, Supabase, tabelas `romero_db_*`. Avisa (não quebra) quando algo opcional falta. |
 | [clickup.ts](clickup.ts) | Store operacional — **fonte da verdade**. Listas 01 LEADS / 02 LIGACOES, `CAMPOS_LEADS`/`CAMPOS_LIGACOES` (field_ids), CRUD de tasks. |
 | [supabase.ts](supabase.ts) | Durabilidade do evento cru do webhook (`registrarEventoWebhook`/`marcarEventoWebhook`) + leitura das tabelas de serviço `romero_db_*` (seção 5 do dossiê). |
@@ -22,7 +22,30 @@ Servidor HTTP único (Mastra/Hono, porta 4111) que roda na VPS. Faz **API do dis
 | [discador-auth.ts](discador-auth.ts) | Login do closer + token de sessão HMAC stateless (Bearer, nunca cookie). |
 | [discador-pwa.ts](discador-pwa.ts) | Assets do PWA (HTML/`app.js`/`sw.js`) como template strings. **Espelhado em [../../web/](../../web/) — manter em sincronia manual.** |
 | [operadores.ts](operadores.ts) | Mapa usuário logado → operador do ClickUp (`DISCADOR_ASSIGNEES`). |
+| [usuarios.ts](usuarios.ts) | Snapshot de `discador_usuarios` (papel, `clickup_member_id`, `wavoip_device_id`). Lookups rápidos: `papelDoUsuario`, `deviceIdDoUsuario`, `donoDoDevice`/`donosDevices` (exclusividade número↔operador), `snapshotUsuarios`. |
+| [dispositivos.ts](dispositivos.ts) | `resolverConfigDoUsuario` — resolve o device do operador na ordem **dedicado** (`wavoip_device_id`→token) → **pool** (lease) → **global** (`WAVOIP_DEVICE_TOKEN`). |
+| [wavoip-api.ts](wavoip-api.ts) | API de **gerência** Wavoip (login de conta→JWT): inventário vivo `deviceId→{token,número,status,calls_made}` (cache TTL 60s), `snapshotDevicesWavoip` (SEM token, p/ painel), auto-webhook por device. |
+| [metricas.ts](metricas.ts) | **Redis-ou-memória**: presença/online (heartbeat), **em-chamada por operador**, **chamadas por número** (dia BRT), erros por etapa, 429s. Degrada p/ 0/`[]`/`{}`, **NUNCA lança**. |
+| [fila.ts](fila.ts) | Fila de LIGACOES por assignee (`buscarFilaLigacoes`) + `profundidadeFila` (KPI). |
+| [admin-painel.ts](admin-painel.ts) | Painel do **gestor** (`/admin`) — HTML/CSS/JS em template string: KPIs, **Operação ao vivo**, **Chamadas por número**, Filas/erros, gestão de operadores. Poll de 8s. |
 | [http.ts](http.ts) | `fetchTimeout` (helper de fetch com timeout/method/body). |
+
+## Métricas & painel do gestor (o que não é óbvio)
+
+- **Presença / "Atendentes online":** o discador manda um **heartbeat** (`POST /api/discador/presenca`)
+  a cada 60s enquanto aberto — inclusive durante a chamada. A presença dura 120s (`METRICAS_PRESENCA_TTL_MS`),
+  então "online" reflete quem está com o discador aberto, não só quem ligou nos últimos minutos.
+  Também é marcada em login/ligando/desfecho.
+- **"Operação ao vivo"** (`/api/admin/operacao`): junta presença (online) + **em-chamada por operador**
+  (`met:chamada:<usuario>`, marcado no `/ligando`, limpo no `/desfecho`, TTL de teto que auto-limpa se
+  o desfecho falhar) + o número de cada um (via `wavoip_device_id`→inventário). LGPD: só usuário+número.
+- **"Chamadas por número"** (`/api/admin/chamadas-por-numero`): a chamada é contada **1× no DESFECHO**,
+  atribuída ao **número do operador** (`deviceIdDoUsuario`). O total de "hoje" é **derivado = atendidas + não**
+  (nunca diverge). Dia **operacional em Brasília** (`diaOperacionalStr`, não UTC). Contagens sem número
+  associado viram a linha **"Sem número associado"** (nada some). O **acumulado** vem do `calls_made` da Wavoip.
+- **⚠️ Cuidado modo memória:** sem `REDIS_URL`, presença/em-chamada/chamadas-por-número vivem na **memória
+  do processo** → **zeram a cada restart/hot-reload** (inclusive o watch do `npm run dev`). Em prod (Redis)
+  persistem. Para testar local sem "zerar", não reinicie entre ligar e conferir — ou aponte um Redis local.
 
 ## Padrões (não-negociáveis)
 

@@ -20,14 +20,14 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE bump (discador-v24 -> discador-v25): discador manda TODO MUNDO pro painel
-// (login unico u8: gestor -> painel, atendente -> /fila) — app.js mudou, precisa
-// propagar. quick-260816-u8
-export const DISCADOR_SW_JS = `const CACHE='discador-v28';
+// CACHE discador-v32: SW passou a ser NETWORK-FIRST (online sempre pega a última
+// versão; offline cai no cache) — evita servir app.js velho a cada mudança e
+// acaba com o "reload não atualiza". quick-260817-u20
+export const DISCADOR_SW_JS = `const CACHE='discador-v32';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
-self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname.indexOf('/api/')===0){return;}e.respondWith(caches.match(e.request).then(function(r){return r||fetch(e.request);}));});`;
+self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname.indexOf('/api/')===0){return;}e.respondWith(fetch(e.request).then(function(r){if(r&&r.ok&&e.request.method==='GET'){var cp=r.clone();caches.open(CACHE).then(function(c){c.put(e.request,cp);});}return r;}).catch(function(){return caches.match(e.request);}));});`;
 
 export const DISCADOR_HTML = `<!doctype html>
 <html lang="pt-BR">
@@ -304,11 +304,10 @@ export const DISCADOR_HTML = `<!doctype html>
         <div class="voto-label">Motivo</div>
         <div class="motivo-cats" id="motivo-cats">
           <button type="button" class="seg-btn" data-cat="Não atende">Não atende</button>
-          <button type="button" class="seg-btn" data-cat="Caixa postal">Caixa postal</button>
+          <button type="button" class="seg-btn" data-cat="Sem WhatsApp">Sem WhatsApp</button>
           <button type="button" class="seg-btn" data-cat="Número errado">Número errado</button>
           <button type="button" class="seg-btn" data-cat="Ocupado">Ocupado</button>
           <button type="button" class="seg-btn" data-cat="Chamou e caiu">Chamou e caiu</button>
-          <button type="button" class="seg-btn" data-cat="Pediu pra ligar depois">Pediu pra ligar depois</button>
         </div>
       </div>
       <textarea id="motivo-obs" placeholder="Detalhe (opcional)"></textarea>
@@ -325,7 +324,7 @@ export const DISCADOR_APP_JS = `(function(){
   var tokenKey='discador_token';
   var wavoip=null, currentCall=null, wavoipToken=null, wantHangup=false;
   var fila=null, filaPollInt=null;
-  var timerInt=null, timerStart=0;
+  var timerInt=null, timerStart=0, conectandoTO=null;
   var wakeLock=null, emChamada=false, retornoPainel=null;
   var foiAtendida=false, desfechoEnviado=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
   // u13: tentativa não-atendida — discagemStart marca quando começou a chamar
@@ -362,6 +361,18 @@ export const DISCADOR_APP_JS = `(function(){
     if(t){opts.headers['Authorization']='Bearer '+t;}
     return fetch(path,opts).then(function(res){if(res.status===401){setToken('');show('login');throw new Error('401');}return res;});
   }
+  // Heartbeat de presenca (Operacao ao vivo): enquanto logado, avisa o backend a
+  // cada 60s que este operador esta com o discador aberto — inclusive DURANTE a
+  // chamada (o pollFila pausa; este nao). Assim o painel do gestor ve quem esta
+  // online. Best-effort: fetch cru, ignora erro/401 (NAO usa apiPost pra nao
+  // deslogar por um ping que falhou).
+  var hbInt=null;
+  function baterPresenca(){var t=getToken();if(!t){return;}fetch('/api/discador/presenca',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+t},body:'{}'}).catch(function(){});}
+  function iniciarHeartbeat(){baterPresenca();if(hbInt){clearInterval(hbInt);}hbInt=setInterval(baterPresenca,60000);}
+  function pararHeartbeat(){if(hbInt){clearInterval(hbInt);hbInt=null;}}
+  // Logout explicito: some do painel na hora (nao espera o TTL de 120s). keepalive
+  // pra o request completar mesmo com a UI trocando pra tela de login.
+  function sairPresenca(){var t=getToken();if(!t){return;}fetch('/api/discador/sair',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+t},body:'{}',keepalive:true}).catch(function(){});}
   function doLogin(){
     var u=$('u').value.trim(), p=$('p').value;$('login-err').textContent='';
     fetch('/api/discador/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,senha:p})})
@@ -369,7 +380,7 @@ export const DISCADOR_APP_JS = `(function(){
     .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';if(irParaPainel(r.j.token,r.j.panelUrl)){return;}startFila();})
     .catch(function(){$('login-err').textContent='Erro ao entrar.';});
   }
-  function startFila(){show('fila');carregarFila();}
+  function startFila(){show('fila');carregarFila();iniciarHeartbeat();}
   // Porta unica (u5/u8): o discador e a porta de todos. TODO usuario logado e
   // mandado pro painel, ja logado (token no FRAGMENTO — nao vai ao servidor
   // nem a log/Referer). panelUrl vazio (painel nao configurado) -> retorna false e
@@ -600,6 +611,7 @@ export const DISCADOR_APP_JS = `(function(){
       if(wantHangup){ hangup(); return; }
       setCallStatus('Chamando...');
       tentativaDiscada=true;discagemStart=Date.now();// u13: começou a tentativa
+      iniciarTimeoutConectando();// #1: teto de 90s sem atender
       tocarChamando();// reforça o tom (já iniciado no gesto) agora que discou
       wireCallEvents(currentCall);
     }).catch(function(e){
@@ -614,7 +626,7 @@ export const DISCADOR_APP_JS = `(function(){
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallStatus('Em ligação');startTimer();});
+    on(call,'peerAccept',function(active){limparTimeoutConectando();if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallStatus('Em ligação');startTimer();});
     on(call,'peerReject',function(){enviarDesfecho('recusou');setCallStatus('Recusada');endCallUI();});
     // u13: não-atendida NÃO desfecha automático — endCallUI abre a telinha de
     // motivo (o operador escolhe a categoria e aí conclui/sai da fila).
@@ -644,6 +656,10 @@ export const DISCADOR_APP_JS = `(function(){
   function soltarWakeLock(){try{if(wakeLock&&wakeLock.release){wakeLock.release().catch(function(){});}}catch(e){}wakeLock=null;}
   function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
   function setCallStatus(s){$('call-status').textContent=s;}
+  // #1: se ficar 90s sem ser atendida, a chamada encerra sozinha e cai na telinha
+  // de motivo (o operador e obrigado a escolher o motivo pra seguir pro proximo).
+  function iniciarTimeoutConectando(){limparTimeoutConectando();conectandoTO=setTimeout(function(){if(!foiAtendida){setCallStatus('Não atendida (90s)');hangup();}},90000);}
+  function limparTimeoutConectando(){if(conectandoTO){clearTimeout(conectandoTO);conectandoTO=null;}}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
   // Tom de chamada ("chamando..."): o Wavoip não entrega ringback ao navegador,
   // então geramos o tom aqui (WebAudio, ~425Hz, cadência 1s liga/4s desliga —
@@ -652,7 +668,7 @@ export const DISCADOR_APP_JS = `(function(){
   function prepararAudio(){try{var AC=window.AudioContext||window.webkitAudioContext;if(!AC){return;}if(!ringCtx){ringCtx=new AC();}if(ringCtx.state==='suspended'){ringCtx.resume();}}catch(e){}}
   function tocarChamando(){if(ringOsc){return;}if(!ringCtx){return;}try{if(ringCtx.state!=='running'){ringCtx.resume();}}catch(e){}try{ringOsc=ringCtx.createOscillator();ringGain=ringCtx.createGain();ringOsc.type='sine';ringOsc.frequency.value=425;ringGain.gain.value=0.0001;ringOsc.connect(ringGain);ringGain.connect(ringCtx.destination);ringOsc.start();var ligado=false;function ciclo(){if(!ringCtx||!ringGain){return;}ligado=!ligado;var t=ringCtx.currentTime;try{ringGain.gain.setValueAtTime(ligado?0.14:0.0001,t);}catch(e){}ringTO=setTimeout(ciclo,ligado?1000:4000);}ciclo();}catch(e){}}
   function pararChamando(){if(ringTO){clearTimeout(ringTO);ringTO=null;}try{if(ringOsc){ringOsc.stop();ringOsc.disconnect();}}catch(e){}try{if(ringGain){ringGain.disconnect();}}catch(e){}ringOsc=null;ringGain=null;}
-  function endCallUI(){pararChamando();liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;if(encerrandoUI){return;}encerrandoUI=true;var atendida=foiAtendida,tid=chamadaTaskId,discou=tentativaDiscada;var tentSeg=(discou&&discagemStart)?Math.round((Date.now()-discagemStart)/1000):0;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else if(discou&&tid){mostrarMotivo(tid,tentSeg);}else{voltarParaFila();}},1400);}
+  function endCallUI(){pararChamando();limparTimeoutConectando();liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;if(encerrandoUI){return;}encerrandoUI=true;var atendida=foiAtendida,tid=chamadaTaskId,discou=tentativaDiscada;var tentSeg=(discou&&discagemStart)?Math.round((Date.now()-discagemStart)/1000):0;setTimeout(function(){if(atendida&&tid){mostrarVoto(tid);}else if(desfechoEnviado){voltarParaFila();}else if(tid&&(discou||wantHangup)){mostrarMotivo(tid,tentSeg);}else{voltarParaFila();}},1400);}
   // u13: telinha de motivo do não-atendimento. Mostra quanto tempo tentou e
   // pede a categoria (+ frase opcional). Só ao concluir dispara o desfecho —
   // que grava o motivo, o tempo de tentativa, comenta e fecha (sai da fila).
@@ -682,12 +698,12 @@ export const DISCADOR_APP_JS = `(function(){
   // candidatos ainda nao preenchidos no lead (Lista 01) e grava. Se o lead ja
   // tem os dois definidos, ou nao ha lead resolvido, so fecha a overlay da
   // chamada. Best-effort: qualquer erro so fecha a overlay (nunca trava o operador).
-  function mostrarVotoSeNecessario(taskId){
+  // #4: em TODA ligacao atendida, pergunta o voto dos DOIS candidatos (mesmo que
+  // o lead ja tenha algum definido) — o operador re-confirma e a IA avalia depois.
+  function mostrarVoto(taskId){
     api('/api/discador/voto/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};});}).then(function(st){
-      var pRom=!!(st&&st.temLead&&!st.romeroDefinido);
-      var pAnd=!!(st&&st.temLead&&!st.andressaDefinido);
-      if(!pRom&&!pAnd){voltarParaFila();return;}
-      abrirVoto(taskId,pRom,pAnd);
+      if(!(st&&st.temLead)){voltarParaFila();return;}
+      abrirVoto(taskId,true,true);
     }).catch(function(e){if(e&&e.message==='401'){return;}voltarParaFila();});
   }
   function abrirVoto(taskId,pRom,pAnd){
@@ -716,7 +732,7 @@ export const DISCADOR_APP_JS = `(function(){
   window.addEventListener('DOMContentLoaded',function(){
     $('login-btn').onclick=doLogin;
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
-    $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}setToken('');show('login');};
+    $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}sairPresenca();pararHeartbeat();setToken('');show('login');};
     $('reload-btn').onclick=carregarFila;
     $('hangup-btn').onclick=hangup;
     $('preview-voltar').onclick=voltarDoPreview;

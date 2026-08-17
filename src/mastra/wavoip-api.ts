@@ -128,6 +128,17 @@ interface InvWavoip {
   nome: string;
   status: string;
   conectado: boolean;
+  callsMade: number; // `calls_made` da Wavoip — total acumulado de chamadas do device
+}
+
+/** Device do inventário SEM token, para o painel (chamadas por número). */
+export interface DeviceWavoipPublico {
+  id: string;
+  nome: string;
+  numero: string;
+  status: string;
+  conectado: boolean;
+  callsMade: number;
 }
 
 let invCache: { at: number; mapa: Map<string, InvWavoip> } = { at: 0, mapa: new Map() };
@@ -149,7 +160,14 @@ export async function garantirInventarioWavoip(maxIdadeMs = 60_000): Promise<voi
       const token = String((d as { token?: unknown }).token ?? '');
       if (!id || !token) continue;
       const status = String(d.status ?? '');
-      mapa.set(id, { token, numero: String(d.phone ?? ''), nome: String(d.name ?? ''), status, conectado: status === 'open' });
+      mapa.set(id, {
+        token,
+        numero: String(d.phone ?? ''),
+        nome: String(d.name ?? ''),
+        status,
+        conectado: status === 'open',
+        callsMade: Number((d as { calls_made?: unknown }).calls_made ?? 0) || 0,
+      });
     }
     invCache = { at: agora, mapa };
   } catch (e) {
@@ -163,6 +181,19 @@ export async function garantirInventarioWavoip(maxIdadeMs = 60_000): Promise<voi
 export function tokenDeviceWavoip(deviceId: string): string | null {
   const e = invCache.mapa.get(String(deviceId));
   return e ? e.token : null;
+}
+
+/**
+ * Snapshot dos devices do inventário vivo, SEM token (LGPD/segredo), para o
+ * painel "chamadas por número". Lê o cache — barato de chamar (o refresh
+ * respeita o TTL de garantirInventarioWavoip). Vazio se o cache não montou.
+ */
+export function snapshotDevicesWavoip(): DeviceWavoipPublico[] {
+  const out: DeviceWavoipPublico[] = [];
+  for (const [id, e] of invCache.mapa) {
+    out.push({ id, nome: e.nome, numero: e.numero, status: e.status, conectado: e.conectado, callsMade: e.callsMade });
+  }
+  return out;
 }
 
 /** Lê o webhook de um device. `null` quando ainda não setado (404). Lança em outros erros. */

@@ -74,6 +74,15 @@ function diaHojeStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Dia OPERACIONAL em horário de Brasília (America/Sao_Paulo). O "hoje" das
+// chamadas por número é o dia do operador (BR), não o dia UTC — senão o dia
+// "vira" às 21h BRT (00h UTC) e as ligações da noite caem no dia seguinte.
+// Usado SÓ pelos contadores por-device; o resto das métricas segue o dia UTC.
+// en-CA formata YYYY-MM-DD (mesma forma de diaHojeStr).
+function diaOperacionalStr(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+}
+
 function chaveDiaHoje(): string {
   return PREFIXO_DIA + diaHojeStr();
 }
@@ -244,6 +253,80 @@ async function contagem429Redis(): Promise<number> {
   return Number(valor) || 0;
 }
 
+// ===== Chamadas por device (por numero) — contador diario total/atendida/nao =====
+// Alimenta a tabela "chamadas por numero" do painel. Mesma casca janelada
+// (chave + data, PEXPIRE 48h) das outras metricas. deviceId = id do device
+// Wavoip (o wavoip_device_id do operador). LGPD: NUNCA loga numero/token.
+
+export type TipoChamadaDevice = 'total' | 'atendida' | 'nao';
+export interface ContagemDeviceDia {
+  total: number;
+  atendidas: number;
+  nao: number;
+}
+
+const PREFIXO_DEV = 'met:dev:'; // + deviceId + ':' + data + ':' + (total|atendida|nao)
+
+const devMem = new Map<string, { data: string } & ContagemDeviceDia>();
+
+function registrarChamadaDeviceMem(deviceId: string, tipo: TipoChamadaDevice): void {
+  const hoje = diaOperacionalStr();
+  let e = devMem.get(deviceId);
+  if (!e || e.data !== hoje) {
+    e = { data: hoje, total: 0, atendidas: 0, nao: 0 };
+    devMem.set(deviceId, e);
+  }
+  if (tipo === 'total') e.total += 1;
+  else if (tipo === 'atendida') e.atendidas += 1;
+  else e.nao += 1;
+}
+
+function lerChamadasDevicesHojeMem(): Record<string, ContagemDeviceDia> {
+  const hoje = diaOperacionalStr();
+  const out: Record<string, ContagemDeviceDia> = {};
+  for (const [id, e] of devMem) {
+    if (e.data === hoje) out[id] = { total: e.total, atendidas: e.atendidas, nao: e.nao };
+  }
+  return out;
+}
+
+function chaveDev(deviceId: string, tipo: TipoChamadaDevice): string {
+  return `${PREFIXO_DEV}${deviceId}:${diaOperacionalStr()}:${tipo}`;
+}
+
+async function registrarChamadaDeviceRedis(deviceId: string, tipo: TipoChamadaDevice): Promise<void> {
+  const cli = garantirCliente();
+  const chave = chaveDev(deviceId, tipo);
+  await cli.incr(chave);
+  await cli.pexpire(chave, DIA_TTL_MS);
+}
+
+async function lerChamadasDevicesHojeRedis(): Promise<Record<string, ContagemDeviceDia>> {
+  const hoje = diaOperacionalStr();
+  const cli = garantirCliente();
+  const out: Record<string, ContagemDeviceDia> = {};
+  let cursor = '0';
+  const chaves: string[] = [];
+  do {
+    const [proximo, lote] = await cli.scan(cursor, 'MATCH', `${PREFIXO_DEV}*:${hoje}:*`, 'COUNT', 300);
+    cursor = proximo;
+    chaves.push(...lote);
+  } while (cursor !== '0');
+  for (const chave of chaves) {
+    // met:dev:<deviceId>:<YYYY-MM-DD>:<tipo> — deviceId sem ':', data sem ':'
+    const partes = chave.slice(PREFIXO_DEV.length).split(':'); // [deviceId, data, tipo]
+    const deviceId = partes[0];
+    const tipo = partes[2] as TipoChamadaDevice;
+    if (!deviceId || !tipo) continue;
+    const val = Number(await cli.get(chave)) || 0;
+    const reg = out[deviceId] || (out[deviceId] = { total: 0, atendidas: 0, nao: 0 });
+    if (tipo === 'total') reg.total = val;
+    else if (tipo === 'atendida') reg.atendidas = val;
+    else if (tipo === 'nao') reg.nao = val;
+  }
+  return out;
+}
+
 // ===== Superficie publica — despacha para o backend escolhido no boot, NUNCA lanca =====
 
 /**
@@ -326,6 +409,146 @@ export function registrar429ClickUp(): void {
     }
   } catch (e) {
     console.error('[metricas] falha ao registrar 429 (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Conta uma chamada do device (por numero) no dia — total/atendida/nao. NUNCA lanca. */
+export function registrarChamadaDevice(deviceId: string, tipo: TipoChamadaDevice): void {
+  if (!deviceId) return;
+  try {
+    if (MODO === 'redis') {
+      registrarChamadaDeviceRedis(deviceId, tipo).catch((e) => {
+        console.error('[metricas] falha ao contar chamada de device (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+      });
+    } else {
+      registrarChamadaDeviceMem(deviceId, tipo);
+    }
+  } catch (e) {
+    console.error('[metricas] falha ao contar chamada de device (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Contagem de chamadas de hoje por deviceId. Degrada p/ {} em falha. NUNCA lanca. */
+export async function lerChamadasDevicesHoje(): Promise<Record<string, ContagemDeviceDia>> {
+  try {
+    return MODO === 'redis' ? await lerChamadasDevicesHojeRedis() : lerChamadasDevicesHojeMem();
+  } catch (e) {
+    console.error('[metricas] falha ao ler chamadas por device (degradando p/ vazio):', e instanceof Error ? e.message : String(e));
+    return {};
+  }
+}
+
+// ===== Operação ao vivo (Fase 2): LISTAR quem está online + quem está EM CHAMADA =====
+//
+// "online" reutiliza a presença (met:presenca:<usuario>) — agora alimentada por
+// um heartbeat do discador, não só por login/ligando/desfecho. "em chamada" é um
+// estado POR OPERADOR (met:chamada:<usuario>), marcado no /ligando e limpo no
+// /desfecho, com TTL de teto (some sozinho se o desfecho falhar). LGPD: chaveado
+// por USUÁRIO, nunca por telefone/CPF.
+
+const PREFIXO_CHAMADA = 'met:chamada:'; // + usuario (operador em chamada agora)
+const EM_CHAMADA_TTL_MS = 15 * 60 * 1000; // teto de uma chamada; auto-limpa se faltar o desfecho
+const emChamadaMem = new Map<string, number>(); // usuario -> ts (memoria)
+
+function listarAtendentesOnlineMem(): string[] {
+  podarPresencaMem();
+  return Array.from(presencaMem.keys());
+}
+async function listarAtendentesOnlineRedis(): Promise<string[]> {
+  let cursor = '0';
+  const out: string[] = [];
+  do {
+    const [proximo, chaves] = await garantirCliente().scan(cursor, 'MATCH', PREFIXO_PRESENCA + '*', 'COUNT', 200);
+    cursor = proximo;
+    for (const k of chaves) out.push(k.slice(PREFIXO_PRESENCA.length));
+  } while (cursor !== '0');
+  return out;
+}
+
+function podarEmChamadaMem(): void {
+  const agora = Date.now();
+  for (const [k, ts] of emChamadaMem) {
+    if (agora - ts > EM_CHAMADA_TTL_MS) emChamadaMem.delete(k);
+  }
+}
+async function marcarEmChamadaRedis(usuario: string): Promise<void> {
+  await garantirCliente().set(PREFIXO_CHAMADA + usuario, '1', 'PX', EM_CHAMADA_TTL_MS);
+}
+async function limparEmChamadaRedis(usuario: string): Promise<void> {
+  await garantirCliente().del(PREFIXO_CHAMADA + usuario);
+}
+async function listarEmChamadaRedis(): Promise<string[]> {
+  let cursor = '0';
+  const out: string[] = [];
+  do {
+    const [proximo, chaves] = await garantirCliente().scan(cursor, 'MATCH', PREFIXO_CHAMADA + '*', 'COUNT', 200);
+    cursor = proximo;
+    for (const k of chaves) out.push(k.slice(PREFIXO_CHAMADA.length));
+  } while (cursor !== '0');
+  return out;
+}
+
+/** Marca o operador como EM CHAMADA agora (no /ligando). NUNCA lança. */
+export function marcarEmChamada(usuario: string): void {
+  if (!usuario) return;
+  try {
+    if (MODO === 'redis') {
+      marcarEmChamadaRedis(usuario).catch((e) => console.error('[metricas] marcarEmChamada (ignorado):', e instanceof Error ? e.message : String(e)));
+    } else {
+      emChamadaMem.set(usuario, Date.now());
+    }
+  } catch (e) {
+    console.error('[metricas] marcarEmChamada (ignorado):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Limpa o EM CHAMADA do operador (no /desfecho). NUNCA lança. */
+export function limparEmChamada(usuario: string): void {
+  if (!usuario) return;
+  try {
+    if (MODO === 'redis') {
+      limparEmChamadaRedis(usuario).catch((e) => console.error('[metricas] limparEmChamada (ignorado):', e instanceof Error ? e.message : String(e)));
+    } else {
+      emChamadaMem.delete(usuario);
+    }
+  } catch (e) {
+    console.error('[metricas] limparEmChamada (ignorado):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Remove a presença do operador AGORA (logout explícito) — não espera o TTL de 120s. NUNCA lança. */
+export function limparPresenca(usuario: string): void {
+  if (!usuario) return;
+  try {
+    if (MODO === 'redis') {
+      garantirCliente()
+        .del(PREFIXO_PRESENCA + usuario)
+        .catch((e) => console.error('[metricas] limparPresenca (ignorado):', e instanceof Error ? e.message : String(e)));
+    } else {
+      presencaMem.delete(usuario);
+    }
+  } catch (e) {
+    console.error('[metricas] limparPresenca (ignorado):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Usuários online agora (presença). Degrada p/ [] em falha. NUNCA lança. */
+export async function listarAtendentesOnline(): Promise<string[]> {
+  try {
+    return MODO === 'redis' ? await listarAtendentesOnlineRedis() : listarAtendentesOnlineMem();
+  } catch (e) {
+    console.error('[metricas] listarAtendentesOnline (degrada p/ []):', e instanceof Error ? e.message : String(e));
+    return [];
+  }
+}
+
+/** Usuários em chamada agora. Degrada p/ [] em falha. NUNCA lança. */
+export async function listarEmChamada(): Promise<string[]> {
+  try {
+    return MODO === 'redis' ? await listarEmChamadaRedis() : (podarEmChamadaMem(), Array.from(emChamadaMem.keys()));
+  } catch (e) {
+    console.error('[metricas] listarEmChamada (degrada p/ []):', e instanceof Error ? e.message : String(e));
+    return [];
   }
 }
 

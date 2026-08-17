@@ -29,6 +29,9 @@ import {
   buscarUsuario,
   papelDoUsuario,
   donoDoDevice,
+  deviceIdDoUsuario,
+  donosDevices,
+  snapshotUsuarios,
 } from './usuarios.ts';
 
 // Lista de leads qualificados (GHL, pipeline COMERCIAL USI) — legado, ver nota
@@ -100,7 +103,18 @@ import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISC
 import { ADMIN_HTML, ADMIN_APP_JS } from './admin-painel';
 // Metricas operacionais (Fase 10 Plano 02, OBS-02/D-06): leitura agregada
 // (painel) + presenca de operador + contagem de erro por etapa (webhook).
-import { lerMetricas, registrarPresenca, registrarErroEtapa } from './metricas.ts';
+import {
+  lerMetricas,
+  registrarPresenca,
+  registrarErroEtapa,
+  registrarChamadaDevice,
+  lerChamadasDevicesHoje,
+  marcarEmChamada,
+  limparEmChamada,
+  limparPresenca,
+  listarAtendentesOnline,
+  listarEmChamada,
+} from './metricas.ts';
 import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA } from './config';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
 import {
@@ -153,6 +167,7 @@ import {
   autoWebhookConfigurado,
   wavoipApiConfigurada,
   garantirInventarioWavoip,
+  snapshotDevicesWavoip,
 } from './wavoip-api.ts';
 
 /**
@@ -424,6 +439,13 @@ export const mastra = new Mastra({
           try {
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
             if (telefone) await guardarTaskAtiva(telefone, taskId, deviceId);
+            // Operação ao vivo (Fase 2): operador entrou EM CHAMADA — some no
+            // desfecho (ou pelo TTL de teto). Não-fatal, nunca lança.
+            marcarEmChamada(sess.usuario);
+            // Métrica "chamadas por número" (Fase 1): NÃO conta aqui. A chamada é
+            // contada 1x no DESFECHO (fonte única → "hoje" = atendidas + não,
+            // sempre consistente e atribuída ao mesmo número). Clicar "Ligar" sem
+            // desfecho não infla o total.
             // quick-260813-lf7 (RETENTION-BY-OUTCOME): /ligando virou TELEMETRIA
             // PURA (INICIO+OPERADOR+correlacao call<->task). NAO despeja mais o
             // cache da fila — a task FICA na fila ao clicar "Ligar"; despejar o
@@ -490,6 +512,13 @@ export const mastra = new Mastra({
             : undefined;
           try {
             await registrarDesfecho(taskId, assignee, resultado, motivo);
+            // Métrica "chamadas por número" (Fase 1): conta 1 chamada por DESFECHO,
+            // atribuída ao NÚMERO do operador (deviceIdDoUsuario). "hoje" no painel
+            // é derivado (atendidas + não), então nunca diverge do detalhe.
+            // Não-fatal — nunca atrapalha o desfecho.
+            registrarChamadaDevice(deviceIdDoUsuario(sess.usuario) || '', resultado === 'atendida' ? 'atendida' : 'nao');
+            // Operação ao vivo (Fase 2): operador saiu da chamada. Não-fatal.
+            limparEmChamada(sess.usuario);
             // Espelha no cache do OPERADOR a saida da fila — a MESMA eviction
             // que saiu do /ligando (D-04/D-03, belt-and-suspenders). Ambas
             // no-op sem Redis (SC5) e nunca lancam — fica fora do caminho
@@ -510,6 +539,35 @@ export const mastra = new Mastra({
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao registrar desfecho' }, 502);
           }
+        },
+      },
+      {
+        // Heartbeat de presença (Operação ao vivo, Fase 2): o discador pinga a
+        // cada ~60s enquanto aberto → "Atendentes online" passa a refletir quem
+        // está de fato com o discador aberto (a presença dura 120s). Telemetria
+        // pura — registrarPresenca nunca lança e não tem efeito colateral.
+        path: '/api/discador/presenca',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          registrarPresenca(sess.usuario);
+          return c.json({ status: 'ok' });
+        },
+      },
+      {
+        // Logout explícito (Operação ao vivo): zera presença + em-chamada do
+        // operador NA HORA, pra ele sumir do painel sem esperar o TTL (120s).
+        // Sem sessão válida = já está fora → responde ok (idempotente).
+        path: '/api/discador/sair',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (sess) {
+            limparPresenca(sess.usuario);
+            limparEmChamada(sess.usuario);
+          }
+          return c.json({ status: 'ok' });
         },
       },
       {
@@ -1164,6 +1222,105 @@ export const mastra = new Mastra({
           } catch (e) {
             console.error('[admin] erro ao listar dispositivos Wavoip:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao consultar a Wavoip' }, 502);
+          }
+        },
+      },
+      {
+        // Chamadas por número (métricas Fase 1): tabela device-a-device com
+        // status ao vivo, operador dono, chamadas de HOJE (total/atendidas/não)
+        // e o ACUMULADO (`calls_made` da Wavoip). Só gestor. Usa o inventário
+        // vivo CACHEADO (garantirInventarioWavoip) — barato de pollar; a Wavoip
+        // só é batida no TTL. LGPD: número sai pro gestor, nunca a log.
+        path: '/api/admin/chamadas-por-numero',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          if (!wavoipApiConfigurada()) return c.json({ naoConfig: true, numeros: [] });
+          try {
+            await garantirInventarioWavoip();
+            const devices = snapshotDevicesWavoip();
+            const hoje = await lerChamadasDevicesHoje();
+            const donos = donosDevices();
+            const numeros = devices.map((d) => {
+              const h = hoje[d.id] ?? { total: 0, atendidas: 0, nao: 0 };
+              // "hoje" é DERIVADO (atendidas + não) — nunca diverge do detalhe.
+              return { ...d, operador: donos[d.id] ?? null, hoje: { total: h.atendidas + h.nao, atendidas: h.atendidas, nao: h.nao } };
+            });
+            // conectados primeiro; depois quem tem mais chamadas hoje
+            numeros.sort((a, b) => (b.conectado ? 1 : 0) - (a.conectado ? 1 : 0) || b.hoje.total - a.hoje.total);
+            // Órfãos: chamadas de hoje atribuídas a um id fora do inventário (ex.:
+            // operador sem número associado → bucket ''). Não somem — viram UMA
+            // linha, pra o "hoje" total do painel bater com o que aconteceu.
+            const conhecidos = new Set(devices.map((d) => d.id));
+            let orfAt = 0;
+            let orfNao = 0;
+            for (const [id, h] of Object.entries(hoje)) {
+              if (!conhecidos.has(id)) {
+                orfAt += h.atendidas;
+                orfNao += h.nao;
+              }
+            }
+            if (orfAt + orfNao > 0) {
+              numeros.push({
+                id: '',
+                nome: 'Sem número associado',
+                numero: '',
+                status: 'closed',
+                conectado: false,
+                callsMade: 0,
+                operador: null,
+                hoje: { total: orfAt + orfNao, atendidas: orfAt, nao: orfNao },
+              });
+            }
+            return c.json({ numeros });
+          } catch (e) {
+            console.error('[admin] erro em chamadas-por-numero:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao montar chamadas por número' }, 502);
+          }
+        },
+      },
+      {
+        // Operação ao vivo (Fase 2): quem está online AGORA e o que faz (ocioso
+        // / em chamada), com o número de cada um. Só gestor. Fontes degradáveis
+        // (listar* nunca lançam). LGPD: só usuário + número — nunca telefone/CPF.
+        path: '/api/admin/operacao',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const [online, emChamada] = await Promise.all([listarAtendentesOnline(), listarEmChamada()]);
+            const onlineSet = new Set(online);
+            const emChamadaSet = new Set(emChamada);
+            await garantirInventarioWavoip();
+            const numById = new Map(snapshotDevicesWavoip().map((d) => [d.id, d.numero] as [string, string]));
+            const snap = snapshotUsuarios();
+            const operadores: Array<{ usuario: string; papel: string; numero: string; online: boolean; emChamada: boolean; status: string }> = [];
+            for (const [usuario, reg] of snap) {
+              const on = onlineSet.has(usuario);
+              const call = emChamadaSet.has(usuario);
+              if (!on && !call) continue; // só quem está online ou em chamada
+              const devId = reg.wavoip_device_id || '';
+              operadores.push({
+                usuario,
+                papel: reg.papel,
+                numero: devId ? (numById.get(devId) ?? '') : '',
+                online: on,
+                emChamada: call,
+                status: call ? 'em_chamada' : 'online',
+              });
+            }
+            operadores.sort(
+              (a, b) =>
+                (b.emChamada ? 1 : 0) - (a.emChamada ? 1 : 0) ||
+                (b.online ? 1 : 0) - (a.online ? 1 : 0) ||
+                a.usuario.localeCompare(b.usuario),
+            );
+            return c.json({ operadores, resumo: { online: onlineSet.size, emChamada: emChamadaSet.size } });
+          } catch (e) {
+            console.error('[admin] erro em operacao:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao montar operação ao vivo' }, 502);
           }
         },
       },

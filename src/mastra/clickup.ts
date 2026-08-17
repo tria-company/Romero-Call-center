@@ -683,7 +683,7 @@ export type ResultadoDesfecho = 'atendida' | 'recusou' | 'nao_atendida';
 /** Motivo do não-atendimento anotado pelo operador (u13). Presente só quando o
  * operador preenche a telinha de motivo ao desligar sem o lead atender. */
 export interface MotivoNaoAtendida {
-  /** Categoria fixa (contável em relatório): "Não atende", "Caixa postal"… */
+  /** Categoria fixa (contável em relatório): "Não atende", "Sem WhatsApp"… */
   categoria: string;
   /** Frase livre opcional do operador. */
   observacao?: string;
