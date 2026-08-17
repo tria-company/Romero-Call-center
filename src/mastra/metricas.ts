@@ -244,6 +244,80 @@ async function contagem429Redis(): Promise<number> {
   return Number(valor) || 0;
 }
 
+// ===== Chamadas por device (por numero) — contador diario total/atendida/nao =====
+// Alimenta a tabela "chamadas por numero" do painel. Mesma casca janelada
+// (chave + data, PEXPIRE 48h) das outras metricas. deviceId = id do device
+// Wavoip (o wavoip_device_id do operador). LGPD: NUNCA loga numero/token.
+
+export type TipoChamadaDevice = 'total' | 'atendida' | 'nao';
+export interface ContagemDeviceDia {
+  total: number;
+  atendidas: number;
+  nao: number;
+}
+
+const PREFIXO_DEV = 'met:dev:'; // + deviceId + ':' + data + ':' + (total|atendida|nao)
+
+const devMem = new Map<string, { data: string } & ContagemDeviceDia>();
+
+function registrarChamadaDeviceMem(deviceId: string, tipo: TipoChamadaDevice): void {
+  const hoje = diaHojeStr();
+  let e = devMem.get(deviceId);
+  if (!e || e.data !== hoje) {
+    e = { data: hoje, total: 0, atendidas: 0, nao: 0 };
+    devMem.set(deviceId, e);
+  }
+  if (tipo === 'total') e.total += 1;
+  else if (tipo === 'atendida') e.atendidas += 1;
+  else e.nao += 1;
+}
+
+function lerChamadasDevicesHojeMem(): Record<string, ContagemDeviceDia> {
+  const hoje = diaHojeStr();
+  const out: Record<string, ContagemDeviceDia> = {};
+  for (const [id, e] of devMem) {
+    if (e.data === hoje) out[id] = { total: e.total, atendidas: e.atendidas, nao: e.nao };
+  }
+  return out;
+}
+
+function chaveDev(deviceId: string, tipo: TipoChamadaDevice): string {
+  return `${PREFIXO_DEV}${deviceId}:${diaHojeStr()}:${tipo}`;
+}
+
+async function registrarChamadaDeviceRedis(deviceId: string, tipo: TipoChamadaDevice): Promise<void> {
+  const cli = garantirCliente();
+  const chave = chaveDev(deviceId, tipo);
+  await cli.incr(chave);
+  await cli.pexpire(chave, DIA_TTL_MS);
+}
+
+async function lerChamadasDevicesHojeRedis(): Promise<Record<string, ContagemDeviceDia>> {
+  const hoje = diaHojeStr();
+  const cli = garantirCliente();
+  const out: Record<string, ContagemDeviceDia> = {};
+  let cursor = '0';
+  const chaves: string[] = [];
+  do {
+    const [proximo, lote] = await cli.scan(cursor, 'MATCH', `${PREFIXO_DEV}*:${hoje}:*`, 'COUNT', 300);
+    cursor = proximo;
+    chaves.push(...lote);
+  } while (cursor !== '0');
+  for (const chave of chaves) {
+    // met:dev:<deviceId>:<YYYY-MM-DD>:<tipo> — deviceId sem ':', data sem ':'
+    const partes = chave.slice(PREFIXO_DEV.length).split(':'); // [deviceId, data, tipo]
+    const deviceId = partes[0];
+    const tipo = partes[2] as TipoChamadaDevice;
+    if (!deviceId || !tipo) continue;
+    const val = Number(await cli.get(chave)) || 0;
+    const reg = out[deviceId] || (out[deviceId] = { total: 0, atendidas: 0, nao: 0 });
+    if (tipo === 'total') reg.total = val;
+    else if (tipo === 'atendida') reg.atendidas = val;
+    else if (tipo === 'nao') reg.nao = val;
+  }
+  return out;
+}
+
 // ===== Superficie publica — despacha para o backend escolhido no boot, NUNCA lanca =====
 
 /**
@@ -326,6 +400,32 @@ export function registrar429ClickUp(): void {
     }
   } catch (e) {
     console.error('[metricas] falha ao registrar 429 (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Conta uma chamada do device (por numero) no dia — total/atendida/nao. NUNCA lanca. */
+export function registrarChamadaDevice(deviceId: string, tipo: TipoChamadaDevice): void {
+  if (!deviceId) return;
+  try {
+    if (MODO === 'redis') {
+      registrarChamadaDeviceRedis(deviceId, tipo).catch((e) => {
+        console.error('[metricas] falha ao contar chamada de device (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+      });
+    } else {
+      registrarChamadaDeviceMem(deviceId, tipo);
+    }
+  } catch (e) {
+    console.error('[metricas] falha ao contar chamada de device (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Contagem de chamadas de hoje por deviceId. Degrada p/ {} em falha. NUNCA lanca. */
+export async function lerChamadasDevicesHoje(): Promise<Record<string, ContagemDeviceDia>> {
+  try {
+    return MODO === 'redis' ? await lerChamadasDevicesHojeRedis() : lerChamadasDevicesHojeMem();
+  } catch (e) {
+    console.error('[metricas] falha ao ler chamadas por device (degradando p/ vazio):', e instanceof Error ? e.message : String(e));
+    return {};
   }
 }
 

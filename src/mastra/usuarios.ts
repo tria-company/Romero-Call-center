@@ -292,6 +292,22 @@ export function donoDoDevice(deviceId: string, excetoId?: string): string | null
   return null;
 }
 
+/** Device (wavoip_device_id) associado ao operador, do snapshot. null se sem vínculo. */
+export function deviceIdDoUsuario(usuario: string): string | null {
+  const u = (usuario || '').trim().toLowerCase();
+  const dev = SNAPSHOT.get(u)?.wavoip_device_id;
+  return dev ? String(dev) : null;
+}
+
+/** Mapa deviceId -> usuario dono (para a tabela "chamadas por numero" do painel). */
+export function donosDevices(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const u of SNAPSHOT.values()) {
+    if (u.wavoip_device_id) out[String(u.wavoip_device_id)] = u.usuario;
+  }
+  return out;
+}
+
 // ===== Migração-seed idempotente env→Postgres (D-02/D-06/USER-05) =====
 
 export interface LinhaSeed {

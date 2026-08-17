@@ -29,6 +29,8 @@ import {
   buscarUsuario,
   papelDoUsuario,
   donoDoDevice,
+  deviceIdDoUsuario,
+  donosDevices,
 } from './usuarios.ts';
 
 // Lista de leads qualificados (GHL, pipeline COMERCIAL USI) — legado, ver nota
@@ -100,7 +102,7 @@ import { DISCADOR_HTML, DISCADOR_APP_JS, DISCADOR_MANIFEST, DISCADOR_SW_JS, DISC
 import { ADMIN_HTML, ADMIN_APP_JS } from './admin-painel';
 // Metricas operacionais (Fase 10 Plano 02, OBS-02/D-06): leitura agregada
 // (painel) + presenca de operador + contagem de erro por etapa (webhook).
-import { lerMetricas, registrarPresenca, registrarErroEtapa } from './metricas.ts';
+import { lerMetricas, registrarPresenca, registrarErroEtapa, registrarChamadaDevice, lerChamadasDevicesHoje } from './metricas.ts';
 import { METRICAS_FILA_ALERTA, METRICAS_ERRO_TAXA_ALERTA, METRICAS_429_ALERTA } from './config';
 // Durabilidade do webhook (Fase 2 — escala): persiste cada evento antes de processar.
 import {
@@ -153,6 +155,7 @@ import {
   autoWebhookConfigurado,
   wavoipApiConfigurada,
   garantirInventarioWavoip,
+  snapshotDevicesWavoip,
 } from './wavoip-api.ts';
 
 /**
@@ -424,6 +427,9 @@ export const mastra = new Mastra({
           try {
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
             if (telefone) await guardarTaskAtiva(telefone, taskId, deviceId);
+            // Métrica "chamadas por número" (Fase 1): conta a chamada no device do
+            // operador. Não-fatal — registrarChamadaDevice nunca lança.
+            registrarChamadaDevice(deviceId || deviceIdDoUsuario(sess.usuario) || '', 'total');
             // quick-260813-lf7 (RETENTION-BY-OUTCOME): /ligando virou TELEMETRIA
             // PURA (INICIO+OPERADOR+correlacao call<->task). NAO despeja mais o
             // cache da fila — a task FICA na fila ao clicar "Ligar"; despejar o
@@ -490,6 +496,9 @@ export const mastra = new Mastra({
             : undefined;
           try {
             await registrarDesfecho(taskId, assignee, resultado, motivo);
+            // Métrica "chamadas por número" (Fase 1): atendida vs não-atendida no
+            // device do operador. Não-fatal — nunca atrapalha o desfecho.
+            registrarChamadaDevice(deviceIdDoUsuario(sess.usuario) || '', resultado === 'atendida' ? 'atendida' : 'nao');
             // Espelha no cache do OPERADOR a saida da fila — a MESMA eviction
             // que saiu do /ligando (D-04/D-03, belt-and-suspenders). Ambas
             // no-op sem Redis (SC5) e nunca lancam — fica fora do caminho
@@ -1164,6 +1173,38 @@ export const mastra = new Mastra({
           } catch (e) {
             console.error('[admin] erro ao listar dispositivos Wavoip:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao consultar a Wavoip' }, 502);
+          }
+        },
+      },
+      {
+        // Chamadas por número (métricas Fase 1): tabela device-a-device com
+        // status ao vivo, operador dono, chamadas de HOJE (total/atendidas/não)
+        // e o ACUMULADO (`calls_made` da Wavoip). Só gestor. Usa o inventário
+        // vivo CACHEADO (garantirInventarioWavoip) — barato de pollar; a Wavoip
+        // só é batida no TTL. LGPD: número sai pro gestor, nunca a log.
+        path: '/api/admin/chamadas-por-numero',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoGestor(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          if (!wavoipApiConfigurada()) return c.json({ naoConfig: true, numeros: [] });
+          try {
+            await garantirInventarioWavoip();
+            const devices = snapshotDevicesWavoip();
+            const hoje = await lerChamadasDevicesHoje();
+            const donos = donosDevices();
+            const numeros = devices
+              .map((d) => ({
+                ...d,
+                operador: donos[d.id] ?? null,
+                hoje: hoje[d.id] ?? { total: 0, atendidas: 0, nao: 0 },
+              }))
+              // conectados primeiro; depois quem tem mais chamadas hoje
+              .sort((a, b) => (b.conectado ? 1 : 0) - (a.conectado ? 1 : 0) || b.hoje.total - a.hoje.total);
+            return c.json({ numeros });
+          } catch (e) {
+            console.error('[admin] erro em chamadas-por-numero:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao montar chamadas por número' }, 502);
           }
         },
       },
