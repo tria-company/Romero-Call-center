@@ -111,6 +111,7 @@ import {
   lerChamadasDevicesHoje,
   marcarEmChamada,
   limparEmChamada,
+  limparPresenca,
   listarAtendentesOnline,
   listarEmChamada,
 } from './metricas.ts';
@@ -551,6 +552,21 @@ export const mastra = new Mastra({
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           registrarPresenca(sess.usuario);
+          return c.json({ status: 'ok' });
+        },
+      },
+      {
+        // Logout explícito (Operação ao vivo): zera presença + em-chamada do
+        // operador NA HORA, pra ele sumir do painel sem esperar o TTL (120s).
+        // Sem sessão válida = já está fora → responde ok (idempotente).
+        path: '/api/discador/sair',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (sess) {
+            limparPresenca(sess.usuario);
+            limparEmChamada(sess.usuario);
+          }
           return c.json({ status: 'ok' });
         },
       },

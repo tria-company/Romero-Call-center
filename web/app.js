@@ -47,6 +47,10 @@
   var hbInt=null;
   function baterPresenca(){var t=getToken();if(!t){return;}fetch('/api/discador/presenca',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+t},body:'{}'}).catch(function(){});}
   function iniciarHeartbeat(){baterPresenca();if(hbInt){clearInterval(hbInt);}hbInt=setInterval(baterPresenca,60000);}
+  function pararHeartbeat(){if(hbInt){clearInterval(hbInt);hbInt=null;}}
+  // Logout explícito: some do painel na hora (não espera o TTL de 120s). keepalive
+  // pra o request completar mesmo com a UI trocando pra tela de login.
+  function sairPresenca(){var t=getToken();if(!t){return;}fetch('/api/discador/sair',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+t},body:'{}',keepalive:true}).catch(function(){});}
   function doLogin(){
     var u=$('u').value.trim(), p=$('p').value;$('login-err').textContent='';
     fetch('/api/discador/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,senha:p})})
@@ -54,7 +58,7 @@
     .then(function(r){if(!r.ok||!r.j.token){$('login-err').textContent='Usuário ou senha inválidos.';return;}setToken(r.j.token);$('p').value='';if(irParaPainel(r.j.token,r.j.panelUrl)){return;}startFila();})
     .catch(function(){$('login-err').textContent='Erro ao entrar.';});
   }
-  function startFila(){show('fila');carregarFila();}
+  function startFila(){show('fila');carregarFila();iniciarHeartbeat();}
   // Porta unica (u5/u8): o discador e a porta de todos. TODO usuario logado e
   // mandado pro painel, ja logado (token no FRAGMENTO — nao vai ao servidor
   // nem a log/Referer). panelUrl vazio (painel nao configurado) -> retorna false e
@@ -401,15 +405,13 @@
   window.addEventListener('DOMContentLoaded',function(){
     $('login-btn').onclick=doLogin;
     $('p').addEventListener('keydown',function(e){if(e.key==='Enter'){doLogin();}});
-    $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}setToken('');show('login');};
+    $('logout-btn').onclick=function(){if(emChamada&&!confirm('Há uma ligação em andamento. Sair mesmo assim?')){return;}sairPresenca();pararHeartbeat();setToken('');show('login');};
     $('reload-btn').onclick=carregarFila;
     $('hangup-btn').onclick=hangup;
     $('preview-voltar').onclick=voltarDoPreview;
     $('preview-ligar').onclick=function(){var it=previewAtualItem;fecharPreview();if(it){iniciarLigacao(it);}};
     // Poll ~15s da fila ao vivo (LIVE-QUEUE) — pulado durante chamada ativa (pollFila).
     filaPollInt=setInterval(pollFila,15000);
-    // Heartbeat de presença (Operação ao vivo) — independe da fila/chamada.
-    iniciarHeartbeat();
     var vo=$('voto-overlay');
     if(vo){vo.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var grp=b.parentNode;var cand=grp.getAttribute('data-cand');var all=grp.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');votoSel[cand]=b.getAttribute('data-v');});}
     $('voto-salvar').onclick=salvarVoto;

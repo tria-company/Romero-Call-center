@@ -516,6 +516,22 @@ export function limparEmChamada(usuario: string): void {
   }
 }
 
+/** Remove a presença do operador AGORA (logout explícito) — não espera o TTL de 120s. NUNCA lança. */
+export function limparPresenca(usuario: string): void {
+  if (!usuario) return;
+  try {
+    if (MODO === 'redis') {
+      garantirCliente()
+        .del(PREFIXO_PRESENCA + usuario)
+        .catch((e) => console.error('[metricas] limparPresenca (ignorado):', e instanceof Error ? e.message : String(e)));
+    } else {
+      presencaMem.delete(usuario);
+    }
+  } catch (e) {
+    console.error('[metricas] limparPresenca (ignorado):', e instanceof Error ? e.message : String(e));
+  }
+}
+
 /** Usuários online agora (presença). Degrada p/ [] em falha. NUNCA lança. */
 export async function listarAtendentesOnline(): Promise<string[]> {
   try {
