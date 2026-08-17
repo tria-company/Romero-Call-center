@@ -427,9 +427,10 @@ export const mastra = new Mastra({
           try {
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
             if (telefone) await guardarTaskAtiva(telefone, taskId, deviceId);
-            // Métrica "chamadas por número" (Fase 1): conta a chamada no device do
-            // operador. Não-fatal — registrarChamadaDevice nunca lança.
-            registrarChamadaDevice(deviceId || deviceIdDoUsuario(sess.usuario) || '', 'total');
+            // Métrica "chamadas por número" (Fase 1): NÃO conta aqui. A chamada é
+            // contada 1x no DESFECHO (fonte única → "hoje" = atendidas + não,
+            // sempre consistente e atribuída ao mesmo número). Clicar "Ligar" sem
+            // desfecho não infla o total.
             // quick-260813-lf7 (RETENTION-BY-OUTCOME): /ligando virou TELEMETRIA
             // PURA (INICIO+OPERADOR+correlacao call<->task). NAO despeja mais o
             // cache da fila — a task FICA na fila ao clicar "Ligar"; despejar o
@@ -496,8 +497,10 @@ export const mastra = new Mastra({
             : undefined;
           try {
             await registrarDesfecho(taskId, assignee, resultado, motivo);
-            // Métrica "chamadas por número" (Fase 1): atendida vs não-atendida no
-            // device do operador. Não-fatal — nunca atrapalha o desfecho.
+            // Métrica "chamadas por número" (Fase 1): conta 1 chamada por DESFECHO,
+            // atribuída ao NÚMERO do operador (deviceIdDoUsuario). "hoje" no painel
+            // é derivado (atendidas + não), então nunca diverge do detalhe.
+            // Não-fatal — nunca atrapalha o desfecho.
             registrarChamadaDevice(deviceIdDoUsuario(sess.usuario) || '', resultado === 'atendida' ? 'atendida' : 'nao');
             // Espelha no cache do OPERADOR a saida da fila — a MESMA eviction
             // que saiu do /ligando (D-04/D-03, belt-and-suspenders). Ambas
@@ -1193,14 +1196,37 @@ export const mastra = new Mastra({
             const devices = snapshotDevicesWavoip();
             const hoje = await lerChamadasDevicesHoje();
             const donos = donosDevices();
-            const numeros = devices
-              .map((d) => ({
-                ...d,
-                operador: donos[d.id] ?? null,
-                hoje: hoje[d.id] ?? { total: 0, atendidas: 0, nao: 0 },
-              }))
-              // conectados primeiro; depois quem tem mais chamadas hoje
-              .sort((a, b) => (b.conectado ? 1 : 0) - (a.conectado ? 1 : 0) || b.hoje.total - a.hoje.total);
+            const numeros = devices.map((d) => {
+              const h = hoje[d.id] ?? { total: 0, atendidas: 0, nao: 0 };
+              // "hoje" é DERIVADO (atendidas + não) — nunca diverge do detalhe.
+              return { ...d, operador: donos[d.id] ?? null, hoje: { total: h.atendidas + h.nao, atendidas: h.atendidas, nao: h.nao } };
+            });
+            // conectados primeiro; depois quem tem mais chamadas hoje
+            numeros.sort((a, b) => (b.conectado ? 1 : 0) - (a.conectado ? 1 : 0) || b.hoje.total - a.hoje.total);
+            // Órfãos: chamadas de hoje atribuídas a um id fora do inventário (ex.:
+            // operador sem número associado → bucket ''). Não somem — viram UMA
+            // linha, pra o "hoje" total do painel bater com o que aconteceu.
+            const conhecidos = new Set(devices.map((d) => d.id));
+            let orfAt = 0;
+            let orfNao = 0;
+            for (const [id, h] of Object.entries(hoje)) {
+              if (!conhecidos.has(id)) {
+                orfAt += h.atendidas;
+                orfNao += h.nao;
+              }
+            }
+            if (orfAt + orfNao > 0) {
+              numeros.push({
+                id: '',
+                nome: 'Sem número associado',
+                numero: '',
+                status: 'closed',
+                conectado: false,
+                callsMade: 0,
+                operador: null,
+                hoje: { total: orfAt + orfNao, atendidas: orfAt, nao: orfNao },
+              });
+            }
             return c.json({ numeros });
           } catch (e) {
             console.error('[admin] erro em chamadas-por-numero:', e instanceof Error ? e.message : String(e));

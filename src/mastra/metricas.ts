@@ -74,6 +74,15 @@ function diaHojeStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Dia OPERACIONAL em horário de Brasília (America/Sao_Paulo). O "hoje" das
+// chamadas por número é o dia do operador (BR), não o dia UTC — senão o dia
+// "vira" às 21h BRT (00h UTC) e as ligações da noite caem no dia seguinte.
+// Usado SÓ pelos contadores por-device; o resto das métricas segue o dia UTC.
+// en-CA formata YYYY-MM-DD (mesma forma de diaHojeStr).
+function diaOperacionalStr(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+}
+
 function chaveDiaHoje(): string {
   return PREFIXO_DIA + diaHojeStr();
 }
@@ -261,7 +270,7 @@ const PREFIXO_DEV = 'met:dev:'; // + deviceId + ':' + data + ':' + (total|atendi
 const devMem = new Map<string, { data: string } & ContagemDeviceDia>();
 
 function registrarChamadaDeviceMem(deviceId: string, tipo: TipoChamadaDevice): void {
-  const hoje = diaHojeStr();
+  const hoje = diaOperacionalStr();
   let e = devMem.get(deviceId);
   if (!e || e.data !== hoje) {
     e = { data: hoje, total: 0, atendidas: 0, nao: 0 };
@@ -273,7 +282,7 @@ function registrarChamadaDeviceMem(deviceId: string, tipo: TipoChamadaDevice): v
 }
 
 function lerChamadasDevicesHojeMem(): Record<string, ContagemDeviceDia> {
-  const hoje = diaHojeStr();
+  const hoje = diaOperacionalStr();
   const out: Record<string, ContagemDeviceDia> = {};
   for (const [id, e] of devMem) {
     if (e.data === hoje) out[id] = { total: e.total, atendidas: e.atendidas, nao: e.nao };
@@ -282,7 +291,7 @@ function lerChamadasDevicesHojeMem(): Record<string, ContagemDeviceDia> {
 }
 
 function chaveDev(deviceId: string, tipo: TipoChamadaDevice): string {
-  return `${PREFIXO_DEV}${deviceId}:${diaHojeStr()}:${tipo}`;
+  return `${PREFIXO_DEV}${deviceId}:${diaOperacionalStr()}:${tipo}`;
 }
 
 async function registrarChamadaDeviceRedis(deviceId: string, tipo: TipoChamadaDevice): Promise<void> {
@@ -293,7 +302,7 @@ async function registrarChamadaDeviceRedis(deviceId: string, tipo: TipoChamadaDe
 }
 
 async function lerChamadasDevicesHojeRedis(): Promise<Record<string, ContagemDeviceDia>> {
-  const hoje = diaHojeStr();
+  const hoje = diaOperacionalStr();
   const cli = garantirCliente();
   const out: Record<string, ContagemDeviceDia> = {};
   let cursor = '0';

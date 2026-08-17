@@ -89,16 +89,28 @@ export const ADMIN_HTML = `<!doctype html>
   .wbadge.no{color:#f0b429;border-color:rgba(240,180,41,.45)}
   .wowner{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid rgba(61,139,255,.45);color:#7fb0ff;white-space:nowrap;font-weight:700}
   .wowner.livre{color:var(--dim-2);border-color:var(--line);font-weight:400}
-  .cnum-row{display:flex;align-items:center;gap:12px;padding:11px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);margin-bottom:8px}
-  .cnum-main{flex:1;min-width:0}
-  .cnum-nome{font-weight:700}
-  .cnum-sub{font-size:12px;color:var(--dim)}
-  .cnum-nums{display:flex;gap:18px;align-items:flex-start;text-align:right;flex:none}
-  .cnum-metric{display:flex;flex-direction:column;line-height:1.15}
-  .cnum-metric b{font-size:17px}
-  .cnum-metric .rot{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim-2)}
-  .cnum-metric .det{font-size:11px;color:var(--dim);margin-top:2px}
-  @media(max-width:640px){.cnum-nums{gap:12px}.cnum-metric b{font-size:15px}}
+  .bloco-sub{font-size:12px;color:var(--dim-2);margin:-6px 0 2px}
+  .cnum-row{display:flex;align-items:center;gap:14px;padding:13px 16px;border-radius:14px;border:1px solid var(--line);background:var(--card);margin-bottom:9px}
+  .cnum-rank{flex:none;width:20px;text-align:center;font-size:12px;font-weight:800;color:var(--dim-2);font-variant-numeric:tabular-nums}
+  .cnum-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+  .cnum-nome{font-weight:700;display:flex;align-items:center;gap:8px;min-width:0}
+  .cnum-nome .wdot{width:9px;height:9px}
+  .cnum-nome .txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cnum-sub{font-size:12px;color:var(--dim);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .cnum-bar{height:5px;width:100%;max-width:240px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden}
+  .cnum-bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2ec46b,#2bb6a0);border-radius:999px;transition:width .4s}
+  .cnum-nums{display:flex;gap:22px;align-items:center;text-align:right;flex:none}
+  .cnum-metric{display:flex;flex-direction:column;line-height:1.1;align-items:flex-end}
+  .cnum-metric b{font-size:22px;font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+  .cnum-metric.tot b{font-size:16px;color:var(--dim);font-weight:700}
+  .cnum-metric .rot{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim-2);margin-top:1px}
+  .cnum-chips{display:flex;gap:6px;margin-top:5px}
+  .cnum-chip{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid var(--line);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .cnum-chip.ok{color:#2ec46b;border-color:rgba(46,196,107,.4)}
+  .cnum-chip.no{color:#f0b429;border-color:rgba(240,180,41,.4)}
+  .cnum-owner{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid rgba(61,139,255,.4);color:#7fb0ff;font-weight:700;white-space:nowrap}
+  .cnum-owner.livre{color:var(--dim-2);border-color:var(--line);font-weight:400}
+  @media(max-width:640px){.cnum-row{gap:10px;padding:12px}.cnum-nums{gap:14px}.cnum-metric b{font-size:19px}.cnum-bar{max-width:160px}.cnum-rank{display:none}}
   .field::placeholder{color:var(--dim-2)}
   .field:focus{outline:none;border-color:var(--romero)}
   .primary{background:linear-gradient(90deg,#3d8bff,#2bb6a0);color:#04122a;border:0;border-radius:15px;padding:14px;font-weight:800;width:100%;letter-spacing:.01em}
@@ -156,7 +168,15 @@ export const ADMIN_HTML = `<!doctype html>
 
       <section id="chamadas-bloco" class="bloco">
         <div class="bloco-title">Chamadas por número</div>
+        <div class="bloco-sub">Hoje (horário de Brasília) · o acumulado vem da Wavoip</div>
         <div id="chamadas-erro" class="erro-bloco" style="display:none"></div>
+        <div id="chamadas-kpis" class="kpi-grid" style="display:none">
+          <div class="card"><div class="kpi-label"><span class="kpi-dot"></span>Chamadas hoje</div><div id="ck-hoje" class="kpi-display ok">—</div></div>
+          <div class="card"><div class="kpi-label">Atendidas hoje</div><div id="ck-atend" class="kpi-display ok">—</div></div>
+          <div class="card"><div class="kpi-label">Não atendidas</div><div id="ck-nao" class="kpi-display ok">—</div></div>
+          <div class="card"><div class="kpi-label">Taxa de atendimento</div><div id="ck-taxa" class="kpi-display ok">—</div></div>
+          <div class="card"><div class="kpi-label">Números ativos</div><div id="ck-ativos" class="kpi-display ok">—</div></div>
+        </div>
         <div id="chamadas-lista"><p class="muted">Carregando…</p></div>
       </section>
 
@@ -363,40 +383,62 @@ export const ADMIN_APP_JS = `(function(){
   function fmtNumWav(n){n=String(n||'');return n?('+'+n):'(sem número)';}
   // ===== Chamadas por número (tabela do Painel) =====
   function carregarChamadasPorNumero(){
-    var lista=$('chamadas-lista'),erro=$('chamadas-erro');
+    var lista=$('chamadas-lista'),erro=$('chamadas-erro'),kpis=$('chamadas-kpis');
     if(!lista){return;}
     api('/api/admin/chamadas-por-numero').then(function(res){return res.json().then(function(j){return {status:res.status,j:j};});}).then(function(r){
-      if(r.status!==200){erro.textContent='Não foi possível carregar as chamadas por número agora.';erro.style.display='block';return;}
-      if(r.j.naoConfig){erro.style.display='none';lista.innerHTML='<p class="muted">Conta Wavoip não configurada (WAVOIP_API_EMAIL / WAVOIP_API_PASSWORD no servidor).</p>';return;}
+      if(r.status!==200){if(kpis){kpis.style.display='none';}erro.textContent='Não foi possível carregar as chamadas por número agora.';erro.style.display='block';return;}
+      if(r.j.naoConfig){if(kpis){kpis.style.display='none';}erro.style.display='none';lista.innerHTML='<p class="muted">Conta Wavoip não configurada (WAVOIP_API_EMAIL / WAVOIP_API_PASSWORD no servidor).</p>';return;}
       erro.style.display='none';
       renderChamadasPorNumero(r.j.numeros||[]);
     }).catch(function(e){if(e&&e.message==='401'){return;}});
   }
   function renderChamadasPorNumero(numeros){
     var lista=$('chamadas-lista');if(!lista){return;}
+    function sv(id,v){var e=$(id);if(e){e.textContent=v;}}
+    // ===== KPIs do topo — somados sobre TODOS os números da conta =====
+    var somaAt=0,somaNao=0,ativos=0;
+    for(var k=0;k<numeros.length;k++){
+      var hk=numeros[k].hoje||{atendidas:0,nao:0};
+      somaAt+=(hk.atendidas||0);somaNao+=(hk.nao||0);
+      if(numeros[k].conectado){ativos++;}
+    }
+    var somaTot=somaAt+somaNao;
+    sv('ck-hoje',String(somaTot));
+    sv('ck-atend',String(somaAt));
+    sv('ck-nao',String(somaNao));
+    sv('ck-taxa',somaTot>0?(Math.round((somaAt/somaTot)*100)+'%'):'—');
+    sv('ck-ativos',String(ativos)+' / '+String(numeros.length));
+    var kpis=$('chamadas-kpis');if(kpis){kpis.style.display='';}
+    // ===== Lista por número =====
     lista.innerHTML='';
     // Mostra os números "reais" (com número), com dono, ou com chamada hoje —
     // esconde os hibernando sem número (ruído). Se filtrar tudo, mostra todos.
     var vis=numeros.filter(function(d){return d.numero||d.operador||(d.hoje&&d.hoje.total>0);});
     if(!vis.length){vis=numeros;}
     if(!vis.length){lista.innerHTML='<p class="muted">Nenhum número na conta.</p>';return;}
-    for(var i=0;i<vis.length;i++){(function(d){
+    for(var i=0;i<vis.length;i++){(function(d,rank){
       var st=statusWavoip(d.status);
       var h=d.hoje||{total:0,atendidas:0,nao:0};
+      var tot=h.total||0;
       var nome=(d.nome&&d.nome!=='Nome do dispositivo')?d.nome:fmtNumWav(d.numero);
-      var dono=d.operador?('👤 '+esc(String(d.operador))):'<span class="muted">livre</span>';
+      var dono=d.operador?('<span class="cnum-owner">👤 '+esc(String(d.operador))+'</span>'):'<span class="cnum-owner livre">livre</span>';
+      var pct=tot>0?Math.round((h.atendidas/tot)*100):0;
       var row=document.createElement('div');row.className='cnum-row';
-      var dot=document.createElement('span');dot.className='wdot '+st.dot;row.appendChild(dot);
+      var rk=document.createElement('div');rk.className='cnum-rank';rk.textContent=String(rank);row.appendChild(rk);
       var main=document.createElement('div');main.className='cnum-main';
-      main.innerHTML='<div class="cnum-nome">'+esc(nome)+'</div><div class="cnum-sub">'+esc(fmtNumWav(d.numero))+' · '+esc(st.txt)+' · '+dono+'</div>';
+      main.innerHTML=
+        '<div class="cnum-nome"><span class="wdot '+st.dot+'"></span><span class="txt">'+esc(nome)+'</span></div>'
+        +'<div class="cnum-sub">'+esc(fmtNumWav(d.numero))+' · '+esc(st.txt)+' · '+dono+'</div>'
+        +'<div class="cnum-bar"><i style="width:'+pct+'%"></i></div>';
       row.appendChild(main);
       var nums=document.createElement('div');nums.className='cnum-nums';
       nums.innerHTML=
-        '<div class="cnum-metric"><b>'+(h.total||0)+'</b><span class="rot">hoje</span><span class="det">'+(h.atendidas||0)+'✓ · '+(h.nao||0)+'✗</span></div>'
-        +'<div class="cnum-metric"><b>'+(d.callsMade||0)+'</b><span class="rot">total</span></div>';
+        '<div class="cnum-metric"><b>'+tot+'</b><span class="rot">hoje</span>'
+          +'<div class="cnum-chips"><span class="cnum-chip ok">'+(h.atendidas||0)+' ✓</span><span class="cnum-chip no">'+(h.nao||0)+' ✗</span></div></div>'
+        +'<div class="cnum-metric tot"><b>'+(d.callsMade||0)+'</b><span class="rot">total</span></div>';
       row.appendChild(nums);
       lista.appendChild(row);
-    })(vis[i]);}
+    })(vis[i],i+1);}
   }
   function carregarWavoip(){
     var lista=$('wavoip-lista'),acoes=$('wavoip-acoes'),erro=$('wavoip-erro');
