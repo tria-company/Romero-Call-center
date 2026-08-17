@@ -111,6 +111,19 @@ export const ADMIN_HTML = `<!doctype html>
   .cnum-owner{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid rgba(61,139,255,.4);color:#7fb0ff;font-weight:700;white-space:nowrap}
   .cnum-owner.livre{color:var(--dim-2);border-color:var(--line);font-weight:400}
   @media(max-width:640px){.cnum-row{gap:10px;padding:12px}.cnum-nums{gap:14px}.cnum-metric b{font-size:19px}.cnum-bar{max-width:160px}.cnum-rank{display:none}}
+  /* operação ao vivo — quem está online/em chamada */
+  .op-row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);margin-bottom:8px}
+  .op-ava{width:34px;height:34px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;background:linear-gradient(150deg,#3d8bff,#1b4fa0);color:#eaf2ff}
+  .op-main{flex:1;min-width:0}
+  .op-nome{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .op-sub{font-size:12px;color:var(--dim)}
+  .op-badge{font-size:12px;font-weight:700;padding:5px 12px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;display:flex;align-items:center;gap:7px;flex:none}
+  .op-badge.on{color:#7fb0ff;border-color:rgba(61,139,255,.4)}
+  .op-badge.call{color:#2ec46b;border-color:rgba(46,196,107,.45);background:rgba(46,196,107,.08)}
+  .op-badge .pulse{width:8px;height:8px;border-radius:50%;background:currentColor}
+  .op-badge.call .pulse{animation:oppulse 1.2s infinite}
+  @keyframes oppulse{0%{opacity:1}50%{opacity:.25}100%{opacity:1}}
+  .op-vazio{color:var(--dim);font-size:14px;padding:6px 0}
   .field::placeholder{color:var(--dim-2)}
   .field:focus{outline:none;border-color:var(--romero)}
   .primary{background:linear-gradient(90deg,#3d8bff,#2bb6a0);color:#04122a;border:0;border-radius:15px;padding:14px;font-weight:800;width:100%;letter-spacing:.01em}
@@ -164,6 +177,14 @@ export const ADMIN_HTML = `<!doctype html>
             <div id="kpi-erros" class="kpi-display ok">—</div>
           </div>
         </div>
+      </section>
+
+      <section id="operacao-bloco" class="bloco">
+        <div class="bloco-title">Operação ao vivo</div>
+        <div class="bloco-sub">Quem está com o discador aberto agora e o que está fazendo</div>
+        <div id="operacao-erro" class="erro-bloco" style="display:none"></div>
+        <div id="operacao-resumo" class="bloco-sub" style="display:none"></div>
+        <div id="operacao-lista"><p class="muted">Carregando…</p></div>
       </section>
 
       <section id="chamadas-bloco" class="bloco">
@@ -333,7 +354,7 @@ export const ADMIN_APP_JS = `(function(){
     var s=Math.floor((Date.now()-lastUpdateTs)/1000);
     $('upd-pill').textContent='atualizado há '+s+'s';
   }
-  function pollTick(){buscarMetricas();carregarChamadasPorNumero();}
+  function pollTick(){buscarMetricas();carregarOperacao();carregarChamadasPorNumero();}
   function iniciarPolling(){
     if(pollTimer){return;}
     pollTick();
@@ -381,6 +402,36 @@ export const ADMIN_APP_JS = `(function(){
     return {dot:'off',txt:'Caiu'};
   }
   function fmtNumWav(n){n=String(n||'');return n?('+'+n):'(sem número)';}
+  function iniciais(s){var n=String(s||'').trim();if(!n){return '#';}var p=n.split(/[ ._-]+/).filter(Boolean);var a=p[0]?p[0].charAt(0):'';var b=p.length>1?p[p.length-1].charAt(0):'';return (a+b||a).toUpperCase();}
+  // ===== Operação ao vivo (quem está online / em chamada) =====
+  function carregarOperacao(){
+    var lista=$('operacao-lista'),erro=$('operacao-erro');
+    if(!lista){return;}
+    api('/api/admin/operacao').then(function(res){return res.json().then(function(j){return {status:res.status,j:j};});}).then(function(r){
+      if(r.status!==200){erro.textContent='Não foi possível carregar a operação ao vivo agora.';erro.style.display='block';return;}
+      erro.style.display='none';
+      renderOperacao(r.j.operadores||[],r.j.resumo||{online:0,emChamada:0});
+    }).catch(function(e){if(e&&e.message==='401'){return;}});
+  }
+  function renderOperacao(ops,resumo){
+    var lista=$('operacao-lista'),resEl=$('operacao-resumo');if(!lista){return;}
+    if(resEl){resEl.textContent=(resumo.online||0)+' online · '+(resumo.emChamada||0)+' em chamada';resEl.style.display='';}
+    lista.innerHTML='';
+    if(!ops.length){lista.innerHTML='<p class="op-vazio">Ninguém online agora. Quando um operador abrir o discador, aparece aqui em segundos.</p>';return;}
+    for(var i=0;i<ops.length;i++){(function(o){
+      var call=!!o.emChamada;
+      var numTxt=o.numero?fmtNumWav(o.numero):'sem número associado';
+      var row=document.createElement('div');row.className='op-row';
+      var ava=document.createElement('div');ava.className='op-ava';ava.textContent=iniciais(o.usuario);row.appendChild(ava);
+      var main=document.createElement('div');main.className='op-main';
+      main.innerHTML='<div class="op-nome">'+esc(String(o.usuario))+'</div><div class="op-sub">'+esc(numTxt)+'</div>';
+      row.appendChild(main);
+      var badge=document.createElement('div');badge.className='op-badge '+(call?'call':'on');
+      badge.innerHTML='<span class="pulse"></span>'+(call?'Em chamada':'Online');
+      row.appendChild(badge);
+      lista.appendChild(row);
+    })(ops[i]);}
+  }
   // ===== Chamadas por número (tabela do Painel) =====
   function carregarChamadasPorNumero(){
     var lista=$('chamadas-lista'),erro=$('chamadas-erro'),kpis=$('chamadas-kpis');

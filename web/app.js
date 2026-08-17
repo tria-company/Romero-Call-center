@@ -39,6 +39,14 @@
     if(t){opts.headers['Authorization']='Bearer '+t;}
     return fetch(path,opts).then(function(res){if(res.status===401){setToken('');show('login');throw new Error('401');}return res;});
   }
+  // Heartbeat de presença (Operação ao vivo): enquanto logado, avisa o backend a
+  // cada 60s que este operador está com o discador aberto — inclusive DURANTE a
+  // chamada (o pollFila pausa; este não). Assim o painel do gestor vê quem está
+  // online. Best-effort: fetch cru, ignora erro/401 (NÃO usa apiPost pra não
+  // deslogar por um ping que falhou).
+  var hbInt=null;
+  function baterPresenca(){var t=getToken();if(!t){return;}fetch('/api/discador/presenca',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+t},body:'{}'}).catch(function(){});}
+  function iniciarHeartbeat(){baterPresenca();if(hbInt){clearInterval(hbInt);}hbInt=setInterval(baterPresenca,60000);}
   function doLogin(){
     var u=$('u').value.trim(), p=$('p').value;$('login-err').textContent='';
     fetch('/api/discador/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,senha:p})})
@@ -400,6 +408,8 @@
     $('preview-ligar').onclick=function(){var it=previewAtualItem;fecharPreview();if(it){iniciarLigacao(it);}};
     // Poll ~15s da fila ao vivo (LIVE-QUEUE) — pulado durante chamada ativa (pollFila).
     filaPollInt=setInterval(pollFila,15000);
+    // Heartbeat de presença (Operação ao vivo) — independe da fila/chamada.
+    iniciarHeartbeat();
     var vo=$('voto-overlay');
     if(vo){vo.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var grp=b.parentNode;var cand=grp.getAttribute('data-cand');var all=grp.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');votoSel[cand]=b.getAttribute('data-v');});}
     $('voto-salvar').onclick=salvarVoto;

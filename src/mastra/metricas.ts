@@ -438,6 +438,104 @@ export async function lerChamadasDevicesHoje(): Promise<Record<string, ContagemD
   }
 }
 
+// ===== Operação ao vivo (Fase 2): LISTAR quem está online + quem está EM CHAMADA =====
+//
+// "online" reutiliza a presença (met:presenca:<usuario>) — agora alimentada por
+// um heartbeat do discador, não só por login/ligando/desfecho. "em chamada" é um
+// estado POR OPERADOR (met:chamada:<usuario>), marcado no /ligando e limpo no
+// /desfecho, com TTL de teto (some sozinho se o desfecho falhar). LGPD: chaveado
+// por USUÁRIO, nunca por telefone/CPF.
+
+const PREFIXO_CHAMADA = 'met:chamada:'; // + usuario (operador em chamada agora)
+const EM_CHAMADA_TTL_MS = 15 * 60 * 1000; // teto de uma chamada; auto-limpa se faltar o desfecho
+const emChamadaMem = new Map<string, number>(); // usuario -> ts (memoria)
+
+function listarAtendentesOnlineMem(): string[] {
+  podarPresencaMem();
+  return Array.from(presencaMem.keys());
+}
+async function listarAtendentesOnlineRedis(): Promise<string[]> {
+  let cursor = '0';
+  const out: string[] = [];
+  do {
+    const [proximo, chaves] = await garantirCliente().scan(cursor, 'MATCH', PREFIXO_PRESENCA + '*', 'COUNT', 200);
+    cursor = proximo;
+    for (const k of chaves) out.push(k.slice(PREFIXO_PRESENCA.length));
+  } while (cursor !== '0');
+  return out;
+}
+
+function podarEmChamadaMem(): void {
+  const agora = Date.now();
+  for (const [k, ts] of emChamadaMem) {
+    if (agora - ts > EM_CHAMADA_TTL_MS) emChamadaMem.delete(k);
+  }
+}
+async function marcarEmChamadaRedis(usuario: string): Promise<void> {
+  await garantirCliente().set(PREFIXO_CHAMADA + usuario, '1', 'PX', EM_CHAMADA_TTL_MS);
+}
+async function limparEmChamadaRedis(usuario: string): Promise<void> {
+  await garantirCliente().del(PREFIXO_CHAMADA + usuario);
+}
+async function listarEmChamadaRedis(): Promise<string[]> {
+  let cursor = '0';
+  const out: string[] = [];
+  do {
+    const [proximo, chaves] = await garantirCliente().scan(cursor, 'MATCH', PREFIXO_CHAMADA + '*', 'COUNT', 200);
+    cursor = proximo;
+    for (const k of chaves) out.push(k.slice(PREFIXO_CHAMADA.length));
+  } while (cursor !== '0');
+  return out;
+}
+
+/** Marca o operador como EM CHAMADA agora (no /ligando). NUNCA lança. */
+export function marcarEmChamada(usuario: string): void {
+  if (!usuario) return;
+  try {
+    if (MODO === 'redis') {
+      marcarEmChamadaRedis(usuario).catch((e) => console.error('[metricas] marcarEmChamada (ignorado):', e instanceof Error ? e.message : String(e)));
+    } else {
+      emChamadaMem.set(usuario, Date.now());
+    }
+  } catch (e) {
+    console.error('[metricas] marcarEmChamada (ignorado):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Limpa o EM CHAMADA do operador (no /desfecho). NUNCA lança. */
+export function limparEmChamada(usuario: string): void {
+  if (!usuario) return;
+  try {
+    if (MODO === 'redis') {
+      limparEmChamadaRedis(usuario).catch((e) => console.error('[metricas] limparEmChamada (ignorado):', e instanceof Error ? e.message : String(e)));
+    } else {
+      emChamadaMem.delete(usuario);
+    }
+  } catch (e) {
+    console.error('[metricas] limparEmChamada (ignorado):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Usuários online agora (presença). Degrada p/ [] em falha. NUNCA lança. */
+export async function listarAtendentesOnline(): Promise<string[]> {
+  try {
+    return MODO === 'redis' ? await listarAtendentesOnlineRedis() : listarAtendentesOnlineMem();
+  } catch (e) {
+    console.error('[metricas] listarAtendentesOnline (degrada p/ []):', e instanceof Error ? e.message : String(e));
+    return [];
+  }
+}
+
+/** Usuários em chamada agora. Degrada p/ [] em falha. NUNCA lança. */
+export async function listarEmChamada(): Promise<string[]> {
+  try {
+    return MODO === 'redis' ? await listarEmChamadaRedis() : (podarEmChamadaMem(), Array.from(emChamadaMem.keys()));
+  } catch (e) {
+    console.error('[metricas] listarEmChamada (degrada p/ []):', e instanceof Error ? e.message : String(e));
+    return [];
+  }
+}
+
 async function lerAtendentesOnline(): Promise<number> {
   try {
     return MODO === 'redis' ? await atendentesOnlineRedis() : atendentesOnlineMem();
