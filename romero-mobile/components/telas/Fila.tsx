@@ -85,7 +85,13 @@ export function Fila() {
           <div className="qbar">
             <div className="qtop">
               <b>{itens.length}</b>
-              <span>{itens.length > 0 ? "ligações na fila hoje" : "fila zerada hoje"}</span>
+              <span>
+                {itens.length > 0
+                  ? itens.length === 1
+                    ? "última ligação de hoje"
+                    : "na fila hoje — ligue a próxima"
+                  : "fila zerada hoje"}
+              </span>
             </div>
           </div>
 
@@ -95,9 +101,9 @@ export function Fila() {
               Você falou com todo mundo que o sistema separou para hoje.
             </div>
           ) : (
-            itens.map((item, i) => (
-              <CardFila key={item.taskId} item={item} indice={i} onLigar={ligar} />
-            ))
+            /* u14: mostra só o PRÓXIMO lead (o backend já ordena por prioridade).
+               Ao ligar e voltar pra cá, a fila recarrega e o próximo vira o topo. */
+            <CardFila key={itens[0].taskId} item={itens[0]} indice={0} onLigar={ligar} />
           )}
         </>
       )}
