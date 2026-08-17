@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
 // Helper PURO de iniciais — fora de qualquer store/localStorage.
 import { iniciais } from "@/lib/leads-util";
 import type { ItemFilaReal } from "@/lib/discador-servidor";
@@ -15,9 +14,9 @@ import { Autobox, Esqueleto, Vhead } from "./blocos";
    manda), sem marcar-feito: quando a Ligação recebe desfecho ela some no
    próximo fetch. O visual (Vhead, qbar, cards `.task`) segue o mockup.
 
-   u12 (pedido do gestor): tocar no NOME abre a ficha do lead (`/base/:id?de=fila`
-   — o voltar devolve pra cá), onde vivem o WhatsApp e o resto do contexto.
-   O botão "Ligar" continua como atalho direto pro call center. */
+   u14 (pedido do gestor): o CARD INTEIRO liga — tocar em qualquer lugar do card
+   faz a mesma ação do botão "Ligar" (handoff pro discador). A ficha do lead saiu
+   da Fila (fica na aba Base); o botão "Ligar" segue como affordance explícita. */
 
 export function Fila() {
   const { itens, carregando, erro, semMapeamento, recarregar } = useFilaReal();
@@ -115,15 +114,18 @@ function CardFila({
   indice: number;
   onLigar: (item: ItemFilaReal) => void;
 }) {
-  // Toque no nome/avatar abre a ficha real (u12). A chave é `leadTaskId`
-  // (LEAD_REL — task-id real do lead), NUNCA `idLead` (chave de dedupe/GHL,
-  // que a ficha /base/:id não aceita). Sem vínculo → sem link, resta o Ligar.
-  const hrefFicha = item.leadTaskId
-    ? `/base/${encodeURIComponent(item.leadTaskId)}?de=fila`
-    : null;
-
-  const corpo = (
-    <>
+  // u14: o CARD INTEIRO liga. Tocar em qualquer lugar do card dispara `onLigar`
+  // (mesma ação do botão). O botão "Ligar" fica como affordance explícita e
+  // dá stopPropagation pra não disparar duas vezes. A ficha saiu da Fila.
+  return (
+    <div
+      className="task"
+      onClick={() => onLigar(item)}
+      style={{
+        cursor: "pointer",
+        animation: `reveal-up 380ms var(--ease-out-soft) ${Math.min(indice, 8) * 40}ms backwards`,
+      }}
+    >
       <div className="av">{iniciais(item.nome)}</div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -131,37 +133,16 @@ function CardFila({
         {/* Telefone exibido ao operador autorizado — nunca logar (LGPD). */}
         <div className="tm trunc">{fmtTelefone(item.telefone)}</div>
       </div>
-    </>
-  );
 
-  return (
-    <div
-      className="task"
-      style={{
-        animation: `reveal-up 380ms var(--ease-out-soft) ${Math.min(indice, 8) * 40}ms backwards`,
-      }}
-    >
-      {hrefFicha ? (
-        <Link
-          href={hrefFicha}
-          aria-label={`Abrir a ficha de ${item.nome}`}
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: "inherit",
-            flex: 1,
-            minWidth: 0,
-            color: "inherit",
-            textDecoration: "none",
-          }}
-        >
-          {corpo}
-        </Link>
-      ) : (
-        corpo
-      )}
-
-      <button type="button" onClick={() => onLigar(item)} className="go" aria-label="Ligar">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onLigar(item);
+        }}
+        className="go"
+        aria-label="Ligar"
+      >
         Ligar
       </button>
     </div>
