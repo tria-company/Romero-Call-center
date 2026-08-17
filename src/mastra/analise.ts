@@ -17,7 +17,8 @@
 //   `reason` = queda no MEIO de chamada atendida (gera RECORD depois); FAILED
 //   com dur=0 = falha real da chamada. Cada derivação é uma função
 //   nomeada/isolada — o vocabulário pode ser ajustado sem tocar no resto.
-// - Limitação aceita: caixa postal pode contar como "atendeu" (D-P3-05).
+// - Ligação é via WhatsApp (sem correio de voz), então ATENDEU não tem a
+//   ambiguidade de "atendeu a gravação" das chamadas telefônicas comuns.
 
 /** Subconjunto do payload Wavoip (eventos CALL/RECORD) que este módulo lê. */
 export interface PayloadCallWavoip {
