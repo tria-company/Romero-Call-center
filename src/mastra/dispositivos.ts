@@ -20,6 +20,10 @@ import { WAVOIP_DEVICES, WAVOIP_USER_DEVICES, WAVOIP_DEVICE_TOKEN, REDIS_URL, DE
 // `WAVOIP_USER_DEVICES` do env vira fallback SOMENTE de degradação quando o
 // snapshot está vazio (store não aquecido ainda/indisponível).
 import { snapshotUsuarios } from './usuarios.ts';
+// DEVICE-01 (Wavoip API): quando o device dedicado do operador não está no
+// inventário do env (WAVOIP_DEVICES), tentamos o inventário VIVO da conta
+// Wavoip (cacheado server-side). Aditivo — se não achar, cai pro pool/global.
+import { tokenDeviceWavoip } from './wavoip-api.ts';
 
 export type ModoDevice = 'dedicado' | 'pool' | 'global';
 
@@ -140,7 +144,10 @@ export function resolverConfigDoUsuario(usuario: string): ConfigDevice {
     ? (snap.size > 0 ? (snap.get(u)?.wavoip_device_id ?? undefined) : DEDICADOS.get(u))
     : undefined;
   if (deviceIdDedicado) {
-    const token = tokenDoDevice(deviceIdDedicado);
+    // Fonte 1: inventário do env (WAVOIP_DEVICES). Fonte 2 (fallback aditivo):
+    // inventário vivo da conta Wavoip em cache — o painel associa o operador ao
+    // `id` do device da API, cujo token vem daqui. Nenhum dos dois -> pool/global.
+    const token = tokenDoDevice(deviceIdDedicado) ?? tokenDeviceWavoip(deviceIdDedicado);
     if (token) {
       return { wavoipToken: token, deviceId: deviceIdDedicado, modo: 'dedicado' };
     }

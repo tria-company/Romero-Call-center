@@ -11,6 +11,8 @@
   // o roteamento pós-chamada pra rodar UMA vez. motivo* = seleção da telinha.
   var discagemStart=0, tentativaDiscada=false, encerrandoUI=false;
   var motivoTaskId=null, motivoCat=null, motivoTentSeg=0;
+  // Tom de chamada (WebAudio) — o Wavoip não entrega ringback ao navegador.
+  var ringCtx=null, ringOsc=null, ringGain=null, ringTO=null;
   var previewAtualItem=null;
   // Multi-device pool (DEVICE-02): deviceModo aprendido uma vez via /config
   // ('dedicado'|'pool'|'global'); leaseDeviceId guarda o device alocado na
@@ -248,6 +250,8 @@
   }
   function iniciarLigacao(lead){
     openCall(lead,'Pedindo microfone...');
+    prepararAudio();// desbloqueia o áudio DENTRO do gesto do toque (iOS)
+    tocarChamando();// tom já começa aqui (no gesto) — mais confiável p/ autoplay
     // iOS: o prompt de microfone SO aparece se getUserMedia rodar DENTRO do
     // gesto do toque, antes de qualquer await. Pedimos aqui pra conceder a
     // permissao; o SDK depois adquire o proprio stream (sem novo prompt).
@@ -273,6 +277,7 @@
       if(wantHangup){ hangup(); return; }
       setCallStatus('Chamando...');
       tentativaDiscada=true;discagemStart=Date.now();// u13: começou a tentativa
+      tocarChamando();// reforça o tom (já iniciado no gesto) agora que discou
       wireCallEvents(currentCall);
     }).catch(function(e){
       if(e&&e.semDeviceLivre){setCallStatus('Sem número livre, tente em instantes');endCallUI();return;}
@@ -286,7 +291,7 @@
   function wireCallEvents(call){
     // Eventos reais do @wavoip/wavoip-api (CallOutgoingEvents).
     on(call,'status',function(s){var t=mapStatus(s);if(t){setCallStatus(t);}});
-    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');setCallStatus('Em ligação');startTimer();});
+    on(call,'peerAccept',function(active){if(active&&typeof active.end==='function'){currentCall=active;}foiAtendida=true;enviarDesfecho('atendida');pararChamando();setCallStatus('Em ligação');startTimer();});
     on(call,'peerReject',function(){enviarDesfecho('recusou');setCallStatus('Recusada');endCallUI();});
     // u13: não-atendida NÃO desfecha automático — endCallUI abre a telinha de
     // motivo (o operador escolhe a categoria e aí conclui/sai da fila).
@@ -317,7 +322,14 @@
   function openCall(lead,status){wantHangup=false;emChamada=true;foiAtendida=false;desfechoEnviado=false;tentativaDiscada=false;discagemStart=0;encerrandoUI=false;chamadaTaskId=(lead&&lead.taskId)||null;pedirWakeLock();var av=$('call-avatar');if(av){av.textContent=initials(lead.nome||lead.telefone);}$('call-nome').textContent=lead.nome||lead.telefone;$('call-tel').textContent=lead.telefone;setCallStatus(status);$('call-timer').textContent='';var sc=$('call-script');if(sc){sc.textContent='Carregando script...';}$('call-overlay').style.display='flex';if(chamadaTaskId){carregarScriptDaChamada(chamadaTaskId);}}
   function setCallStatus(s){$('call-status').textContent=s;}
   function startTimer(){timerStart=Date.now();if(timerInt){clearInterval(timerInt);}timerInt=setInterval(function(){var s=Math.floor((Date.now()-timerStart)/1000);var mm=Math.floor(s/60),ss=s%60;$('call-timer').textContent=(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss;},500);}
-  function endCallUI(){liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;if(encerrandoUI){return;}encerrandoUI=true;var atendida=foiAtendida,tid=chamadaTaskId,discou=tentativaDiscada;var tentSeg=(discou&&discagemStart)?Math.round((Date.now()-discagemStart)/1000):0;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else if(discou&&tid){mostrarMotivo(tid,tentSeg);}else{voltarParaFila();}},1400);}
+  // Tom de chamada ("chamando..."): o Wavoip não entrega ringback ao navegador,
+  // então geramos o tom aqui (WebAudio, ~425Hz, cadência 1s liga/4s desliga —
+  // padrão BR). prepararAudio roda DENTRO do gesto do toque pra desbloquear o
+  // áudio (iOS); toca em "Chamando/Tocando" e para ao atender/recusar/desligar.
+  function prepararAudio(){try{var AC=window.AudioContext||window.webkitAudioContext;if(!AC){return;}if(!ringCtx){ringCtx=new AC();}if(ringCtx.state==='suspended'){ringCtx.resume();}}catch(e){}}
+  function tocarChamando(){if(ringOsc){return;}if(!ringCtx){return;}try{if(ringCtx.state!=='running'){ringCtx.resume();}}catch(e){}try{ringOsc=ringCtx.createOscillator();ringGain=ringCtx.createGain();ringOsc.type='sine';ringOsc.frequency.value=425;ringGain.gain.value=0.0001;ringOsc.connect(ringGain);ringGain.connect(ringCtx.destination);ringOsc.start();var ligado=false;function ciclo(){if(!ringCtx||!ringGain){return;}ligado=!ligado;var t=ringCtx.currentTime;try{ringGain.gain.setValueAtTime(ligado?0.14:0.0001,t);}catch(e){}ringTO=setTimeout(ciclo,ligado?1000:4000);}ciclo();}catch(e){}}
+  function pararChamando(){if(ringTO){clearTimeout(ringTO);ringTO=null;}try{if(ringOsc){ringOsc.stop();ringOsc.disconnect();}}catch(e){}try{if(ringGain){ringGain.disconnect();}}catch(e){}ringOsc=null;ringGain=null;}
+  function endCallUI(){pararChamando();liberarDeviceDaChamada();emChamada=false;soltarWakeLock();if(timerInt){clearInterval(timerInt);timerInt=null;}currentCall=null;if(encerrandoUI){return;}encerrandoUI=true;var atendida=foiAtendida,tid=chamadaTaskId,discou=tentativaDiscada;var tentSeg=(discou&&discagemStart)?Math.round((Date.now()-discagemStart)/1000):0;setTimeout(function(){if(atendida&&tid){mostrarVotoSeNecessario(tid);}else if(discou&&tid){mostrarMotivo(tid,tentSeg);}else{voltarParaFila();}},1400);}
   // u13: telinha de motivo do não-atendimento. Mostra quanto tempo tentou e
   // pede a categoria (+ frase opcional). Só ao concluir dispara o desfecho —
   // que grava o motivo, o tempo de tentativa, comenta e fecha (sai da fila).
