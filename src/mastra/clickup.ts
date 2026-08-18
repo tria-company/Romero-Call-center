@@ -1195,7 +1195,10 @@ export async function registrarEnvioAudio(args: {
   }
   try {
     const novaTask = await criarTask(CLICKUP_LIST_AUDIOS, {
-      name: `Áudio enviado — ${args.telefone}`,
+      // IN-01/LGPD: título com telefone MASCARADO — o número em claro fica só
+      // no campo dedicado TELEFONE (custom_fields), não duplicado no título
+      // humano-legível (reduz a superfície de PII).
+      name: `Áudio enviado — ${mascararTelefone(args.telefone)}`,
       custom_fields,
     });
     if (!novaTask?.id) {
