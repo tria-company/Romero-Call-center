@@ -505,3 +505,23 @@ export const METRICAS_ALERTA_INTERVALO_MS = Number(process.env.METRICAS_ALERTA_I
 
 // Janela (ms) em que um operador (presença registrada) ainda conta como "online" — 2 min.
 export const METRICAS_PRESENCA_TTL_MS = Number(process.env.METRICAS_PRESENCA_TTL_MS) || 120000;
+
+// ===== Painel — números lidos ao vivo (painel-dados.ts) =====
+//
+// O dashboard passou a ler cada número da fonte CORRETA: cadastros do Postgres
+// (users_romero), votos e ligações do ClickUp ao vivo — em vez do task_count da Lista 01
+// e do espelho congelado. Como as leituras do ClickUp custam segundos, o módulo serve o
+// valor em cache na hora e revalida em segundo plano (stale-while-revalidate). Os TTLs
+// abaixo controlam quão atrás da realidade um número pode ficar.
+
+// Cadastros vêm de um count no Postgres (~150ms) — pode ser bem fresco.
+export const PAINEL_TTL_BANCO_MS = Number(process.env.PAINEL_TTL_BANCO_MS) || 15000;
+
+// Votos e ligações varrem o ClickUp (2-4s por leitura). 30s mantém o painel vivo sem
+// queimar o balde de 90 req/min que a fila dos closers também disputa.
+export const PAINEL_TTL_CLICKUP_MS = Number(process.env.PAINEL_TTL_CLICKUP_MS) || 30000;
+
+// Teto de páginas por varredura do ClickUp (100 tasks/página). Protege o dia em que a
+// Lista 02 crescer: acima do teto o número vem marcado `parcial` e a UI rotula "N+"
+// em vez de mentir um total exato. 30 páginas = 3.000 ligações.
+export const PAINEL_MAX_PAGINAS = Number(process.env.PAINEL_MAX_PAGINAS) || 30;
