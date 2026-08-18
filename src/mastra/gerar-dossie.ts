@@ -27,6 +27,7 @@
 import type { FontesDossie } from './dossie.ts';
 
 import {
+  type TaskClickUp,
   lerTask,
   atualizarTask,
   buscarLigacoesDoLead,
@@ -68,12 +69,16 @@ function valorCampoTask(task: Awaited<ReturnType<typeof lerTask>>, fieldId: stri
  *
  * @param leadTaskId task da Lista 01 (LEADS) a regenerar.
  * @param opts.dryRun quando `true`, devolve o markdown SEM gravar.
+ * @param opts.ligacoesPreBuscadas Lista 02 (LIGACOES) já paginada inteira por
+ *   um caller externo de backfill/lote — repassada para `buscarLigacoesDoLead`
+ *   pra pular a repaginação por lead. Sem esse campo, a Seção 4 pagina fresh
+ *   (comportamento atual, inalterado).
  * @returns o markdown do dossiê, ou `null` quando a task não existe OU o LLM
  *   devolveu vazio/whitespace (nesse caso NÃO grava — nunca zera a description).
  */
 export async function regenerarDossieDoLead(
   leadTaskId: string,
-  opts?: { dryRun?: boolean },
+  opts?: { dryRun?: boolean; ligacoesPreBuscadas?: TaskClickUp[] },
 ): Promise<string | null> {
   // lerTask LANÇA em falha de infra (WR-03); `null` só para task inexistente.
   const task = await lerTask(leadTaskId);
@@ -149,7 +154,9 @@ export async function regenerarDossieDoLead(
   // degrada por fonte sem abortar o dossiê deste lead (D-P4-06).
   let ligacoesRomeroCall: FontesDossie['ligacoesRomeroCall'] = null;
   try {
-    ligacoesRomeroCall = await buscarLigacoesDoLead(leadTaskId, telefone);
+    ligacoesRomeroCall = await buscarLigacoesDoLead(leadTaskId, telefone, {
+      ligacoesPreBuscadas: opts?.ligacoesPreBuscadas,
+    });
   } catch (e) {
     console.error('[gerar-dossie] ligações RomeroCall (Lista 02) indisponíveis (segue):', e instanceof Error ? e.message : String(e));
   }
