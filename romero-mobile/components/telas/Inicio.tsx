@@ -15,9 +15,15 @@ import { Foguete } from "./Foguete";
    as métricas de operação (cadastros/apoiadores/fila) do ClickUp ao vivo, e as
    duas urnas com o foguete (votos confirmados vs meta). Nada de mock.
 
-   Votos/apoiadores contam no ESPELHO (Postgres rápido). Enquanto o espelho não
-   estiver backfillado (reload do PostgREST pendente), esses números aparecem
-   como "—" (honesto), não como zero enganoso. Cadastros e fila já são reais.
+   Cada número vem da fonte correta (correção de 18/08/2026):
+     · Cadastros na base -> POSTGRES (users_romero). Antes vinha do task_count da
+       Lista 01 do ClickUp e mostrava 100.007, escondendo 124 mil pessoas.
+     · Votos/apoiadores  -> CLICKUP ao vivo. Antes vinha do espelho, congelado em
+       17/08 15:30 — voto novo nunca aparecia na tela.
+     · Ligações de hoje  -> CLICKUP ao vivo. Bloco NOVO: o painel nunca leu a Lista 02,
+       embora as ligações estivessem sendo gravadas, transcritas e analisadas.
+   Quando uma fonte não responde, o número vira "—" (honesto), nunca zero enganoso.
+   O hook revalida sozinho a cada 20s — o painel muda sem ninguém recarregar.
 
    A Central de Campanha chega por `children` (componente de servidor). */
 
@@ -53,7 +59,7 @@ export function Inicio({ children }: { children?: React.ReactNode }) {
         ))}
       </div>
 
-      {/* métricas — cadastros (ClickUp) · apoiadores (espelho) · fila (ao vivo) */}
+      {/* métricas — cadastros (Postgres) · apoiadores (ClickUp ao vivo) · fila */}
       <div className="mrow">
         <Metrica
           valor={num.cadastros === null ? "—" : <Contador valor={num.cadastros} />}
@@ -63,7 +69,8 @@ export function Inicio({ children }: { children?: React.ReactNode }) {
         <Metrica
           valor={num.votosPopulados ? <Contador valor={num.apoiadores} /> : "—"}
           label="Apoiadores ativos"
-          delta={num.votosPopulados ? undefined : "aguardando base rápida"}
+          delta={num.votosPopulados ? undefined : "não foi possível ler os votos"}
+          alerta={!num.votosPopulados}
         />
         <Metrica
           valor={<Contador valor={fila.itens.length} />}
@@ -74,6 +81,46 @@ export function Inicio({ children }: { children?: React.ReactNode }) {
           full
         />
       </div>
+
+      {/* ligações de hoje — o registro que o painel nunca mostrou até 18/08/2026.
+          `hoje` usa o dia de Brasília (não UTC): senão o dia vira às 21h e as ligações
+          da noite caem no dia seguinte. */}
+      {num.ligacoes && (
+        <>
+          <div className="mrow">
+            <Metrica
+              valor={<Contador valor={num.ligacoes.hoje} />}
+              label="Ligações hoje"
+              delta={
+                num.ligacoes.ultimaEm
+                  ? `última às ${new Date(num.ligacoes.ultimaEm).toLocaleTimeString("pt-BR", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      timeZone: "America/Sao_Paulo",
+                    })}`
+                  : undefined
+              }
+            />
+            <Metrica
+              valor={<Contador valor={num.ligacoes.atendidasHoje} />}
+              label="Atendidas hoje"
+              delta={
+                num.ligacoes.hoje > 0
+                  ? `${Math.round((num.ligacoes.atendidasHoje / num.ligacoes.hoje) * 100)}% de atendimento`
+                  : undefined
+              }
+            />
+            <Metrica
+              valor={<Contador valor={num.ligacoes.comAnaliseIa} />}
+              label="Analisadas pela IA"
+              delta={`${num.ligacoes.comTranscricao} transcritas · ${num.ligacoes.total}${
+                num.ligacoes.parcial ? "+" : ""
+              } no total`}
+              full
+            />
+          </div>
+        </>
+      )}
 
       {/* convite de instalação — some quando dispensado ou já instalado */}
       <InstallBanner />

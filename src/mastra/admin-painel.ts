@@ -179,6 +179,39 @@ export const ADMIN_HTML = `<!doctype html>
         </div>
       </section>
 
+      <section id="campanha-bloco" class="bloco">
+        <div class="bloco-title">Campanha e ligações</div>
+        <div class="bloco-sub">Cadastros vêm do banco · votos e ligações do ClickUp ao vivo</div>
+        <div id="campanha-erro" class="erro-bloco" style="display:none"></div>
+        <div id="campanha-grid" class="kpi-grid">
+          <div class="card">
+            <div class="kpi-label"><span class="kpi-dot"></span>Cadastros na base</div>
+            <div id="cm-cadastros" class="kpi-display ok">—</div>
+            <div id="cm-cadastros-sub" class="kpi-empty" style="display:none"></div>
+          </div>
+          <div class="card">
+            <div class="kpi-label">Ligações hoje</div>
+            <div id="cm-lig-hoje" class="kpi-display ok">—</div>
+            <div id="cm-lig-sub" class="kpi-empty" style="display:none"></div>
+          </div>
+          <div class="card">
+            <div class="kpi-label">Atendidas hoje</div>
+            <div id="cm-lig-atend" class="kpi-display ok">—</div>
+            <div id="cm-lig-taxa" class="kpi-empty" style="display:none"></div>
+          </div>
+          <div class="card">
+            <div class="kpi-label">Analisadas pela IA</div>
+            <div id="cm-lig-ia" class="kpi-display ok">—</div>
+            <div id="cm-lig-ia-sub" class="kpi-empty" style="display:none"></div>
+          </div>
+          <div class="card">
+            <div class="kpi-label">Votos confirmados</div>
+            <div id="cm-votos" class="kpi-display ok">—</div>
+            <div id="cm-votos-sub" class="kpi-empty" style="display:none"></div>
+          </div>
+        </div>
+      </section>
+
       <section id="operacao-bloco" class="bloco">
         <div class="bloco-title">Operação ao vivo</div>
         <div class="bloco-sub">Quem está com o discador aberto agora e o que está fazendo</div>
@@ -354,7 +387,51 @@ export const ADMIN_APP_JS = `(function(){
     var s=Math.floor((Date.now()-lastUpdateTs)/1000);
     $('upd-pill').textContent='atualizado há '+s+'s';
   }
-  function pollTick(){buscarMetricas();carregarOperacao();carregarChamadasPorNumero();}
+  // Campanha e ligacoes — numeros lidos ao vivo da fonte correta (painel-dados.ts no
+  // backend). Antes de 18/08/2026 o painel nao tinha esse bloco: as ligacoes eram
+  // gravadas, transcritas e analisadas, e nenhum numero da tela as mostrava.
+  function fmtN(n){return (n===null||n===undefined)?'—':Number(n).toLocaleString('pt-BR');}
+  function subTxt(id,txt){var el=$(id);if(!el){return;}if(txt){el.textContent=txt;el.style.display='block';}else{el.style.display='none';}}
+  function carregarCampanha(){
+    api('/api/discador/painel-numeros').then(function(res){
+      if(!res.ok){throw new Error(String(res.status));}
+      return res.json();
+    }).then(function(d){
+      $('campanha-erro').style.display='none';
+      $('campanha-grid').style.display='grid';
+
+      $('cm-cadastros').textContent=fmtN(d.cadastros);
+      subTxt('cm-cadastros-sub', d.cadastros===null?'banco indisponível':'pessoas no banco');
+
+      var lig=d.ligacoes;
+      if(lig){
+        $('cm-lig-hoje').textContent=fmtN(lig.hoje);
+        var ult=lig.ultimaEm?new Date(lig.ultimaEm).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',timeZone:'America/Sao_Paulo'}):null;
+        subTxt('cm-lig-sub', ult?('última às '+ult):null);
+        $('cm-lig-atend').textContent=fmtN(lig.atendidasHoje);
+        subTxt('cm-lig-taxa', lig.hoje>0?(Math.round((lig.atendidasHoje/lig.hoje)*100)+'% de atendimento'):'nenhuma ligação hoje ainda');
+        $('cm-lig-ia').textContent=fmtN(lig.comAnaliseIa);
+        subTxt('cm-lig-ia-sub', fmtN(lig.comTranscricao)+' transcritas · '+fmtN(lig.total)+(lig.parcial?'+':'')+' no total');
+      }else{
+        $('cm-lig-hoje').textContent='—';$('cm-lig-atend').textContent='—';$('cm-lig-ia').textContent='—';
+        subTxt('cm-lig-sub','ClickUp indisponível');subTxt('cm-lig-taxa',null);subTxt('cm-lig-ia-sub',null);
+      }
+
+      if(d.votosPopulados){
+        $('cm-votos').textContent=fmtN(d.apoiadores)+(d.votosParcial?'+':'');
+        subTxt('cm-votos-sub','Romero '+fmtN(d.votosRomero)+' · Andressa '+fmtN(d.votosAndressa));
+      }else{
+        $('cm-votos').textContent='—';
+        subTxt('cm-votos-sub','não foi possível ler os votos');
+      }
+    }).catch(function(e){
+      if(e&&e.message==='401'){return;}
+      $('campanha-erro').textContent='Não foi possível carregar os números da campanha agora. Nova tentativa em '+(pollMs/1000)+'s.';
+      $('campanha-erro').style.display='block';
+      $('campanha-grid').style.display='none';
+    });
+  }
+  function pollTick(){buscarMetricas();carregarCampanha();carregarOperacao();carregarChamadasPorNumero();}
   function iniciarPolling(){
     if(pollTimer){return;}
     pollTick();

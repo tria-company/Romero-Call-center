@@ -21,6 +21,7 @@ Servidor HTTP único (Mastra/Hono, porta 4111) que roda na VPS. Faz **API do dis
 | [dossie.ts](dossie.ts) | Dossiê 360° do lead (multi-tabela `romero_db_*`). |
 | [discador-auth.ts](discador-auth.ts) | Login do closer + token de sessão HMAC stateless (Bearer, nunca cookie). |
 | [discador-pwa.ts](discador-pwa.ts) | Assets do PWA (HTML/`app.js`/`sw.js`) como template strings. **Espelhado em [../../web/](../../web/) — manter em sincronia manual.** |
+| [painel-dados.ts](painel-dados.ts) | Números do dashboard lidos **ao vivo** da fonte certa: cadastros no Postgres (`users_romero`), votos e ligações no ClickUp. Cache stale-while-revalidate por processo. **Só leitura** — não grava em lugar nenhum. |
 | [operadores.ts](operadores.ts) | Mapa usuário logado → operador do ClickUp (`DISCADOR_ASSIGNEES`). |
 | [usuarios.ts](usuarios.ts) | Snapshot de `discador_usuarios` (papel, `clickup_member_id`, `wavoip_device_id`). Lookups rápidos: `papelDoUsuario`, `deviceIdDoUsuario`, `donoDoDevice`/`donosDevices` (exclusividade número↔operador), `snapshotUsuarios`. |
 | [dispositivos.ts](dispositivos.ts) | `resolverConfigDoUsuario` — resolve o device do operador na ordem **dedicado** (`wavoip_device_id`→token) → **pool** (lease) → **global** (`WAVOIP_DEVICE_TOKEN`). |
