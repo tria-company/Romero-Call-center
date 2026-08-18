@@ -23,7 +23,7 @@ import { snapshotUsuarios } from './usuarios.ts';
 // DEVICE-01 (Wavoip API): quando o device dedicado do operador não está no
 // inventário do env (WAVOIP_DEVICES), tentamos o inventário VIVO da conta
 // Wavoip (cacheado server-side). Aditivo — se não achar, cai pro pool/global.
-import { tokenDeviceWavoip } from './wavoip-api.ts';
+import { tokenDeviceWavoip, deviceConectadoWavoip } from './wavoip-api.ts';
 
 export type ModoDevice = 'dedicado' | 'pool' | 'global';
 
@@ -31,6 +31,10 @@ export interface ConfigDevice {
   wavoipToken: string | null;
   deviceId: string | null;
   modo: ModoDevice;
+  // DEVICE-04: numero dedicado existe mas caiu do WhatsApp (hibernating) —
+  // o token ainda vem (o frontend pode tentar), mas o operador ve um aviso
+  // especifico em vez de descobrir so quando a discagem falha sem explicacao.
+  desconectado?: boolean;
 }
 
 interface DeviceInventario {
@@ -149,7 +153,12 @@ export function resolverConfigDoUsuario(usuario: string): ConfigDevice {
     // `id` do device da API, cujo token vem daqui. Nenhum dos dois -> pool/global.
     const token = tokenDoDevice(deviceIdDedicado) ?? tokenDeviceWavoip(deviceIdDedicado);
     if (token) {
-      return { wavoipToken: token, deviceId: deviceIdDedicado, modo: 'dedicado' };
+      // DEVICE-04: so sinaliza quando o cache vivo CONFIRMA desconexao
+      // (false) — null (device so-env, sem tracking) nao bloqueia.
+      const desconectado = deviceConectadoWavoip(deviceIdDedicado) === false;
+      return desconectado
+        ? { wavoipToken: token, deviceId: deviceIdDedicado, modo: 'dedicado', desconectado: true }
+        : { wavoipToken: token, deviceId: deviceIdDedicado, modo: 'dedicado' };
     }
   }
   if (existeDeviceDePool()) {
@@ -211,6 +220,9 @@ function leaseVivoMem(deviceId: string): boolean {
 
 function alocarDeviceMem(usuario: string): DeviceAlocado | null {
   for (const deviceId of deviceIdsDePool()) {
+    // DEVICE-04: pula device caido do WhatsApp — auto-cura pro proximo do
+    // pool em vez de entregar um numero que vai falhar na hora de discar.
+    if (deviceConectadoWavoip(deviceId) === false) continue;
     if (leaseVivoMem(deviceId)) continue;
     const token = tokenDoDevice(deviceId);
     if (!token) continue;
@@ -251,6 +263,8 @@ async function alocarDeviceRedis(usuario: string): Promise<DeviceAlocado | null>
   try {
     const cliente = garantirClientePool();
     for (const deviceId of deviceIdsDePool()) {
+      // DEVICE-04: mesmo pulo de device caido do backend memoria (auto-cura).
+      if (deviceConectadoWavoip(deviceId) === false) continue;
       const token = tokenDoDevice(deviceId);
       if (!token) continue;
       const resultado = await cliente.set(PREFIXO_LEASE + deviceId, usuario, 'PX', DEVICE_LEASE_TTL_MS, 'NX');

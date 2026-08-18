@@ -184,6 +184,17 @@ export function tokenDeviceWavoip(deviceId: string): string | null {
 }
 
 /**
+ * Status de conexão de um device pelo id, do inventário vivo em cache
+ * (DEVICE-04): true=conectado (status 'open'), false=caiu do WhatsApp
+ * (hibernating/etc — discar por ele vai falhar), null=fora do cache vivo
+ * (device só-env sem tracking de status — não bloqueia, comportamento atual).
+ */
+export function deviceConectadoWavoip(deviceId: string): boolean | null {
+  const e = invCache.mapa.get(String(deviceId));
+  return e ? e.conectado : null;
+}
+
+/**
  * Snapshot dos devices do inventário vivo, SEM token (LGPD/segredo), para o
  * painel "chamadas por número". Lê o cache — barato de chamar (o refresh
  * respeita o TTL de garantirInventarioWavoip). Vazio se o cache não montou.

@@ -595,6 +595,11 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          // DEVICE-04: aquece o inventário vivo (TTL 60s) — alocarDevice usa
+          // deviceConectadoWavoip pra pular device caido do pool. Sem isso, esta
+          // rota (chamada isolada, sem passar por /config antes) podia rodar
+          // com cache frio e nunca filtrar hibernating. Não-fatal (nunca lança).
+          await garantirInventarioWavoip();
           const alocado = await alocarDevice(sess.usuario);
           if (!alocado) return c.json({ erro: 'sem device livre' }, 503);
           return c.json(alocado);

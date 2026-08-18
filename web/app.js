@@ -248,6 +248,9 @@
         deviceModo=cfg.modo;
         if(deviceModo==='pool'){return alocarDeviceELigar();}
         if(deviceModo==='dedicado'){dedicadoDeviceId=cfg.deviceId||null;}
+        // DEVICE-04: numero dedicado caiu do WhatsApp (hibernating) — para AQUI
+        // com um aviso especifico em vez de deixar a discagem falhar sem explicacao.
+        if(cfg.desconectado){var ed=new Error('numero desconectado');ed.numeroDesconectado=true;throw ed;}
         wavoipToken=cfg.wavoipToken;if(!wavoipToken){throw new Error('sem token wavoip');}
         return instanciarWavoip(wavoipToken).then(function(w){wavoip=w;return wavoip;});
       });
@@ -297,6 +300,7 @@
       wireCallEvents(currentCall);
     }).catch(function(e){
       if(e&&e.semDeviceLivre){setCallEstado('erro','Sem número livre agora. Tente de novo em instantes.');endCallUI();return;}
+      if(e&&e.numeroDesconectado){setCallEstado('erro','Seu número caiu do WhatsApp. Avise o gestor para reconectar.');endCallUI();return;}
       var neg=(e&&(e.name==='NotAllowedError'||e.name==='SecurityError'));
       if(neg){setCallEstado('microfone');}else{setCallEstado('erro');}
       endCallUI();
