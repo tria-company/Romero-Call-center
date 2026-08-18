@@ -1189,7 +1189,10 @@ export const mastra = new Mastra({
           await registrarEnvioAudio({
             telefone: telefoneE164,
             enviadoPor: gate.usuario,
-            audioRef: `audio-${Date.now()}${mimetype ? `.${mimetype.split('/')[1] || 'bin'}` : ''}`,
+            // WR-03/IN-03: extensão saneada — o recorder produz
+            // `audio/webm;codecs=opus`, então tira os parâmetros `;codecs=...`
+            // pra não gravar `audio-<ts>.webm;codecs=opus` (extensão malformada).
+            audioRef: `audio-${Date.now()}${mimetype ? `.${(mimetype.split('/')[1] || '').split(';')[0] || 'bin'}` : ''}`,
             leadTaskId: leadId,
           });
           return c.json({ status: 'ok' });
