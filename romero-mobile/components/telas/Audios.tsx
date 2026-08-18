@@ -76,6 +76,11 @@ export function Audios() {
   const cronometroRef = React.useRef<number | null>(null);
   const inicioGravacaoRef = React.useRef(0);
   const audioElRef = React.useRef<HTMLAudioElement | null>(null);
+  // WR-04: guarda os setState assíncronos (onstop/FileReader) contra a tela já
+  // desmontada — parar o recorder no cleanup dispara `onstop` DEPOIS do
+  // unmount, então sem essa flag o montarPreview faria setState num componente
+  // morto.
+  const montadoRef = React.useRef(true);
 
   const pararCronometro = React.useCallback(() => {
     if (cronometroRef.current != null) {
@@ -85,6 +90,9 @@ export function Audios() {
   }, []);
 
   const montarPreview = React.useCallback((blob: Blob, decorridoMs: number) => {
+    // WR-04: se a tela desmontou antes do `onstop` chegar aqui, não toca em
+    // state — só libera o blob e sai (senão vaza o object URL sem preview).
+    if (!montadoRef.current) return;
     const url = URL.createObjectURL(blob);
     setAudioUrl((antiga) => {
       if (antiga) URL.revokeObjectURL(antiga);
@@ -94,6 +102,7 @@ export function Audios() {
     setDuracaoPreviewMs(decorridoMs);
     const reader = new FileReader();
     reader.onloadend = () => {
+      if (!montadoRef.current) return;
       const resultado = reader.result;
       if (typeof resultado === "string") {
         setAudioBase64(resultado.split(",")[1] ?? "");
@@ -178,10 +187,20 @@ export function Audios() {
     else el.pause();
   }
 
-  // Limpa recursos vivos (stream de mic + object URL) ao desmontar a tela.
+  // Limpa recursos vivos (recorder + stream de mic + object URL) ao desmontar
+  // a tela. WR-04: para o MediaRecorder ANTES dos tracks (senão fica em
+  // `recording` com a fonte encerrada por baixo) e marca a tela como desmontada
+  // pra que o `onstop`/FileReader assíncronos não façam setState num componente
+  // morto (guardados em montarPreview).
   React.useEffect(
     () => () => {
+      montadoRef.current = false;
       pararCronometro();
+      try {
+        recorderRef.current?.stop();
+      } catch {
+        /* recorder já parado/inativo — ignora */
+      }
       streamRef.current?.getTracks().forEach((t) => t.stop());
       setAudioUrl((atual) => {
         if (atual) URL.revokeObjectURL(atual);
