@@ -176,6 +176,10 @@ if (!CLICKUP_API_TOKEN) {
 // IDs das listas ja existentes na workspace 9014971829 (D-04). Nao sao segredos.
 export const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
 export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
+// Lista 03 AUDIOS (Fase 12, ENVIO-06) — ja existe com os 19 campos certos
+// (investigacao previa, PROJECT.md); este modulo so MAPEIA (CAMPOS_AUDIOS em
+// clickup.ts), nunca cria lista/campo (D-07).
+export const CLICKUP_LIST_AUDIOS = process.env.CLICKUP_LIST_AUDIOS || '1000320000003180';
 
 // Workspace (team) cujos MEMBROS aparecem no painel de admin (dropdown do
 // vínculo clickup_member_id). Default = Gabinete 509 (9014971829, a mesma das

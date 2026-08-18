@@ -13,6 +13,7 @@ import {
   CLICKUP_API_TOKEN,
   CLICKUP_LIST_LEADS,
   CLICKUP_LIST_LIGACOES,
+  CLICKUP_LIST_AUDIOS,
   CLICKUP_TEAM_ID,
   OPER_STATUS_EM_PROCESSAMENTO,
   OPER_STATUS_FECHADO,
@@ -137,6 +138,65 @@ export const OPCOES_LEADS = {
     sim: '6a96d622-13ec-4afb-a98e-f9331ae43397',
     nao: '74fdf62a-4393-4ab9-828d-926625063c53',
     naoDeclarou: '229a7f1f-42a7-4b7d-8622-89e105cc3ff7',
+  },
+} as const;
+
+// Mapa nome logico -> field_id na Lista 03 AUDIOS (1000320000003180, Fase 12
+// ENVIO-06). Os 19 campos JA EXISTEM (investigacao previa, PROJECT.md) — este
+// modulo so MAPEIA, nunca cria campo (D-07). IDs lidos AO VIVO via
+// `GET /list/1000320000003180/field` (mesmo racional de
+// scripts/descobrir-campos-leads.mjs) em 2026-08-18 — NUNCA resolver por nome
+// em runtime. Alguns ids colidem de proposito com CAMPOS_LEADS/CAMPOS_LIGACOES
+// (TELEFONE, ANALISE_IA) — o ClickUp reusa o MESMO custom field quando ele foi
+// adicionado a mais de uma lista da workspace; nao e coincidencia nem bug.
+export const CAMPOS_AUDIOS = {
+  ID_SUPABASE: '0852f523-07bd-47e8-a53b-55ac88b1e7f6',
+  CONFIANCA_ANALISE: '08ee30dd-7352-454a-b0bb-cd11e9b6f63e',
+  DATA_DA_RESPOSTA: '1a78a64c-5e86-4659-a9d6-0db883fc8c55',
+  NECESSITA_REVISAO: '21624bf9-1b0d-4a1d-9427-7ff36cb4abed',
+  INTENCAO_DETECTADA: '2e2c52be-47f3-4696-ac81-473882b0c09a',
+  AUDIO: '3317c6bd-7ad9-4c43-b76b-161f24470241',
+  CLASSIFICACAO: '38d735b2-b870-4ff2-a185-2b3a8ed9982c',
+  TIPO_RESPOSTA: '4e9a7515-c395-4c2c-b027-31ec9978fa68',
+  TRANSCRICAO_AUDIO: '5f820815-7275-4d72-b2b5-65a8521011cb',
+  ENVIADO_POR: '69902a90-84d5-44c1-8c37-65f55d9e20c0',
+  DATA_DO_ENVIO: 'b3ac9494-ec28-4d84-8103-753b39a0250d',
+  TEMA_OBJETIVO: 'd3b12b13-7fd9-4b84-882d-c74757705db5',
+  TRANSCRICAO_RESPOSTA: 'dcb792e6-8507-4161-ac6f-e691f598f544',
+  ANALISE_IA: 'dfb8e194-b453-4501-91fe-0e214aaca14e',
+  OPT_OUT_SOLICITADO: 'dfc5c2d7-c7c5-48d0-b7f1-05ea45667fdb',
+  TELEFONE: 'e29b4882-bbb9-402e-8ba9-dda2d8418b4b',
+  MENSAGENS_NA_RESPOSTA: 'e71d2bbb-03e3-4303-a6c8-25ec74333a25',
+  LIGACAO_GERADA: 'e898ac0c-ba1e-4f9b-a00c-867dea3e4fa9',
+  LEAD: 'fbfb2ba6-9e5c-4673-9da8-e6861b797357',
+} as const;
+
+// Opcoes (UUID) dos 4 custom fields drop_down da Lista 03 AUDIOS. Mesmo
+// racional de OPCOES_LIGACOES/OPCOES_LEADS (D-07: drop_down exige o UUID da
+// opcao, nao boolean/nome). NECESSITA_REVISAO/OPT_OUT_SOLICITADO seguem o
+// shape {sim,nao} (2 opcoes, consumivel por setCustomField se algum dia
+// precisar traduzir boolean como OPCOES_LIGACOES ja faz); CLASSIFICACAO (3
+// opcoes) e TIPO_RESPOSTA (4 opcoes) NAO sao binarios — ficam num mapa por
+// rotulo (lowercase) pra tradução bespoke no call-site (Fases 13-14).
+export const OPCOES_AUDIOS = {
+  [CAMPOS_AUDIOS.NECESSITA_REVISAO]: {
+    sim: '2c92286c-3e64-4b37-9fce-6f18baa34fa4',
+    nao: '6430aa28-8c6e-4273-9cd7-2fcf416b5b23',
+  },
+  [CAMPOS_AUDIOS.OPT_OUT_SOLICITADO]: {
+    sim: '96fc0c6e-c5ea-4463-b612-fca087f500e4',
+    nao: '6912ad4c-b9a0-45f1-9198-ab8d30366a98',
+  },
+  [CAMPOS_AUDIOS.CLASSIFICACAO]: {
+    positiva: 'ed388a5d-adc0-4670-8686-b6b1c28f7b53',
+    neutra: '60102b94-b999-4a7b-81e5-e16b6e5b9a50',
+    negativa: '1a7e9f54-3f38-411a-84fb-90ad42a133b9',
+  },
+  [CAMPOS_AUDIOS.TIPO_RESPOSTA]: {
+    texto: '8d52f4b0-117c-4ae7-b42e-c756ca408863',
+    audio: '3dc597e4-53be-48aa-a333-a73894dd157b',
+    figurinha: '27e6e991-afad-4c3c-afe0-ec77c9f53d57',
+    nenhuma: 'abb2e3f2-7d49-4d00-b6d3-2b0a88dc3136',
   },
 } as const;
 
