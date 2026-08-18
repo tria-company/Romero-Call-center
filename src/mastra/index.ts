@@ -128,6 +128,8 @@ import {
   cadastrosComCache,
   votosComCache,
   ligacoesComCache,
+  campanhaComCache,
+  CHAVE_CAMPANHA,
   idadeCacheSegundos,
   CHAVE_CADASTROS,
   CHAVE_VOTOS,
@@ -767,6 +769,30 @@ export const mastra = new Mastra({
             // LGPD: nunca logar PII — so a mensagem generica de erro.
             console.error('[discador] erro ao listar leads:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao carregar os leads' }, 502);
+          }
+        },
+      },
+      {
+        // Central de Campanha — producao diaria, ranking de telefonistas e taxa de
+        // atendimento, agregados da Lista 02 LIGACOES (painel-dados.ts).
+        //
+        // A tela existia desde 15/08 mostrando "sem dados" por decisao: o commit 93c0a31
+        // trocou a leitura de um reais.json estatico por `const real = VAZIO`, com a nota
+        // "sem telemetria ao vivo". Esta rota e a telemetria que faltava.
+        //
+        // Gate de gestor (mesma visao das outras rotas do painel). Somente leitura.
+        path: '/api/discador/campanha',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
+          try {
+            const r = await campanhaComCache();
+            return c.json({ ...r, idadeS: idadeCacheSegundos(CHAVE_CAMPANHA) });
+          } catch (e) {
+            console.error('[painel] campanha indisponivel:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar os numeros da campanha' }, 502);
           }
         },
       },
