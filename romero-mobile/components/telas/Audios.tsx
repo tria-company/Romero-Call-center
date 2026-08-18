@@ -59,6 +59,20 @@ export function Audios() {
     [leads, origemAtiva],
   );
 
+  // "Apareça 10 e vá carregando": a tela mostra 10 e revela +10 sozinha, a cada
+  // poucos segundos, até exibir todo o lote já carregado. Reseta pra 10 ao trocar
+  // de origem (o chip volta a mostrar um lote enxuto).
+  const [visiveis, setVisiveis] = React.useState(10);
+  React.useEffect(() => {
+    setVisiveis(10);
+  }, [origemAtiva]);
+  React.useEffect(() => {
+    if (visiveis >= leadsFiltrados.length) return;
+    const id = window.setTimeout(() => setVisiveis((v) => v + 10), 2500);
+    return () => window.clearTimeout(id);
+  }, [visiveis, leadsFiltrados.length]);
+  const leadsVisiveis = leadsFiltrados.slice(0, visiveis);
+
   /* ── Cartão "Áudio pronto" (D-01/D-02/D-03) — o "compositor": grava uma vez,
      o mesmo áudio serve pra vários leads sem regravar. ────────────────────── */
   const [estadoGravacao, setEstadoGravacao] = React.useState<EstadoGravacao>("vazio");
@@ -419,7 +433,7 @@ export function Audios() {
         </div>
       ) : (
         <div className="stack">
-          {leadsFiltrados.map((lead) => (
+          {leadsVisiveis.map((lead) => (
             <LinhaLead
               key={lead.leadTaskId}
               lead={lead}

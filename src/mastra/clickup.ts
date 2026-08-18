@@ -1116,7 +1116,7 @@ export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigad
   // Lista 02 é minúscula e o operador envia EM LOTE (throttle Evolution ~15/min),
   // então basta um lote pronto: paginamos os leads até juntar LIMITE_LOTE
   // nunca-ligados, ou acabar a base, ou bater o teto de segurança de páginas.
-  const LIMITE_LOTE = 100;
+  const LIMITE_LOTE = 50; // pool do lote — a tela mostra 10 e vai revelando +10
   const MAX_PAGINAS_SCAN = 20; // teto de segurança — nunca varre mais que isso
 
   // Ligações (Lista 02) COMPLETAS — lista pequena; a exclusão precisa de TODAS,

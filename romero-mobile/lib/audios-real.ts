@@ -25,6 +25,10 @@ const CABECALHO_JSON = { "Content-Type": "application/json" } as const;
 // heartbeat/presença já usado no discador (web/CONTEXT.md).
 const INTERVALO_POLL_STATUS_MS = 18_000;
 
+// Auto-reload SILENCIOSO da lista de leads (stale-while-revalidate) — mantém o
+// lote fresco e se recupera sozinho de falha transitória, sem piscar a tela.
+const INTERVALO_POLL_LISTA_MS = 30_000;
+
 /** Um lead da Lista 01 que nunca teve Ligação — espelha `LeadNuncaLigado` do backend (12-03/buscarLeadsNuncaLigados). */
 export type LeadAudioReal = {
   leadTaskId: string;
@@ -62,17 +66,25 @@ export function useAudiosReais(): EstadoAudiosReais {
 
   const geracaoRef = React.useRef(0);
 
-  const carregarLista = React.useCallback(async () => {
+  // `silencioso`: reload em SEGUNDO PLANO (auto-refresh) — não pisca "carregando"
+  // nem esvazia a lista atual numa falha transitória; mantém o que está na tela
+  // e tenta de novo no próximo ciclo (stale-while-revalidate). Um sucesso, mesmo
+  // silencioso, CURA um `erro` anterior (a tela se recupera sozinha).
+  const carregarLista = React.useCallback(async (silencioso = false) => {
     const g = ++geracaoRef.current;
-    setCarregando(true);
-    setErro(false);
+    if (!silencioso) {
+      setCarregando(true);
+      setErro(false);
+    }
     try {
       const r = await fetch("/api/mobile/audios", { cache: "no-store" });
       if (geracaoRef.current !== g) return;
       if (!r.ok) {
-        setErro(true);
-        setLeads([]);
-        setOrigens([]);
+        if (!silencioso) {
+          setErro(true);
+          setLeads([]);
+          setOrigens([]);
+        }
         return;
       }
       const d = (await r.json().catch(() => null)) as {
@@ -82,14 +94,15 @@ export function useAudiosReais(): EstadoAudiosReais {
       if (geracaoRef.current !== g) return;
       setLeads(d?.leads ?? []);
       setOrigens(d?.origens ?? []);
+      setErro(false);
     } catch {
-      if (geracaoRef.current === g) {
+      if (geracaoRef.current === g && !silencioso) {
         setErro(true);
         setLeads([]);
         setOrigens([]);
       }
     } finally {
-      if (geracaoRef.current === g) setCarregando(false);
+      if (geracaoRef.current === g && !silencioso) setCarregando(false);
     }
   }, []);
 
@@ -109,6 +122,14 @@ export function useAudiosReais(): EstadoAudiosReais {
 
   React.useEffect(() => {
     void carregarLista();
+  }, [carregarLista]);
+
+  // Auto-reload da lista (silencioso): mantém o lote fresco — leads que ganharam
+  // Ligação (ex.: "Sem WhatsApp") saem, e a tela se recupera sozinha de uma falha
+  // transitória sem o operador tocar "tentar de novo".
+  React.useEffect(() => {
+    const id = window.setInterval(() => void carregarLista(true), INTERVALO_POLL_LISTA_MS);
+    return () => window.clearInterval(id);
   }, [carregarLista]);
 
   React.useEffect(() => {
