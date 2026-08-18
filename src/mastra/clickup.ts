@@ -1356,18 +1356,26 @@ export type ItemTimeline = {
 export async function buscarLigacoesDoLead(
   leadTaskId: string,
   telefone: string,
+  opts?: { ligacoesPreBuscadas?: TaskClickUp[] },
 ): Promise<ItemTimeline[]> {
   const CAP = 10;
 
-  // Pagina a Lista 02 inteira COM as fechadas (mesmo shape de lerTodasAsTasks).
-  const todas: TaskClickUp[] = [];
-  let page = 0;
-  let lastPage = false;
-  while (!lastPage) {
-    const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
-    todas.push(...resultado.tasks);
-    lastPage = resultado.lastPage;
-    page += 1;
+  // Pagina a Lista 02 inteira COM as fechadas (mesmo shape de lerTodasAsTasks)
+  // — a menos que o caller já tenha buscado a lista inteira uma vez (backfill
+  // em lote) e queira reusá-la aqui, evitando repaginar por lead.
+  let todas: TaskClickUp[];
+  if (opts?.ligacoesPreBuscadas) {
+    todas = opts.ligacoesPreBuscadas;
+  } else {
+    todas = [];
+    let page = 0;
+    let lastPage = false;
+    while (!lastPage) {
+      const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
+      todas.push(...resultado.tasks);
+      lastPage = resultado.lastPage;
+      page += 1;
+    }
   }
 
   const campo = (task: TaskClickUp, id: string): unknown =>
