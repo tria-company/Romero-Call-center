@@ -73,7 +73,22 @@ import {
   criarLigacaoAvulsa,
   valorCampoLead,
   CAMPOS_LEADS,
+  // Canal de envio Evolution API + Lista de Áudios (Fase 12 Plano 03,
+  // ENVIO-01/02/03/06): buscarLeadsNuncaLigados/registrarEnvioAudio vêm do
+  // Plano 02; normalizarTelefoneE164 resolve o E.164 do lead antes de
+  // chamar evolution.enviarAudio.
+  buscarLeadsNuncaLigados,
+  registrarEnvioAudio,
+  normalizarTelefoneE164,
+  // quick 260818-mv2: pré-check de WhatsApp ANTES do envio de áudio — marca
+  // o lead "Sem WhatsApp" (comenta + Ligação fechada) sem tocar em
+  // buscarLeadsNuncaLigados.
+  marcarLeadSemWhatsapp,
 } from './clickup';
+// Client Evolution API (Fase 12 Plano 01, D-06/D-08): choke-point único de
+// envio/status — enviarAudio LANÇA em falha (nunca 200 silencioso).
+// numeroExisteNoWhatsapp (quick 260818-mv2): pré-check ANTES de enviarAudio.
+import { enviarAudio, statusInstancia, numeroExisteNoWhatsapp, EvolutionThrottleError } from './evolution.ts';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
 // remove a task recem-iniciada do cache POR OPERADOR (D-04) — iniciarLigacao
@@ -181,6 +196,36 @@ import {
 } from './wavoip-api.ts';
 
 /**
+ * WR-01: classifica uma falha de envio de áudio pro cliente SEM colapsar todo
+ * erro em "desconectado". `enviarAudio`/pré-check lançam em três casos
+ * distintos: (a) throttle do rate limiter segurando o ritmo (D-06 funcionando
+ * — NÃO é sessão fora), (b) falha transiente de rede/HTTP 5xx (retry neutro)
+ * e (c) sessão genuinamente fechada. Só afirma `desconectado: true` — que a UI
+ * traduz pro aviso "reconecte o WhatsApp" — quando o status REAL confirma a
+ * sessão fechada; caso contrário devolve um erro neutro que cai no retry
+ * ("O envio falhou, toque para tentar de novo"). O probe de status é isento
+ * do throttle (WR-02), então não gasta budget de envio. Fail-closed preservado:
+ * na dúvida (probe também falha) NUNCA afirma "desconectado" — mas também
+ * nunca reporta sucesso; sempre um não-2xx.
+ */
+async function classificarFalhaEnvioAudio(e: unknown): Promise<{ erro: string; desconectado?: true }> {
+  // IN-03: classifica o throttle pelo TIPO do erro (marca estável vinda do
+  // evolution.ts), não pela substring da mensagem. Mantém o casamento por texto
+  // só como fallback defensivo — se o throttle chegar re-embrulhado por algum
+  // caminho, ainda cai no ramo neutro correto (retry), nunca em "desconectado".
+  const msg = e instanceof Error ? e.message : String(e);
+  if (e instanceof EvolutionThrottleError || msg.includes('throttle')) return { erro: 'throttle' };
+  try {
+    const { conectado } = await statusInstancia();
+    if (!conectado) return { erro: 'envio_falhou', desconectado: true };
+  } catch {
+    // Probe de status também falhou — ambíguo. Nunca afirma "desconectado"
+    // sem confirmação; devolve erro neutro (retry).
+  }
+  return { erro: 'envio_falhou' };
+}
+
+/**
  * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
  * porque o CLI de reprocesso (Fase 06 Plano 05, `scripts/reprocessar-eventos.mjs`)
  * precisa derivar o telefone do payload cru de um evento CALL terminal.
@@ -224,6 +269,31 @@ async function sessaoGestor(c: { req: { header: (nome: string) => string | undef
   if (!sess) return { status: 401 };
   const reg = await buscarUsuario(sess.usuario);
   if (!reg || reg.papel !== 'gestor') return { status: 403 };
+  return { status: 200, usuario: sess.usuario };
+}
+
+/**
+ * Gate romero-only (Fase 12 Plano 03, ENVIO-07) — MAIS ESTREITO que
+ * sessaoGestor: barra por USUÁRIO ('romero'), não por PAPEL ('gestor').
+ * Existe porque romero é um único usuário específico (ele É gestor, mas nem
+ * todo gestor é romero) — as rotas /api/discador/audios* são a peça de
+ * segurança de verdade desta fase: como o `proxy.ts` do romero-mobile NÃO é
+ * compilado como middleware nesta versão do Next (o layout gateia só por
+ * papel/UI), esconder a UI não basta — um não-romero autenticado batendo
+ * direto na rota tem que tomar 403 AQUI. Mesmo racional anti-spoof de
+ * sessaoGestor (T-11-04-S1): o usuário SEMPRE vem de `verificarToken`
+ * (header Authorization), NUNCA de body/query/header controlado pelo
+ * cliente. Nunca loga o token. Retorna `{ status: 401 }` sem sessão válida,
+ * `{ status: 403 }` pra sessão válida mas usuário != 'romero', ou
+ * `{ status: 200, usuario: 'romero' }` liberado — mesmo shape de retorno de
+ * sessaoGestor pra reuso uniforme no call-site.
+ */
+async function sessaoRomero(c: { req: { header: (nome: string) => string | undefined } }): Promise<
+  { status: 401 } | { status: 403 } | { status: 200; usuario: string }
+> {
+  const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+  if (!sess) return { status: 401 };
+  if (sess.usuario !== 'romero') return { status: 403 };
   return { status: 200, usuario: sess.usuario };
 }
 
@@ -1107,6 +1177,140 @@ export const mastra = new Mastra({
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao salvar o voto' }, 502);
           }
+        },
+      },
+
+      // ============ API AUDIOS (canal de envio Evolution API) — Fase 12 Plano 03 ============
+      // TODA rota abaixo passa pelo gate romero-only (sessaoRomero): 401 sem
+      // sessao valida, 403 pra qualquer autenticado != 'romero' (ENVIO-07,
+      // T-12-03-E1) — resolvido ANTES de qualquer efeito, mesmo padrao do
+      // bloco GESTAO DE OPERADORES acima (sessaoGestor).
+      {
+        // Lista os leads que NUNCA tiveram Ligação criada (Lista 01 menos
+        // Lista 02, ENVIO-03) + origens distintas pros chips (ENVIO-04).
+        path: '/api/discador/audios',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const { leads, origens } = await buscarLeadsNuncaLigados();
+            return c.json({ leads, origens });
+          } catch (e) {
+            console.error('[discador] erro ao buscar leads nunca-ligados:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar os leads' }, 502);
+          }
+        },
+      },
+      {
+        // Estado real da instância dedicada Evolution — fonte do banner de
+        // conexão (D-08): o banner NUNCA finge conectado. Uma falha na
+        // consulta também é reportada como desconectado (nunca 200 mascarando).
+        path: '/api/discador/audios/status',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const { conectado } = await statusInstancia();
+            return c.json({ conectado });
+          } catch (e) {
+            console.error('[discador] erro ao consultar status da instância Evolution:', e instanceof Error ? e.message : String(e));
+            // D-08: o banner reflete estado REAL — falha de consulta vira
+            // "desconectado" (200 com conectado:false), nunca 200 "conectado".
+            return c.json({ conectado: false }, 200);
+          }
+        },
+      },
+      {
+        // Envia um áudio (base64) via Evolution pro telefone do lead, throttled
+        // (evolution.ts, D-06), e registra na Lista Audios (best-effort, WR-03).
+        // Guard anti-IDOR (validarLeadDaLista01) ANTES de resolver telefone —
+        // mesmo padrão de /lead/:leadTaskId/ligar. Falha do envio (sessão fora/
+        // HTTP erro) vira resposta NÃO-2xx explícita — nunca 200 silencioso
+        // (D-08, SC5). `enviadoPor` vem SEMPRE de gate.usuario (token), nunca do
+        // body do cliente (T-12-03-S1).
+        path: '/api/discador/audios/:leadId/enviar',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const leadId = c.req.param('leadId');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const audioBase64 = String(body.audioBase64 || '');
+          const mimetype = body.mimetype != null ? String(body.mimetype) : undefined;
+          if (!audioBase64) return c.json({ erro: 'audioBase64 obrigatório' }, 400);
+          let telefoneE164: string;
+          let idLeadGhl = '';
+          try {
+            // validarLeadDaLista01 é o guard anti-IDOR E devolve a task já lida
+            // — reaproveita pra ler o telefone sem um segundo GET ao ClickUp.
+            const task = await validarLeadDaLista01(leadId);
+            const telefoneRaw = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
+            const e164 = telefoneRaw ? normalizarTelefoneE164(telefoneRaw) : null;
+            if (!e164) return c.json({ erro: 'Lead sem telefone válido' }, 422);
+            telefoneE164 = e164;
+            idLeadGhl = valorCampoLead(task, CAMPOS_LEADS.ID_LEAD_GHL);
+          } catch (e) {
+            console.error('[discador] erro ao resolver lead pro envio de áudio:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado
+              ? c.json({ erro: 'Lead não encontrado' }, 404)
+              : c.json({ erro: 'Erro ao carregar o lead' }, 502);
+          }
+          try {
+            // Pré-check (quick 260818-mv2): checa o número na Evolution ANTES
+            // de gastar throttle/rate-limit num envio que nunca vai chegar.
+            // Só marca "sem WhatsApp" quando a Evolution AFIRMA exists===false
+            // — erro de rede/HTTP cai no catch abaixo, MESMO tratamento de
+            // "desconectado" de hoje (nunca marca o lead por ambiguidade).
+            const existe = await numeroExisteNoWhatsapp(telefoneE164);
+            if (!existe) {
+              await marcarLeadSemWhatsapp({
+                leadTaskId: leadId,
+                idLeadGhl,
+                telefone: telefoneE164,
+                usuario: gate.usuario,
+              });
+              return c.json({ status: 'sem_whatsapp' });
+            }
+          } catch (e) {
+            // LGPD: nunca logar telefone/CPF em claro — só a mensagem/classe.
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('[discador] falha no pré-check de WhatsApp:', msg);
+            // WR-01: mesma classificação do envio — throttle/transiente NÃO é
+            // sessão fora; só afirma `desconectado` com status REAL confirmando.
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
+          }
+          try {
+            // enviarAudio já passa pelo rate limiter interno (D-06) e LANÇA em
+            // falha de rede/HTTP/sessão fora — nunca sucesso silencioso (D-08).
+            await enviarAudio(telefoneE164, audioBase64, mimetype);
+          } catch (e) {
+            // LGPD: nunca logar telefone/CPF/audioBase64 em claro — só a
+            // mensagem/classe do erro.
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('[discador] falha ao enviar áudio via Evolution:', msg);
+            // Falha ALTA (D-08): nunca 200 aqui. WR-01: NÃO colapsa todo erro em
+            // `desconectado` — throttle (D-06 segurando) e transientes viram erro
+            // neutro (retry); só afirma `desconectado` com status REAL confirmando
+            // sessão fora, pra não instruir "reconecte o WhatsApp" à toa.
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
+          }
+          // Registro best-effort na Lista Audios (WR-03) — o envio (efeito
+          // primário) já aconteceu; uma falha aqui nunca desfaz/mascara o envio.
+          // enviadoPor vem do TOKEN (gate.usuario), nunca do body do cliente.
+          await registrarEnvioAudio({
+            telefone: telefoneE164,
+            enviadoPor: gate.usuario,
+            // WR-03/IN-03: extensão saneada — o recorder produz
+            // `audio/webm;codecs=opus`, então tira os parâmetros `;codecs=...`
+            // pra não gravar `audio-<ts>.webm;codecs=opus` (extensão malformada).
+            audioRef: `audio-${Date.now()}${mimetype ? `.${(mimetype.split('/')[1] || '').split(';')[0] || 'bin'}` : ''}`,
+            leadTaskId: leadId,
+          });
+          return c.json({ status: 'ok' });
         },
       },
 

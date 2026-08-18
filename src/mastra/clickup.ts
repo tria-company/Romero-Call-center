@@ -13,6 +13,7 @@ import {
   CLICKUP_API_TOKEN,
   CLICKUP_LIST_LEADS,
   CLICKUP_LIST_LIGACOES,
+  CLICKUP_LIST_AUDIOS,
   CLICKUP_TEAM_ID,
   OPER_STATUS_EM_PROCESSAMENTO,
   OPER_STATUS_FECHADO,
@@ -137,6 +138,65 @@ export const OPCOES_LEADS = {
     sim: '6a96d622-13ec-4afb-a98e-f9331ae43397',
     nao: '74fdf62a-4393-4ab9-828d-926625063c53',
     naoDeclarou: '229a7f1f-42a7-4b7d-8622-89e105cc3ff7',
+  },
+} as const;
+
+// Mapa nome logico -> field_id na Lista 03 AUDIOS (1000320000003180, Fase 12
+// ENVIO-06). Os 19 campos JA EXISTEM (investigacao previa, PROJECT.md) — este
+// modulo so MAPEIA, nunca cria campo (D-07). IDs lidos AO VIVO via
+// `GET /list/1000320000003180/field` (mesmo racional de
+// scripts/descobrir-campos-leads.mjs) em 2026-08-18 — NUNCA resolver por nome
+// em runtime. Alguns ids colidem de proposito com CAMPOS_LEADS/CAMPOS_LIGACOES
+// (TELEFONE, ANALISE_IA) — o ClickUp reusa o MESMO custom field quando ele foi
+// adicionado a mais de uma lista da workspace; nao e coincidencia nem bug.
+export const CAMPOS_AUDIOS = {
+  ID_SUPABASE: '0852f523-07bd-47e8-a53b-55ac88b1e7f6',
+  CONFIANCA_ANALISE: '08ee30dd-7352-454a-b0bb-cd11e9b6f63e',
+  DATA_DA_RESPOSTA: '1a78a64c-5e86-4659-a9d6-0db883fc8c55',
+  NECESSITA_REVISAO: '21624bf9-1b0d-4a1d-9427-7ff36cb4abed',
+  INTENCAO_DETECTADA: '2e2c52be-47f3-4696-ac81-473882b0c09a',
+  AUDIO: '3317c6bd-7ad9-4c43-b76b-161f24470241',
+  CLASSIFICACAO: '38d735b2-b870-4ff2-a185-2b3a8ed9982c',
+  TIPO_RESPOSTA: '4e9a7515-c395-4c2c-b027-31ec9978fa68',
+  TRANSCRICAO_AUDIO: '5f820815-7275-4d72-b2b5-65a8521011cb',
+  ENVIADO_POR: '69902a90-84d5-44c1-8c37-65f55d9e20c0',
+  DATA_DO_ENVIO: 'b3ac9494-ec28-4d84-8103-753b39a0250d',
+  TEMA_OBJETIVO: 'd3b12b13-7fd9-4b84-882d-c74757705db5',
+  TRANSCRICAO_RESPOSTA: 'dcb792e6-8507-4161-ac6f-e691f598f544',
+  ANALISE_IA: 'dfb8e194-b453-4501-91fe-0e214aaca14e',
+  OPT_OUT_SOLICITADO: 'dfc5c2d7-c7c5-48d0-b7f1-05ea45667fdb',
+  TELEFONE: 'e29b4882-bbb9-402e-8ba9-dda2d8418b4b',
+  MENSAGENS_NA_RESPOSTA: 'e71d2bbb-03e3-4303-a6c8-25ec74333a25',
+  LIGACAO_GERADA: 'e898ac0c-ba1e-4f9b-a00c-867dea3e4fa9',
+  LEAD: 'fbfb2ba6-9e5c-4673-9da8-e6861b797357',
+} as const;
+
+// Opcoes (UUID) dos 4 custom fields drop_down da Lista 03 AUDIOS. Mesmo
+// racional de OPCOES_LIGACOES/OPCOES_LEADS (D-07: drop_down exige o UUID da
+// opcao, nao boolean/nome). NECESSITA_REVISAO/OPT_OUT_SOLICITADO seguem o
+// shape {sim,nao} (2 opcoes, consumivel por setCustomField se algum dia
+// precisar traduzir boolean como OPCOES_LIGACOES ja faz); CLASSIFICACAO (3
+// opcoes) e TIPO_RESPOSTA (4 opcoes) NAO sao binarios — ficam num mapa por
+// rotulo (lowercase) pra tradução bespoke no call-site (Fases 13-14).
+export const OPCOES_AUDIOS = {
+  [CAMPOS_AUDIOS.NECESSITA_REVISAO]: {
+    sim: '2c92286c-3e64-4b37-9fce-6f18baa34fa4',
+    nao: '6430aa28-8c6e-4273-9cd7-2fcf416b5b23',
+  },
+  [CAMPOS_AUDIOS.OPT_OUT_SOLICITADO]: {
+    sim: '96fc0c6e-c5ea-4463-b612-fca087f500e4',
+    nao: '6912ad4c-b9a0-45f1-9198-ab8d30366a98',
+  },
+  [CAMPOS_AUDIOS.CLASSIFICACAO]: {
+    positiva: 'ed388a5d-adc0-4670-8686-b6b1c28f7b53',
+    neutra: '60102b94-b999-4a7b-81e5-e16b6e5b9a50',
+    negativa: '1a7e9f54-3f38-411a-84fb-90ad42a133b9',
+  },
+  [CAMPOS_AUDIOS.TIPO_RESPOSTA]: {
+    texto: '8d52f4b0-117c-4ae7-b42e-c756ca408863',
+    audio: '3dc597e4-53be-48aa-a333-a73894dd157b',
+    figurinha: '27e6e991-afad-4c3c-afe0-ec77c9f53d57',
+    nenhuma: 'abb2e3f2-7d49-4d00-b6d3-2b0a88dc3136',
   },
 } as const;
 
@@ -1011,6 +1071,226 @@ export async function criarLigacaoAvulsa(telefone: string, assigneeId?: string):
   return { id: novaTask.id };
 }
 
+/** Um lead da Lista 01 que ainda NUNCA teve uma Ligação criada (ENVIO-03). */
+export interface LeadNuncaLigado {
+  leadTaskId: string;
+  nome: string;
+  telefone: string;
+  /** CAMPOS_LEADS.ORIGEM cru (pode ser ''); alimenta os chips dinâmicos (ENVIO-04). */
+  origem: string;
+}
+
+/**
+ * Busca os leads da Lista 01 que NUNCA tiveram uma Ligação criada na Lista 02
+ * (coração da tela `/audios`, ENVIO-03). Definição de "tem Ligação" = existe
+ * QUALQUER task na Lista 02 (aberta OU fechada — pagina com
+ * `includeClosed: true`) vinculada ao lead por `CAMPOS_LIGACOES.ID_LEAD`
+ * (casa contra `CAMPOS_LEADS.ID_LEAD_GHL` OU o `leadTaskId` bruto — mesmo
+ * fallback de `criarLigacaoAvulsa`) OU por telefone (`telefonesIguais`,
+ * reuso de `semNonoDigito` — NÃO reimplementa comparação de telefone).
+ *
+ * ESTA É A MESMA DEFINIÇÃO QUE A FASE 15 USARÁ ao decidir remover um lead da
+ * lista de Áudios: o lead sai no momento em que a Ligação é CRIADA (mesmo sem
+ * INICIO/atendimento ainda), não quando ela é atendida ou fechada — por isso
+ * o `includeClosed: true` e a ausência de qualquer filtro de status aqui.
+ * Manter esta função como a ÚNICA fonte da verdade do filtro evita
+ * incoerência entre as duas fases (ENVIO-03 / Fase 15).
+ *
+ * Retorna também `origens` = os valores DISTINTOS de `CAMPOS_LEADS.ORIGEM`
+ * entre os leads nunca-ligados (ENVIO-04) — dinâmico, sem hardcode de rótulo
+ * (D-04/D-05); a UI soma "Todos" por cima.
+ *
+ * Erro de infra/HTTP em qualquer uma das duas listas PROPAGA (`listarTasks`,
+ * WR-03) — nunca retorna lista vazia pra mascarar falha. Nota de escala
+ * (v3.0, single-user): pagina as duas listas inteiras em memória; otimização
+ * pra 100k+ leads fica fora de escopo desta fase (reusa a infra de paginação
+ * existente, sem novo mecanismo). LGPD: sem log nesta função (nenhum
+ * telefone/CPF impresso).
+ */
+export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigado[]; origens: string[] }> {
+  const leadsTasks: TaskClickUp[] = [];
+  let pageLeads = 0;
+  let lastPageLeads = false;
+  while (!lastPageLeads) {
+    const resultado = await listarTasks(CLICKUP_LIST_LEADS, { page: pageLeads });
+    leadsTasks.push(...resultado.tasks);
+    lastPageLeads = resultado.lastPage;
+    pageLeads += 1;
+  }
+
+  const ligacoesTasks: TaskClickUp[] = [];
+  let pageLig = 0;
+  let lastPageLig = false;
+  while (!lastPageLig) {
+    const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page: pageLig, includeClosed: true });
+    ligacoesTasks.push(...resultado.tasks);
+    lastPageLig = resultado.lastPage;
+    pageLig += 1;
+  }
+
+  // Set de ID_LEAD (GHL ou taskId bruto — mesmo fallback de criarLigacaoAvulsa)
+  // já vinculados a alguma Ligação; lookup O(1) por lead.
+  const idsComLigacao = new Set<string>();
+  // Telefones (crus, como gravados na Ligação) com Ligação — comparados via
+  // telefonesIguais (reuso de semNonoDigito) por lead abaixo.
+  const telefonesComLigacao: string[] = [];
+  for (const t of ligacoesTasks) {
+    const idLead = t.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.ID_LEAD)?.value;
+    if (idLead !== undefined && idLead !== null && idLead !== '') idsComLigacao.add(String(idLead));
+    const tel = t.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value;
+    if (tel !== undefined && tel !== null && tel !== '') telefonesComLigacao.push(String(tel));
+  }
+
+  const nuncaLigados: LeadNuncaLigado[] = [];
+  const origensVistas = new Set<string>();
+  for (const task of leadsTasks) {
+    // Mesmo parser usado por gerar-lote/fila (nome/telefone/idLead — DRY, D-07).
+    const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
+    const temPorId =
+      (parsed.idLead !== '' && idsComLigacao.has(parsed.idLead)) || idsComLigacao.has(task.id);
+    const temPorTelefone =
+      parsed.telefone !== '' && telefonesComLigacao.some((tl) => telefonesIguais(tl, parsed.telefone));
+    if (temPorId || temPorTelefone) continue;
+    const origem = valorCampoLead(task, CAMPOS_LEADS.ORIGEM);
+    if (origem) origensVistas.add(origem);
+    nuncaLigados.push({
+      leadTaskId: task.id,
+      nome: parsed.nome,
+      telefone: parsed.telefone,
+      origem,
+    });
+  }
+
+  return { leads: nuncaLigados, origens: [...origensVistas] };
+}
+
+/**
+ * Grava a task de registro de um envio de áudio na Lista 03 AUDIOS após o
+ * envio já ter sido CONFIRMADO pelo `evolution.ts` (ENVIO-06) — escrita
+ * SECUNDÁRIA best-effort (WR-03, molde `criarLigacaoAvulsa` linhas 993-1009):
+ * o envio (efeito primário) já aconteceu ANTES desta função ser chamada; uma
+ * falha aqui NUNCA desfaz nem mascara o envio já realizado — só
+ * `console.warn`, nunca `throw`. Sempre CRIA uma nova task (uma por envio —
+ * histórico auditável), escrevendo por field-id (D-07): DATA_DO_ENVIO,
+ * ENVIADO_POR, AUDIO e, quando o telefone normaliza pra E.164, TELEFONE
+ * também (mesmo fallback "sem o campo" de `criarLigacaoAvulsa` quando não
+ * normaliza). Vínculo opcional ao lead (`CAMPOS_AUDIOS.LEAD`) é best-effort
+ * dentro do best-effort — nunca derruba o registro já criado. LGPD: loga só
+ * telefone MASCARADO (`mascararTelefone`), nunca o áudio, nunca em claro.
+ */
+export async function registrarEnvioAudio(args: {
+  telefone: string;
+  enviadoPor: string;
+  audioRef: string;
+  leadTaskId?: string;
+}): Promise<{ id: string } | null> {
+  const e164 = normalizarTelefoneE164(args.telefone);
+  const custom_fields: Array<{ id: string; value: unknown }> = [
+    { id: CAMPOS_AUDIOS.DATA_DO_ENVIO, value: Date.now() },
+    { id: CAMPOS_AUDIOS.ENVIADO_POR, value: args.enviadoPor },
+    { id: CAMPOS_AUDIOS.AUDIO, value: args.audioRef },
+  ];
+  if (e164 !== null) {
+    custom_fields.push({ id: CAMPOS_AUDIOS.TELEFONE, value: e164 });
+  }
+  try {
+    const novaTask = await criarTask(CLICKUP_LIST_AUDIOS, {
+      // IN-01/LGPD: título com telefone MASCARADO — o número em claro fica só
+      // no campo dedicado TELEFONE (custom_fields), não duplicado no título
+      // humano-legível (reduz a superfície de PII).
+      name: `Áudio enviado — ${mascararTelefone(args.telefone)}`,
+      custom_fields,
+    });
+    if (!novaTask?.id) {
+      console.warn(
+        '[clickup] registrarEnvioAudio: criarTask retornou sem id — envio já feito, registro NÃO persistido',
+      );
+      return null;
+    }
+    if (args.leadTaskId) {
+      try {
+        await setCustomField(novaTask.id, CAMPOS_AUDIOS.LEAD, { add: [args.leadTaskId] });
+      } catch (e) {
+        console.warn(
+          `[clickup] registrarEnvioAudio (${novaTask.id}): vínculo ao lead falhou: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+    return { id: novaTask.id };
+  } catch (e) {
+    // WR-03: o envio (efeito primário, evolution.ts) já aconteceu — uma falha
+    // aqui é best-effort, nunca deve mascarar/desfazer o envio já realizado.
+    const mascarado = mascararTelefone(args.telefone);
+    console.warn(
+      `[clickup] registrarEnvioAudio: envio já foi feito mas o registro na lista Audios falhou (tel ${mascarado}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Marca um lead como "sem WhatsApp" após o pré-check (evolution.ts,
+ * `numeroExisteNoWhatsapp`) AFIRMAR `exists === false` (quick 260818-mv2).
+ * Best-effort (WR-03, mesmo molde de `registrarEnvioAudio`) — NUNCA lança: o
+ * handler já se comprometeu com a resposta `sem_whatsapp`, uma falha aqui só
+ * faz o lead reaparecer no próximo lote (degradação aceitável). Duas
+ * escritas independentes, cada uma no seu try/catch:
+ * (a) comenta na task do LEAD;
+ * (b) cria uma Ligação (Lista 02) "Sem WhatsApp" FECHADA vinculada ao lead —
+ *     o MESMO mecanismo que `buscarLeadsNuncaLigados` usa pra excluir um lead
+ *     do lote (ÚNICA fonte-de-verdade, não reimplementado aqui). Reusa a
+ *     string literal EXATA `'Sem WhatsApp'` (já é categoria de MOTIVO_FALHA).
+ * LGPD: telefone SEMPRE mascarado via `mascararTelefone` nos warns — nunca em
+ * claro; nenhum CPF/áudio/apikey nesta função.
+ */
+export async function marcarLeadSemWhatsapp(args: {
+  leadTaskId: string;
+  idLeadGhl: string;
+  telefone: string;
+  usuario: string;
+}): Promise<void> {
+  try {
+    const linhas = [`📵 Sem WhatsApp — número não encontrado no envio de áudio`, `👤 ${args.usuario}`];
+    await comentarTask(args.leadTaskId, linhas.join('\n'));
+  } catch (e) {
+    const mascarado = mascararTelefone(args.telefone);
+    console.warn(
+      `[clickup] marcarLeadSemWhatsapp: comentário na task do lead falhou (tel ${mascarado}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  try {
+    const e164 = normalizarTelefoneE164(args.telefone);
+    const idLead = args.idLeadGhl || args.leadTaskId;
+    const novaTask = await criarTask(CLICKUP_LIST_LIGACOES, {
+      name: 'Sem WhatsApp — pulado',
+      custom_fields: [
+        { id: CAMPOS_LIGACOES.ID_LEAD, value: idLead },
+        { id: CAMPOS_LIGACOES.MOTIVO_FALHA, value: 'Sem WhatsApp' },
+        { id: CAMPOS_LIGACOES.ATENDEU, value: false },
+        ...(e164 ? [{ id: CAMPOS_LIGACOES.TELEFONE, value: e164 }] : []),
+      ],
+    });
+    if (!novaTask?.id) {
+      console.warn('[clickup] marcarLeadSemWhatsapp: criarTask retornou sem id — lead pode reaparecer no lote');
+      return;
+    }
+    try {
+      await setCustomField(novaTask.id, CAMPOS_LIGACOES.LEAD_REL, { add: [args.leadTaskId] });
+    } catch (e) {
+      console.warn(
+        `[clickup] marcarLeadSemWhatsapp (${novaTask.id}): LEAD_REL não foi setado (ID_LEAD já garante a exclusão): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    await fecharLigacao(novaTask.id);
+  } catch (e) {
+    const mascarado = mascararTelefone(args.telefone);
+    console.warn(
+      `[clickup] marcarLeadSemWhatsapp: criação da Ligação "Sem WhatsApp" falhou (tel ${mascarado}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
 /**
  * Resolve o `taskId` do lead (Lista 01 LEADS) a partir de uma task de
  * Ligação (Lista 02) — OPER-05, Claude's Discretion (03-CONTEXT.md): tenta
@@ -1142,18 +1422,26 @@ export type ItemTimeline = {
 export async function buscarLigacoesDoLead(
   leadTaskId: string,
   telefone: string,
+  opts?: { ligacoesPreBuscadas?: TaskClickUp[] },
 ): Promise<ItemTimeline[]> {
   const CAP = 10;
 
-  // Pagina a Lista 02 inteira COM as fechadas (mesmo shape de lerTodasAsTasks).
-  const todas: TaskClickUp[] = [];
-  let page = 0;
-  let lastPage = false;
-  while (!lastPage) {
-    const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
-    todas.push(...resultado.tasks);
-    lastPage = resultado.lastPage;
-    page += 1;
+  // Pagina a Lista 02 inteira COM as fechadas (mesmo shape de lerTodasAsTasks)
+  // — a menos que o caller já tenha buscado a lista inteira uma vez (backfill
+  // em lote) e queira reusá-la aqui, evitando repaginar por lead.
+  let todas: TaskClickUp[];
+  if (opts?.ligacoesPreBuscadas) {
+    todas = opts.ligacoesPreBuscadas;
+  } else {
+    todas = [];
+    let page = 0;
+    let lastPage = false;
+    while (!lastPage) {
+      const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
+      todas.push(...resultado.tasks);
+      lastPage = resultado.lastPage;
+      page += 1;
+    }
   }
 
   const campo = (task: TaskClickUp, id: string): unknown =>
@@ -1656,5 +1944,5 @@ export async function lerTimelineDaLigacao(
 }
 
 // Re-exporta os IDs de lista do config para consumo conveniente por quem
-// importa so `clickup.ts` (ex: fases 2/3/4).
-export { CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES };
+// importa so `clickup.ts` (ex: fases 2/3/4, e a Fase 12 pra CLICKUP_LIST_AUDIOS).
+export { CLICKUP_LIST_LEADS, CLICKUP_LIST_LIGACOES, CLICKUP_LIST_AUDIOS };

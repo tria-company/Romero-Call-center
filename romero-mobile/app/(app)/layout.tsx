@@ -35,7 +35,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <main className="app-main">
         <PageTransition>{children}</PageTransition>
       </main>
-      <TabBar papel={papel} />
+      <TabBar papel={papel} usuario={sessao?.usuario} />
       <RegisterSW />
     </>
   );

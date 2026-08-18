@@ -176,6 +176,10 @@ if (!CLICKUP_API_TOKEN) {
 // IDs das listas ja existentes na workspace 9014971829 (D-04). Nao sao segredos.
 export const CLICKUP_LIST_LEADS = process.env.CLICKUP_LIST_LEADS || '1000320000002833';
 export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '1000320000002834';
+// Lista 03 AUDIOS (Fase 12, ENVIO-06) — ja existe com os 19 campos certos
+// (investigacao previa, PROJECT.md); este modulo so MAPEIA (CAMPOS_AUDIOS em
+// clickup.ts), nunca cria lista/campo (D-07).
+export const CLICKUP_LIST_AUDIOS = process.env.CLICKUP_LIST_AUDIOS || '1000320000003180';
 
 // Workspace (team) cujos MEMBROS aparecem no painel de admin (dropdown do
 // vínculo clickup_member_id). Default = Gabinete 509 (9014971829, a mesma das
@@ -505,6 +509,42 @@ export const METRICAS_ALERTA_INTERVALO_MS = Number(process.env.METRICAS_ALERTA_I
 
 // Janela (ms) em que um operador (presença registrada) ainda conta como "online" — 2 min.
 export const METRICAS_PRESENCA_TTL_MS = Number(process.env.METRICAS_PRESENCA_TTL_MS) || 120000;
+
+// ===== Evolution API — canal de envio dedicado de WhatsApp (Fase 12, v3.0 Fluxo A) =====
+//
+// Client REST (src/mastra/evolution.ts) para a instância dedicada
+// (EVOLUTION_INSTANCE, ex. romero-call-center) usada pra ENVIAR o áudio de
+// alcance — NUNCA o WhatsApp pessoal do Romero nem o device Wavoip 8761159
+// (que é só voz, D-09). Autenticação por header `apikey` (minúsculo, NÃO
+// `Authorization: Bearer` — diferente da Wavoip). Segredos SÓ no .env,
+// NUNCA logados/commitados (D-09/LGPD) — os console.warn abaixo avisam só a
+// AUSÊNCIA, nunca o valor.
+
+export const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+export const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
+export const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
+
+// Fail-closed (mesmo espírito de WAVOIP_WEBHOOK_TOKEN): D-08 exige que o envio
+// falhe alto quando mal-configurado, nunca desabilite silencioso.
+export const EVOLUTION_WEBHOOK_TOKEN = process.env.EVOLUTION_WEBHOOK_TOKEN || '';
+
+if (!EVOLUTION_WEBHOOK_TOKEN) {
+  console.warn(
+    '[config] EVOLUTION_WEBHOOK_TOKEN vazio: o webhook de recebimento da Evolution ' +
+      '(Fase 13) vai ficar DESABILITADO quando existir. Gere um segredo ' +
+      "(ex: 'openssl rand -hex 24') e coloque no .env como EVOLUTION_WEBHOOK_TOKEN.",
+  );
+}
+
+// Teto de envios/minuto — alvo ~10-20/min por pesquisa (Pitfall 1, risco de
+// banimento do número). Default conservador dentro dessa faixa.
+export const EVOLUTION_MAX_POR_MINUTO = Number(process.env.EVOLUTION_MAX_POR_MINUTO) || 15;
+
+// Teto da espera limitada (bounded-wait) do rate limiter de envio — DIFERENTE
+// de RL_CLICKUP_WAIT_MAX_MS: ao esgotar, o cap da Evolution SEGURA (não faz
+// fail-open, D-06) porque exceder throughput = risco de ban, não atraso
+// inócuo. Ver src/mastra/evolution.ts (adquirirTokenEvolution).
+export const RL_EVOLUTION_WAIT_MAX_MS = Number(process.env.RL_EVOLUTION_WAIT_MAX_MS) || 5000;
 
 // ===== Painel — números lidos ao vivo (painel-dados.ts) =====
 //
