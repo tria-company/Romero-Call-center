@@ -206,7 +206,7 @@ export type CampanhaReal = {
   motivosNaoContato: { rotulo: string; n: number; pctTotal: number }[];
   sla: { pct: number; agendados: number; cumpridos: number; vencidos: number };
   votosPorCidade: { rotulo: string; n: number }[];
-  intencao: { rotulo: string; sim: number; base: number }[];
+  intencao: { rotulo: string; sim: number; nao: number; naoDeclarou: number; base: number }[];
   cobertura: { feita: number; total: number };
   totalLigacoes: number;
   totalContatos: number;
@@ -330,9 +330,18 @@ export function montarCampanha(real: CampanhaReal): Campanha {
   /* "Não declarou" é o resto da base — e é a verdade: quase ninguém foi
      perguntado ainda. O ClickUp só marca quem confirmou; quem respondeu "não"
      não é contado à parte pela extração, então entra no resto. */
+  /* Percentuais sobre `base` = quem RESPONDEU a pergunta (não sobre os cadastros: seria
+     sempre 0% e mediria cobertura da pesquisa, não intenção). O rótulo do card mostra
+     "base N", então a amostra fica à vista.
+
+     `nao` vinha fixo em 0 e `nd` era o complemento — a faixa vermelha nunca aparecia e
+     voto contrário sumia da tela mesmo estando gravado. Agora as três faixas vêm do dado.
+     `nd` fecha em 100 para a barra não deixar sobra por arredondamento. */
   intencao: real.intencao.map((i) => {
-    const sim = i.base ? Math.round((i.sim / i.base) * 100) : 0;
-    return { rotulo: i.rotulo, base: i.base, sim, nao: 0, nd: 100 - sim };
+    const pct = (n: number) => (i.base ? Math.round((n / i.base) * 100) : 0);
+    const sim = pct(i.sim);
+    const nao = pct(i.nao);
+    return { rotulo: i.rotulo, base: i.base, sim, nao, nd: Math.max(0, 100 - sim - nao) };
   }),
 
   equipeTotal: CONFIG_CAMPANHA.equipeTotal,
