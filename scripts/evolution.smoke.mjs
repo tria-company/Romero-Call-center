@@ -188,4 +188,7 @@ async function main() {
   process.exit(0);
 }
 
-main();
+main().catch((e) => {
+  console.error('erro inesperado:', e instanceof Error ? e.message : String(e));
+  process.exit(1);
+});
