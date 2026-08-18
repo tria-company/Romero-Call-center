@@ -129,6 +129,7 @@ export function useAudiosReais(): EstadoAudiosReais {
 export type ResultadoEnvioAudio =
   | { tipo: "sucesso" }
   | { tipo: "desconectado" }
+  | { tipo: "sem_whatsapp" }
   | { tipo: "erro" };
 
 /**
@@ -147,6 +148,11 @@ export type ResultadoEnvioAudio =
  * separado de "throttle" no corpo da resposta, a espera EM SI é o throttle
  * visível.
  *
+ * `sem_whatsapp` (o backend AFIRMA, via pré-check Evolution, que o número não
+ * tem WhatsApp — quick 260818-mv2; estado TERMINAL, sem retry, distinto de
+ * `erro`) chega como `{ status: 'sem_whatsapp' }` com HTTP 200 — por isso o
+ * corpo precisa ser lido ANTES do short-circuit de `r.ok`.
+ *
  * Nunca lança — sempre devolve um `tipo`. LGPD: nunca loga leadId/base64.
  */
 export async function enviarAudioParaLead(
@@ -160,8 +166,9 @@ export async function enviarAudioParaLead(
       headers: CABECALHO_JSON,
       body: JSON.stringify({ audioBase64, ...(mimetype ? { mimetype } : {}) }),
     });
+    const d = (await r.json().catch(() => null)) as { status?: string; desconectado?: boolean } | null;
+    if (d?.status === "sem_whatsapp") return { tipo: "sem_whatsapp" };
     if (r.ok) return { tipo: "sucesso" };
-    const d = (await r.json().catch(() => null)) as { desconectado?: boolean } | null;
     if (d?.desconectado === true) return { tipo: "desconectado" };
     return { tipo: "erro" };
   } catch {

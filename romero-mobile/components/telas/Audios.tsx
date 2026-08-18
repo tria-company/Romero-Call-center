@@ -43,6 +43,7 @@ type EstadoEnvioLinha =
   | { tipo: "enviando" }
   | { tipo: "enviado"; hora: string }
   | { tipo: "desconectado" }
+  | { tipo: "sem-whatsapp" }
   | { tipo: "erro" };
 
 const ENVIO_IDLE: EstadoEnvioLinha = { tipo: "idle" };
@@ -219,6 +220,10 @@ export function Audios() {
       setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "enviado", hora } }));
     } else if (resultado.tipo === "desconectado") {
       setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "desconectado" } }));
+    } else if (resultado.tipo === "sem_whatsapp") {
+      // Estado TERMINAL (D-decisão 2, quick 260818-mv2): sem fila automática,
+      // sem botão de retry — o operador segue pelo contato manual.
+      setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "sem-whatsapp" } }));
     } else {
       setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "erro" } }));
     }
@@ -455,6 +460,11 @@ function LinhaLead({
           <div style={{ fontSize: 11.5, marginTop: 6, color: "#ff9b9b", lineHeight: 1.4 }}>
             Não foi possível enviar — o número está desconectado. Reconecte o WhatsApp e tente de
             novo.
+          </div>
+        )}
+        {estadoEnvio.tipo === "sem-whatsapp" && (
+          <div style={{ fontSize: 11.5, marginTop: 6, color: "#ff9b9b", lineHeight: 1.4 }}>
+            Sem WhatsApp — pulado. Este número não tem WhatsApp; siga pelo contato manual.
           </div>
         )}
         {estadoEnvio.tipo === "erro" && (
