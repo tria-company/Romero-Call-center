@@ -858,8 +858,24 @@ export const mastra = new Mastra({
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           try {
-            const r = await campanhaComCache();
-            return c.json({ ...r, idadeS: idadeCacheSegundos(CHAVE_CAMPANHA) });
+            // Dois caches distintos: a Lista 02 (produção/ranking/motivos) e os votos do
+            // ClickUp (intenção/cidade). Em paralelo, e cada um degrada sozinho — voto
+            // fora do ar não derruba os cards de ligação, que são a maior parte da tela.
+            const [rCamp, rVotos] = await Promise.allSettled([campanhaComCache(), votosComCache()]);
+            if (rVotos.status === 'rejected') {
+              console.error('[painel] votos indisponiveis na campanha:', rVotos.reason instanceof Error ? rVotos.reason.message : String(rVotos.reason));
+            }
+            if (rCamp.status === 'rejected') throw rCamp.reason;
+            const r = rCamp.value;
+            const v = rVotos.status === 'fulfilled' ? rVotos.value : null;
+            return c.json({
+              ...r,
+              // Ausentes quando a leitura de voto falha: a UI cai em "sem dados" nesses
+              // dois cards em vez de desenhar zero, que aqui seria afirmação falsa.
+              intencao: v?.intencao ?? [],
+              votosPorCidade: v?.votosPorCidade ?? [],
+              idadeS: idadeCacheSegundos(CHAVE_CAMPANHA),
+            });
           } catch (e) {
             console.error('[painel] campanha indisponivel:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao carregar os numeros da campanha' }, 502);
