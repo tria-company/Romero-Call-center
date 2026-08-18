@@ -501,6 +501,14 @@ export const mastra = new Mastra({
           // frase + segundos de tentativa). Limites defensivos; ausente quando
           // o cliente não manda (mantém compat). LGPD: nada disso vai a log.
           const categoria = body.categoria ? String(body.categoria).slice(0, 60) : '';
+          // u26: quem ligou + qual linha, pro comentário ficar rastreável
+          // ("preencha todas as informações possíveis"). deviceIdDoUsuario só
+          // resolve pra operador DEDICADO (a maioria) — pool-mode fica sem
+          // número no comentário (degrada, não quebra).
+          const deviceIdOp = deviceIdDoUsuario(sess.usuario);
+          const numeroOp = deviceIdOp
+            ? snapshotDevicesWavoip().find((d) => d.id === deviceIdOp)?.numero
+            : undefined;
           const motivo = categoria
             ? {
                 categoria,
@@ -508,6 +516,8 @@ export const mastra = new Mastra({
                 duracao: Number.isFinite(Number(body.duracao))
                   ? Math.max(0, Math.round(Number(body.duracao)))
                   : undefined,
+                usuario: sess.usuario,
+                numero: numeroOp,
               }
             : undefined;
           try {
@@ -595,6 +605,11 @@ export const mastra = new Mastra({
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          // DEVICE-04: aquece o inventário vivo (TTL 60s) — alocarDevice usa
+          // deviceConectadoWavoip pra pular device caido do pool. Sem isso, esta
+          // rota (chamada isolada, sem passar por /config antes) podia rodar
+          // com cache frio e nunca filtrar hibernating. Não-fatal (nunca lança).
+          await garantirInventarioWavoip();
           const alocado = await alocarDevice(sess.usuario);
           if (!alocado) return c.json({ erro: 'sem device livre' }, 503);
           return c.json(alocado);

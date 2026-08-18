@@ -165,9 +165,13 @@ export async function enfileirarFalhaTerminal(
 ): Promise<{ enfileirado: boolean }> {
   if (MODO !== 'bullmq') return { enfileirado: false };
   try {
+    // BUG-01: jobId com ':' so passa na validacao do BullMQ (job.js) se tiver
+    // EXATAMENTE 3 segmentos (compat legado com repeatable jobs) — 'CALLID:falha'
+    // tem 2 e sempre lancava 'Custom Id cannot contain :' (40x nos logs de prod,
+    // TODA falha-terminal caindo pro fallback inline). Hifen nao tem esse limite.
     await garantirFila().add('falha-terminal', dados, {
       ...opcoesJob(),
-      jobId: dados.whatsappCallId + ':falha',
+      jobId: dados.whatsappCallId + '-falha',
     });
     return { enfileirado: true };
   } catch (e) {

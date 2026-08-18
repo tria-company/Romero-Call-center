@@ -689,6 +689,10 @@ export interface MotivoNaoAtendida {
   observacao?: string;
   /** Segundos que o operador ficou tentando (discagem → desligar). */
   duracao?: number;
+  /** u26: login do atendente que fez a tentativa — rastreabilidade no comentário. */
+  usuario?: string;
+  /** u26: número/linha da campanha usada na tentativa (não é dado do lead). */
+  numero?: string;
 }
 
 export async function registrarDesfecho(
@@ -724,6 +728,12 @@ export async function registrarDesfecho(
       if (motivo.duracao && motivo.duracao > 0) {
         linhas.push(`⏱️ Tentou por ${formatarDuracaoCurta(motivo.duracao)}`);
       }
+      // u26: rastreabilidade — quem ligou e por qual linha (não é dado do
+      // lead, sem restrição de LGPD). "Preencher todas as informações
+      // possíveis" pedido pelo usuário para o caso "Número errado" — mesma
+      // linha de código serve TODAS as categorias (comportamento uniforme).
+      if (motivo.usuario) linhas.push(`👤 ${motivo.usuario}`);
+      if (motivo.numero) linhas.push(`☎️ Linha: ${motivo.numero}`);
       try {
         await comentarTask(taskId, linhas.join('\n'));
       } catch (e) {
@@ -835,10 +845,28 @@ export async function gravarMetadadosLigacao(taskId: string, patch: PatchMetadad
   }
 }
 
-/** Compara dois telefones ignorando formatação (só dígitos). */
+/**
+ * Remove o nono digito (prefixo movel BR) quando presente — mesma logica de
+ * estado-webhook.ts (chaveTelefone/semNonoDigito), duplicada de proposito
+ * (par pequeno demais pra justificar modulo compartilhado). Sem isso,
+ * `telefonesIguais` nunca casava o telefone de 12 digitos que o webhook do
+ * Wavoip reporta (sem o 9) com o de 13 que fica gravado na Ligacao (com o 9)
+ * — quick-260818-u25.
+ */
+function semNonoDigito(digitos: string): string {
+  if (digitos.length === 13 && digitos.startsWith('55') && digitos[4] === '9') {
+    return digitos.slice(0, 4) + digitos.slice(5);
+  }
+  if (digitos.length === 11 && digitos[2] === '9') {
+    return digitos.slice(0, 2) + digitos.slice(3);
+  }
+  return digitos;
+}
+
+/** Compara dois telefones ignorando formatação (só dígitos) e o nono dígito. */
 function telefonesIguais(a: unknown, b: string): boolean {
   if (a === undefined || a === null) return false;
-  return String(a).replace(/\D/g, '') === b.replace(/\D/g, '');
+  return semNonoDigito(String(a).replace(/\D/g, '')) === semNonoDigito(b.replace(/\D/g, ''));
 }
 
 /**
