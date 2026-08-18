@@ -1101,23 +1101,26 @@ export interface LeadNuncaLigado {
  * (D-04/D-05); a UI soma "Todos" por cima.
  *
  * Erro de infra/HTTP em qualquer uma das duas listas PROPAGA (`listarTasks`,
- * WR-03) — nunca retorna lista vazia pra mascarar falha. Nota de escala
- * (v3.0, single-user): pagina as duas listas inteiras em memória; otimização
- * pra 100k+ leads fica fora de escopo desta fase (reusa a infra de paginação
- * existente, sem novo mecanismo). LGPD: sem log nesta função (nenhum
- * telefone/CPF impresso).
+ * WR-03) — nunca retorna lista vazia pra mascarar falha. ESCALA (fix quick
+ * 260818): a Lista 01 tem 100k+ leads — varrê-la inteira estourava o tempo
+ * (~11min → timeout). Agora devolve um LOTE limitado: as Ligações (Lista 02,
+ * minúscula) continuam paginadas por inteiro pra exclusão exata, mas os leads
+ * são varridos só até juntar o lote (ou teto de páginas). O CRITÉRIO de
+ * exclusão é IDÊNTICO ao de antes (lead com Ligação sai) — só o RESULTADO é
+ * limitado; a "fonte da verdade do filtro" acima segue valendo. LGPD: sem log
+ * nesta função (nenhum telefone/CPF impresso).
  */
 export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigado[]; origens: string[] }> {
-  const leadsTasks: TaskClickUp[] = [];
-  let pageLeads = 0;
-  let lastPageLeads = false;
-  while (!lastPageLeads) {
-    const resultado = await listarTasks(CLICKUP_LIST_LEADS, { page: pageLeads });
-    leadsTasks.push(...resultado.tasks);
-    lastPageLeads = resultado.lastPage;
-    pageLeads += 1;
-  }
+  // LOTE LIMITADO (fix quick 260818, base 100k+): varrer a Lista 01 inteira a
+  // cada carregamento estourava o tempo (~1001 páginas ≈ 11min → timeout). A
+  // Lista 02 é minúscula e o operador envia EM LOTE (throttle Evolution ~15/min),
+  // então basta um lote pronto: paginamos os leads até juntar LIMITE_LOTE
+  // nunca-ligados, ou acabar a base, ou bater o teto de segurança de páginas.
+  const LIMITE_LOTE = 100;
+  const MAX_PAGINAS_SCAN = 20; // teto de segurança — nunca varre mais que isso
 
+  // Ligações (Lista 02) COMPLETAS — lista pequena; a exclusão precisa de TODAS,
+  // então paginação inteira aqui é barata (erro de infra PROPAGA — WR-03).
   const ligacoesTasks: TaskClickUp[] = [];
   let pageLig = 0;
   let lastPageLig = false;
@@ -1141,24 +1144,35 @@ export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigad
     if (tel !== undefined && tel !== null && tel !== '') telefonesComLigacao.push(String(tel));
   }
 
+  // Leads (Lista 01) PAGINADOS sob demanda — filtro inline (MESMO critério de
+  // antes: lead com Ligação por id OU telefone sai), parando quando o lote
+  // enche, a base acaba, ou o teto de páginas é atingido.
   const nuncaLigados: LeadNuncaLigado[] = [];
   const origensVistas = new Set<string>();
-  for (const task of leadsTasks) {
-    // Mesmo parser usado por gerar-lote/fila (nome/telefone/idLead — DRY, D-07).
-    const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
-    const temPorId =
-      (parsed.idLead !== '' && idsComLigacao.has(parsed.idLead)) || idsComLigacao.has(task.id);
-    const temPorTelefone =
-      parsed.telefone !== '' && telefonesComLigacao.some((tl) => telefonesIguais(tl, parsed.telefone));
-    if (temPorId || temPorTelefone) continue;
-    const origem = valorCampoLead(task, CAMPOS_LEADS.ORIGEM);
-    if (origem) origensVistas.add(origem);
-    nuncaLigados.push({
-      leadTaskId: task.id,
-      nome: parsed.nome,
-      telefone: parsed.telefone,
-      origem,
-    });
+  let pageLeads = 0;
+  let lastPageLeads = false;
+  while (!lastPageLeads && nuncaLigados.length < LIMITE_LOTE && pageLeads < MAX_PAGINAS_SCAN) {
+    const resultado = await listarTasks(CLICKUP_LIST_LEADS, { page: pageLeads });
+    for (const task of resultado.tasks) {
+      // Mesmo parser usado por gerar-lote/fila (nome/telefone/idLead — DRY, D-07).
+      const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
+      const temPorId =
+        (parsed.idLead !== '' && idsComLigacao.has(parsed.idLead)) || idsComLigacao.has(task.id);
+      const temPorTelefone =
+        parsed.telefone !== '' && telefonesComLigacao.some((tl) => telefonesIguais(tl, parsed.telefone));
+      if (temPorId || temPorTelefone) continue;
+      const origem = valorCampoLead(task, CAMPOS_LEADS.ORIGEM);
+      if (origem) origensVistas.add(origem);
+      nuncaLigados.push({
+        leadTaskId: task.id,
+        nome: parsed.nome,
+        telefone: parsed.telefone,
+        origem,
+      });
+      if (nuncaLigados.length >= LIMITE_LOTE) break;
+    }
+    lastPageLeads = resultado.lastPage;
+    pageLeads += 1;
   }
 
   return { leads: nuncaLigados, origens: [...origensVistas] };
