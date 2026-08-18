@@ -213,7 +213,7 @@ export type CampanhaReal = {
   aderenciaMedia: number;
 };
 
-const VAZIO: CampanhaReal = {
+export const CAMPANHA_REAL_VAZIO: CampanhaReal = {
   serie: [],
   tempoMedio: { atual: 0, min: 0, mediana: 0, max: 0, amostra: 0 },
   telefonistas: [],
@@ -350,7 +350,7 @@ export function montarCampanha(real: CampanhaReal): Campanha {
 }
 
 /** Painel vazio — usado no primeiro render, antes da telemetria chegar. */
-export const CAMPANHA_VAZIA: Campanha = montarCampanha(VAZIO);
+export const CAMPANHA_VAZIA: Campanha = montarCampanha(CAMPANHA_REAL_VAZIO);
 
 /** Compat: a extração agora é ao vivo; a idade real vem do campo `idadeS` da rota. */
 export const CAMPANHA_GERADA_EM: string | null = null;

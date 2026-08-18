@@ -1,7 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { montarCampanha, CAMPANHA_VAZIA, type Campanha, type CampanhaReal } from "./campanha";
+import {
+  montarCampanha,
+  CAMPANHA_VAZIA,
+  CAMPANHA_REAL_VAZIO,
+  type Campanha,
+  type CampanhaReal,
+} from "./campanha";
 
 /* Telemetria AO VIVO da Central de Campanha, servida por /api/mobile/campanha.
 
@@ -33,11 +39,17 @@ export interface CampanhaAoVivo {
   semAcesso: boolean;
 }
 
-interface Resposta extends CampanhaReal {
-  semDesfecho: number;
-  semOperador: { lig: number; cont: number };
-  idadeS: number | null;
-}
+/* A rota devolve SÓ o que ela consegue medir da Lista 02 — serie, telefonistas, totais e
+   tempo. NÃO devolve intencao/sla/cobertura/votosPorCidade/motivosNaoContato, que exigem
+   fontes que não existem. Por isso `Partial<CampanhaReal>`: declarar `extends CampanhaReal`
+   seria AFIRMAR um formato que não chega, e o TypeScript acreditaria — foi exatamente esse
+   `extends` que fez `montarCampanha` estourar em `real.intencao.find` na primeira subida.
+   O que falta é completado com CAMPANHA_REAL_VAZIO antes de montar o painel. */
+type Resposta = Partial<CampanhaReal> & {
+  semDesfecho?: number;
+  semOperador?: { lig: number; cont: number };
+  idadeS?: number | null;
+};
 
 export function useCampanhaReal(): CampanhaAoVivo {
   const [d, setD] = React.useState<Resposta | null>(null);
@@ -92,18 +104,24 @@ export function useCampanhaReal(): CampanhaAoVivo {
     };
   }, []);
 
-  const dados = React.useMemo(() => (d ? montarCampanha(d) : CAMPANHA_VAZIA), [d]);
+  const dados = React.useMemo(
+    // Espalhar SOBRE o vazio garante que todo campo que montarCampanha lê exista, mesmo
+    // que a rota mude e pare de mandar algum — a tela degrada para "sem dados" naquele
+    // card em vez de derrubar a página inteira com um TypeError.
+    () => (d ? montarCampanha({ ...CAMPANHA_REAL_VAZIO, ...d }) : CAMPANHA_VAZIA),
+    [d],
+  );
 
   // Taxa sobre as ligações COM desfecho. Sobre o total ela ficaria artificialmente baixa:
   // hoje a maioria das ligações não grava desfecho (o contador só sobe quando o closer
   // escolhe o motivo na tela), então o denominador cheio mediria o registro, não o
   // atendimento. `semDesfecho` fica exposto para a tela mostrar o tamanho dessa lacuna.
-  const comDesfecho = d ? d.totalLigacoes - d.semDesfecho : 0;
-  const taxaAtendimento = d && comDesfecho > 0 ? Math.round((d.totalContatos / comDesfecho) * 100) : null;
+  const comDesfecho = d ? (d.totalLigacoes ?? 0) - (d.semDesfecho ?? 0) : 0;
+  const taxaAtendimento = d && comDesfecho > 0 ? Math.round(((d.totalContatos ?? 0) / comDesfecho) * 100) : null;
 
   return {
     dados,
-    bruto: d,
+    bruto: d ? ({ ...CAMPANHA_REAL_VAZIO, ...d } as CampanhaReal) : null,
     semDesfecho: d?.semDesfecho ?? 0,
     semOperador: d?.semOperador ?? { lig: 0, cont: 0 },
     taxaAtendimento,
