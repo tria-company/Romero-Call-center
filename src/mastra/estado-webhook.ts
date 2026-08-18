@@ -22,9 +22,31 @@ import { REDIS_URL } from './config.ts';
 const CORRELACAO_TTL_MS = 6 * 60 * 60 * 1000; // 6h — correlacao e task ativa
 const DEDUP_TTL_MS = 24 * 60 * 60 * 1000; // 24h — dedup de RECORD/falha terminal (so Redis; memoria poda por size)
 
-/** Normaliza telefone para so-digitos — mesma forma usada por telefoneDoEventoCall. */
+/**
+ * Remove o nono digito (prefixo movel BR, '9' logo apos o DDD) quando
+ * presente — torna a chave TOLERANTE ao formato que o Wavoip/WhatsApp
+ * reporta no webhook (12 digitos, SEM o 9) vs o que a Ligacao guarda quando
+ * o operador inicia a chamada (13 digitos, COM o 9 — mesmo numero da Lista
+ * 01/02). Sem isso a correlacao call->Ligacao falhava SEMPRE pra numero
+ * movel: 31/31 casos de "falha terminal sem Ligacao aberta correlacionavel"
+ * nos logs de prod (quick-260818-u25). Mesma logica em clickup.ts
+ * (telefonesIguais) — pura, sem I/O, duplicada de proposito (par pequeno
+ * demais pra justificar um modulo compartilhado, mesmo padrao do resto do
+ * arquivo). Idempotente: aplicar 2x no mesmo numero da o mesmo resultado.
+ */
+function semNonoDigito(digitos: string): string {
+  if (digitos.length === 13 && digitos.startsWith('55') && digitos[4] === '9') {
+    return digitos.slice(0, 4) + digitos.slice(5);
+  }
+  if (digitos.length === 11 && digitos[2] === '9') {
+    return digitos.slice(0, 2) + digitos.slice(3);
+  }
+  return digitos;
+}
+
+/** Normaliza telefone para so-digitos, tolerante ao nono digito — mesma forma usada por telefoneDoEventoCall. */
 function chaveTelefone(telefone: string): string {
-  return telefone.replace(/[^\d]/g, '');
+  return semNonoDigito(telefone.replace(/[^\d]/g, ''));
 }
 
 const MODO: 'redis' | 'memoria' = REDIS_URL ? 'redis' : 'memoria';
