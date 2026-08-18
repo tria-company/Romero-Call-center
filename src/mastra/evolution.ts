@@ -187,14 +187,26 @@ export async function fecharRateLimiterEvolution(): Promise<void> {
 // ===== Choke-point HTTP =====
 
 /**
- * Choke point ÚNICO de saída HTTP à Evolution API: toda chamada passa por
- * `adquirirTokenEvolution()` IMEDIATAMENTE ANTES do `fetchTimeout()` — nunca
- * exportar fetch cru, nenhum caminho de envio escapa do throttle. Header
- * `apikey` (minúsculo) — não o header Bearer usado pela Wavoip, convenção
- * diferente da Evolution.
+ * Choke point ÚNICO de saída HTTP à Evolution API: todo caminho de ENVIO
+ * passa por `adquirirTokenEvolution()` IMEDIATAMENTE ANTES do `fetchTimeout()`
+ * — nunca exportar fetch cru, nenhum caminho de envio escapa do throttle.
+ * Header `apikey` (minúsculo) — não o header Bearer usado pela Wavoip,
+ * convenção diferente da Evolution.
+ *
+ * WR-02: `skipThrottle` isenta o probe READ-ONLY de status do balde de envio.
+ * Um GET de `connectionState` não é um envio e não arrisca o BANIMENTO que o
+ * cap existe pra prevenir (Pitfall 1); consumir token de envio nele podia
+ * esvaziar o balde numa rajada de envios e virar o banner pra "desconectado"
+ * enquanto os envios ainda estão saindo (falso negativo). O throttle segue
+ * ESTRITO em `sendWhatsAppAudio`/pré-check — só o read-only é isento.
  */
-async function fetchEvolution(caminho: string, options?: RequestInit, timeoutMs?: number): Promise<Response> {
-  await adquirirTokenEvolution();
+async function fetchEvolution(
+  caminho: string,
+  options?: RequestInit,
+  timeoutMs?: number,
+  skipThrottle = false,
+): Promise<Response> {
+  if (!skipThrottle) await adquirirTokenEvolution();
   return fetchTimeout(
     `${EVOLUTION_API_URL}${caminho}`,
     {
@@ -254,7 +266,10 @@ export async function statusInstancia(): Promise<StatusInstanciaEvolution> {
   }
   let res: Response;
   try {
-    res = await fetchEvolution(`/instance/connectionState/${EVOLUTION_INSTANCE}`, { method: 'GET' });
+    // WR-02: read-only — isento do throttle de envio (skipThrottle=true) pra
+    // não gastar o balde de envio e virar o banner pra "desconectado" durante
+    // uma rajada de envios saudável.
+    res = await fetchEvolution(`/instance/connectionState/${EVOLUTION_INSTANCE}`, { method: 'GET' }, undefined, true);
   } catch (e) {
     throw new Error(`[evolution] falha de rede ao consultar status da instância: ${e instanceof Error ? e.message : String(e)}`);
   }
