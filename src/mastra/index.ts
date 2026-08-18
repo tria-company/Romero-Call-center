@@ -186,6 +186,31 @@ import {
 } from './wavoip-api.ts';
 
 /**
+ * WR-01: classifica uma falha de envio de áudio pro cliente SEM colapsar todo
+ * erro em "desconectado". `enviarAudio`/pré-check lançam em três casos
+ * distintos: (a) throttle do rate limiter segurando o ritmo (D-06 funcionando
+ * — NÃO é sessão fora), (b) falha transiente de rede/HTTP 5xx (retry neutro)
+ * e (c) sessão genuinamente fechada. Só afirma `desconectado: true` — que a UI
+ * traduz pro aviso "reconecte o WhatsApp" — quando o status REAL confirma a
+ * sessão fechada; caso contrário devolve um erro neutro que cai no retry
+ * ("O envio falhou, toque para tentar de novo"). O probe de status é isento
+ * do throttle (WR-02), então não gasta budget de envio. Fail-closed preservado:
+ * na dúvida (probe também falha) NUNCA afirma "desconectado" — mas também
+ * nunca reporta sucesso; sempre um não-2xx.
+ */
+async function classificarFalhaEnvioAudio(msg: string): Promise<{ erro: string; desconectado?: true }> {
+  if (msg.includes('throttle')) return { erro: 'throttle' };
+  try {
+    const { conectado } = await statusInstancia();
+    if (!conectado) return { erro: 'envio_falhou', desconectado: true };
+  } catch {
+    // Probe de status também falhou — ambíguo. Nunca afirma "desconectado"
+    // sem confirmação; devolve erro neutro (retry).
+  }
+  return { erro: 'envio_falhou' };
+}
+
+/**
  * Extrai o telefone (so digitos) do evento CALL conforme a direcao. Exportada
  * porque o CLI de reprocesso (Fase 06 Plano 05, `scripts/reprocessar-eventos.mjs`)
  * precisa derivar o telefone do payload cru de um evento CALL terminal.
@@ -1168,8 +1193,11 @@ export const mastra = new Mastra({
             }
           } catch (e) {
             // LGPD: nunca logar telefone/CPF em claro — só a mensagem/classe.
-            console.error('[discador] falha no pré-check de WhatsApp:', e instanceof Error ? e.message : String(e));
-            return c.json({ erro: 'envio_falhou', desconectado: true }, 502);
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('[discador] falha no pré-check de WhatsApp:', msg);
+            // WR-01: mesma classificação do envio — throttle/transiente NÃO é
+            // sessão fora; só afirma `desconectado` com status REAL confirmando.
+            return c.json(await classificarFalhaEnvioAudio(msg), 502);
           }
           try {
             // enviarAudio já passa pelo rate limiter interno (D-06) e LANÇA em
@@ -1178,10 +1206,13 @@ export const mastra = new Mastra({
           } catch (e) {
             // LGPD: nunca logar telefone/CPF/audioBase64 em claro — só a
             // mensagem/classe do erro.
-            console.error('[discador] falha ao enviar áudio via Evolution:', e instanceof Error ? e.message : String(e));
-            // Falha ALTA (D-08): nunca 200 aqui — a UI traduz `desconectado`
-            // pro aviso explícito de sessão fora/erro de envio.
-            return c.json({ erro: 'envio_falhou', desconectado: true }, 502);
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('[discador] falha ao enviar áudio via Evolution:', msg);
+            // Falha ALTA (D-08): nunca 200 aqui. WR-01: NÃO colapsa todo erro em
+            // `desconectado` — throttle (D-06 segurando) e transientes viram erro
+            // neutro (retry); só afirma `desconectado` com status REAL confirmando
+            // sessão fora, pra não instruir "reconecte o WhatsApp" à toa.
+            return c.json(await classificarFalhaEnvioAudio(msg), 502);
           }
           // Registro best-effort na Lista Audios (WR-03) — o envio (efeito
           // primário) já aconteceu; uma falha aqui nunca desfaz/mascara o envio.
