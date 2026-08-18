@@ -33,7 +33,7 @@ import {
   PAINEL_TTL_CLICKUP_MS,
   PAINEL_MAX_PAGINAS,
 } from './config.ts';
-import { CAMPOS_LEADS, OPCOES_LEADS, CAMPOS_LIGACOES, listarTasks, type TaskClickUp } from './clickup.ts';
+import { CAMPOS_LEADS, OPCOES_LEADS, CAMPOS_LIGACOES, listarTasks, lerAtendeu, type TaskClickUp } from './clickup.ts';
 import { fetchTimeout } from './http.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
@@ -207,6 +207,8 @@ export interface ResumoLigacoes {
   hoje: number;
   atendidasHoje: number;
   naoAtendidasHoje: number;
+  /** Ligações de hoje que ainda não têm desfecho gravado (ATENDEU vazio). */
+  semDesfechoHoje: number;
   atendidasTotal: number;
   comGravacao: number;
   comTranscricao: number;
@@ -244,13 +246,12 @@ function preenchido(task: TaskClickUp, fieldId: string): boolean {
  * "hoje" usa o dia de Brasília (não UTC) — senão o dia vira às 21h BRT e as ligações da
  * noite caem no dia seguinte, exatamente o bug que metricas.ts:77 já documenta.
  *
- * `atendidasTotal` conta o campo ATENDEU preenchido; ATENDEU é drop_down, então qualquer
- * valor presente significa que houve desfecho registrado.
+ * ATENDEU é drop_down (Sim/Não), então "preenchido" NÃO significa "atendida" — significa
+ * "tem desfecho". A decodificação correta mora em `lerAtendeu` (clickup.ts), e é ela que
+ * este módulo usa. Medido em 18/08: das 141 ligações do dia, 17 eram Sim, 26 eram Não e
+ * 98 estavam sem desfecho — contar "preenchido" publicava 43 atendidas, 2,5x o real.
  *
- * ⚠️ `naoAtendidasHoje` é o COMPLEMENTO de `atendidasHoje`, não "confirmadamente não
- * atendida": inclui a ligação ainda EM ANDAMENTO (que ainda não gravou desfecho) e a que
- * terminou sem o desfecho ser registrado. Hoje nenhuma tela expõe esse campo — se for
- * exibir, rotular como "sem desfecho" em vez de "não atendidas".
+ * Os três contadores do dia (atendidas / naoAtendidas / semDesfecho) somam `hoje`.
  */
 export async function resumoLigacoesAoVivo(): Promise<ResumoLigacoes> {
   const hoje = diaOperacionalStr();
@@ -265,7 +266,8 @@ export async function resumoLigacoesAoVivo(): Promise<ResumoLigacoes> {
   }
 
   const deHoje = todas.filter((t) => diaDaTask(t.date_created) === hoje);
-  const atendeuSim = (t: TaskClickUp) => preenchido(t, CAMPOS_LIGACOES.ATENDEU);
+  const temDesfecho = (t: TaskClickUp) => preenchido(t, CAMPOS_LIGACOES.ATENDEU);
+  const atendeuSim = (t: TaskClickUp) => temDesfecho(t) && lerAtendeu(t);
 
   let ultimaEm: string | null = null;
   for (const t of todas) {
@@ -277,7 +279,8 @@ export async function resumoLigacoesAoVivo(): Promise<ResumoLigacoes> {
     total: todas.length,
     hoje: deHoje.length,
     atendidasHoje: deHoje.filter(atendeuSim).length,
-    naoAtendidasHoje: deHoje.filter((t) => !atendeuSim(t)).length,
+    naoAtendidasHoje: deHoje.filter((t) => temDesfecho(t) && !lerAtendeu(t)).length,
+    semDesfechoHoje: deHoje.filter((t) => !temDesfecho(t)).length,
     atendidasTotal: todas.filter(atendeuSim).length,
     comGravacao: todas.filter((t) => preenchido(t, CAMPOS_LIGACOES.URL_GRAVACAO)).length,
     comTranscricao: todas.filter((t) => preenchido(t, CAMPOS_LIGACOES.TRANSCRICAO)).length,

@@ -1060,7 +1060,7 @@ export async function resolverLeadDaLigacao(taskLigacaoId: string): Promise<stri
  * (por orderindex/id/name) e mapeia a opção casada. Indeterminado/ausente →
  * `false` (nunca lança). Sem PII/log (LGPD).
  */
-function lerAtendeu(task: TaskClickUp): boolean {
+export function lerAtendeu(task: TaskClickUp): boolean {
   const cf = task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.ATENDEU);
   const raw = cf?.value;
   if (raw === null || raw === undefined || raw === '') return false;
