@@ -218,6 +218,31 @@ async function sessaoGestor(c: { req: { header: (nome: string) => string | undef
 }
 
 /**
+ * Gate romero-only (Fase 12 Plano 03, ENVIO-07) — MAIS ESTREITO que
+ * sessaoGestor: barra por USUÁRIO ('romero'), não por PAPEL ('gestor').
+ * Existe porque romero é um único usuário específico (ele É gestor, mas nem
+ * todo gestor é romero) — as rotas /api/discador/audios* são a peça de
+ * segurança de verdade desta fase: como o `proxy.ts` do romero-mobile NÃO é
+ * compilado como middleware nesta versão do Next (o layout gateia só por
+ * papel/UI), esconder a UI não basta — um não-romero autenticado batendo
+ * direto na rota tem que tomar 403 AQUI. Mesmo racional anti-spoof de
+ * sessaoGestor (T-11-04-S1): o usuário SEMPRE vem de `verificarToken`
+ * (header Authorization), NUNCA de body/query/header controlado pelo
+ * cliente. Nunca loga o token. Retorna `{ status: 401 }` sem sessão válida,
+ * `{ status: 403 }` pra sessão válida mas usuário != 'romero', ou
+ * `{ status: 200, usuario: 'romero' }` liberado — mesmo shape de retorno de
+ * sessaoGestor pra reuso uniforme no call-site.
+ */
+async function sessaoRomero(c: { req: { header: (nome: string) => string | undefined } }): Promise<
+  { status: 401 } | { status: 403 } | { status: 200; usuario: string }
+> {
+  const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+  if (!sess) return { status: 401 };
+  if (sess.usuario !== 'romero') return { status: 403 };
+  return { status: 200, usuario: sess.usuario };
+}
+
+/**
  * Servidor do Discador Wavoip. Serve o PWA (frontend) e a API minima que ele
  * consome: login, lista de qualificados e o token do device Wavoip. A ligacao
  * em si acontece 100% no navegador via SDK Wavoip (WebRTC) — nao ha nada de
