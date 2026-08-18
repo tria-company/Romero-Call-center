@@ -689,6 +689,10 @@ export interface MotivoNaoAtendida {
   observacao?: string;
   /** Segundos que o operador ficou tentando (discagem → desligar). */
   duracao?: number;
+  /** u26: login do atendente que fez a tentativa — rastreabilidade no comentário. */
+  usuario?: string;
+  /** u26: número/linha da campanha usada na tentativa (não é dado do lead). */
+  numero?: string;
 }
 
 export async function registrarDesfecho(
@@ -724,6 +728,12 @@ export async function registrarDesfecho(
       if (motivo.duracao && motivo.duracao > 0) {
         linhas.push(`⏱️ Tentou por ${formatarDuracaoCurta(motivo.duracao)}`);
       }
+      // u26: rastreabilidade — quem ligou e por qual linha (não é dado do
+      // lead, sem restrição de LGPD). "Preencher todas as informações
+      // possíveis" pedido pelo usuário para o caso "Número errado" — mesma
+      // linha de código serve TODAS as categorias (comportamento uniforme).
+      if (motivo.usuario) linhas.push(`👤 ${motivo.usuario}`);
+      if (motivo.numero) linhas.push(`☎️ Linha: ${motivo.numero}`);
       try {
         await comentarTask(taskId, linhas.join('\n'));
       } catch (e) {
