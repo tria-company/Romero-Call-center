@@ -310,3 +310,216 @@ export function votosComCache(): Promise<VotosAoVivo> {
 export function ligacoesComCache(): Promise<ResumoLigacoes> {
   return comCache(CHAVE_LIGACOES, PAINEL_TTL_CLICKUP_MS, resumoLigacoesAoVivo);
 }
+
+// ===== 4. Central de Campanha — produção diária, ranking e taxa de atendimento =====
+//
+// A Central estava vazia desde 15/08 por decisão (commit 93c0a31 trocou a leitura de um
+// `reais.json` estático por `const real = VAZIO`, com a nota "sem telemetria ao vivo").
+// Estes agregados são a telemetria que faltava, montada da Lista 02 LIGAÇÕES.
+//
+// O que NÃO dá pra montar, e por quê:
+//   • série de votos ao longo do tempo — o ClickUp não guarda QUANDO o voto foi confirmado;
+//   • comparativo semana vs anterior — só existem 6 dias de operação (12 a 18/08).
+// A tela já trata os dois casos com o texto certo; não inventamos série aqui.
+
+export interface DiaCampanha {
+  dia: string;        // YYYY-MM-DD (dia BRT)
+  ligacoes: number;
+  contatos: number;   // atendidas de verdade (ATENDEU = Sim)
+}
+
+export interface TelefonistaCampanha {
+  id: number;
+  nome: string;
+  turno: string;
+  lig: number;
+  cont: number;
+  conv: number;   // % de conversão = contatos / ligações
+  ader: number;   // aderência ao script (0 quando não avaliada)
+  tsec: number;   // tempo médio em segundos
+  votos: number;
+  ligh: number;   // ligações por hora
+}
+
+export interface ResumoCampanha {
+  serie: DiaCampanha[];
+  telefonistas: TelefonistaCampanha[];
+  totalLigacoes: number;
+  totalContatos: number;
+  /** Sem desfecho gravado: o denominador honesto da taxa depende disto. */
+  semDesfecho: number;
+  /** Ligações sem OPERADOR — fora do ranking, mas dentro dos totais (ver nota). */
+  semOperador: { lig: number; cont: number };
+  /**
+   * Por que a coluna de contatos do ranking fica quase zerada: das ligações FEITAS PELO
+   * APP (as que gravam OPERADOR), a imensa maioria nunca grava desfecho — medido em
+   * 18/08: 144 com operador, das quais só 3 atendidas e 104 sem desfecho nenhum. O
+   * ranking mede VOLUME com confiança; conversão só volta a valer quando o desfecho for
+   * gravado de forma confiável. Exposto aqui pra tela poder dizer isso em vez de exibir
+   * um zero sem explicação.
+   */
+  desfechoDeApp: { comOperador: number; atendidas: number; semDesfecho: number };
+  tempoMedio: { atual: number; min: number; mediana: number; max: number; amostra: number };
+  parcial: boolean;
+}
+
+/**
+ * Converte a DURAÇÃO da Ligação em segundos. O campo é TEXTO no formato "5min 32s"
+ * (verificado em 18/08: 38 valores preenchidos, todos nesse molde) — `Number()` nele
+ * devolve NaN, que foi o motivo de a primeira medição achar "0 com duração".
+ * Aceita também "45s" e "2min". Devolve null quando não dá pra ler.
+ */
+export function duracaoEmSegundos(valor: unknown): number | null {
+  const txt = String(valor ?? '').trim().toLowerCase();
+  if (!txt) return null;
+  const m = txt.match(/(?:(\d+)\s*min)?\s*(?:(\d+)\s*s)?/);
+  if (!m) return null;
+  const min = Number(m[1] || 0);
+  const seg = Number(m[2] || 0);
+  const total = min * 60 + seg;
+  return total > 0 ? total : null;
+}
+
+/**
+ * Rótulo legível do telefonista. `OPERADOR` guarda o login, que em 124 das 144 ligações
+ * é um e-mail — num ranking, "wenellyhsc@gmail.com" ocupa a linha inteira e não diz nome.
+ * Corta o domínio e troca separadores por espaço; o que não é e-mail passa intacto
+ * ("Romero Albuquerque", "admin"). Não inventa nome: se só há o local-part, é ele que vai.
+ */
+export function nomeDeOperador(bruto: string): string {
+  const t = String(bruto ?? '').trim();
+  if (!t) return 'sem operador';
+  const local = t.includes('@') ? t.slice(0, t.indexOf('@')) : t;
+  return local.replace(/[._-]+/g, ' ').trim() || t;
+}
+
+function mediana(ordenados: number[]): number {
+  if (ordenados.length === 0) return 0;
+  const meio = Math.floor(ordenados.length / 2);
+  return ordenados.length % 2 ? ordenados[meio] : Math.round((ordenados[meio - 1] + ordenados[meio]) / 2);
+}
+
+/**
+ * Agrega a Lista 02 por DIA e por OPERADOR. Uma varredura só alimenta os três cards —
+ * produção diária, ranking de telefonistas e taxa de atendimento — e o cache absorve o
+ * custo (~3,8s hoje, 167 ligações em 2 páginas).
+ *
+ * `contatos` usa `lerAtendeu` (ATENDEU = Sim), nunca "campo preenchido".
+ *
+ * `OPERADOR` é campo de TEXTO livre gravado por `registrarDesfecho`. Ligação SEM operador
+ * fica FORA do ranking e vai para `semOperador` — medido em 18/08, esse balde tinha 23
+ * ligações e 21 dos 24 contatos totais, e apareceria no topo da lista como se fosse a
+ * melhor telefonista da equipe. Continua somando nos totais: é dado real, só não é pessoa.
+ *
+ * `ligh` sai da janela real daquele operador (primeira à última ligação), com piso de 1h
+ * pra não inflar quem fez 2 ligações em 10 minutos.
+ *
+ * TEMPO: `atual` é a MEDIANA, não a média. O campo DURAÇÃO tem outliers grosseiros
+ * (medido: máximo de 12.217s = 3h23, contra mediana de 50s) — provavelmente ligação que
+ * nunca gravou FIM. A média vira 717s e mente; a mediana aguenta o outlier.
+ *
+ * LGPD: nome de operador é infraestrutura da campanha, não dado do lead (mesmo racional do
+ * commit u26). Nenhum telefone/CPF sai daqui.
+ */
+export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
+  let page = 0;
+  let ultima = false;
+  const todas: TaskClickUp[] = [];
+  while (!ultima && page < PAINEL_MAX_PAGINAS) {
+    const r = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
+    todas.push(...r.tasks);
+    ultima = r.lastPage;
+    page += 1;
+  }
+
+  const temDesfecho = (t: TaskClickUp) => preenchido(t, CAMPOS_LIGACOES.ATENDEU);
+  const contato = (t: TaskClickUp) => temDesfecho(t) && lerAtendeu(t);
+  const comOperador = (t: TaskClickUp) => preenchido(t, CAMPOS_LIGACOES.OPERADOR);
+
+  // --- série diária ---
+  const porDia = new Map<string, { ligacoes: number; contatos: number }>();
+  for (const t of todas) {
+    const d = diaDaTask(t.date_created);
+    if (!d) continue;
+    const e = porDia.get(d) ?? { ligacoes: 0, contatos: 0 };
+    e.ligacoes += 1;
+    if (contato(t)) e.contatos += 1;
+    porDia.set(d, e);
+  }
+  const serie: DiaCampanha[] = [...porDia.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([dia, v]) => ({ dia, ligacoes: v.ligacoes, contatos: v.contatos }));
+
+  // --- ranking por telefonista ---
+  interface Acc { lig: number; cont: number; segs: number[]; aders: number[]; ini: number; fim: number }
+  const porOp = new Map<string, Acc>();
+  for (const t of todas) {
+    const nome = String(valorCampo(t, CAMPOS_LIGACOES.OPERADOR) ?? '').trim() || 'sem operador';
+    const a = porOp.get(nome) ?? { lig: 0, cont: 0, segs: [], aders: [], ini: Infinity, fim: 0 };
+    a.lig += 1;
+    if (contato(t)) a.cont += 1;
+    const seg = duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO));
+    if (seg) a.segs.push(seg);
+    const ader = Number(valorCampo(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT));
+    if (Number.isFinite(ader) && ader > 0) a.aders.push(ader);
+    const ts = Number(t.date_created);
+    if (ts) { a.ini = Math.min(a.ini, ts); a.fim = Math.max(a.fim, ts); }
+    porOp.set(nome, a);
+  }
+  const media = (xs: number[]) => (xs.length ? Math.round(xs.reduce((s, x) => s + x, 0) / xs.length) : 0);
+  const SEM_OP = 'sem operador';
+  const balde = porOp.get(SEM_OP);
+  const semOperador = { lig: balde?.lig ?? 0, cont: balde?.cont ?? 0 };
+  const telefonistas: TelefonistaCampanha[] = [...porOp.entries()]
+    .filter(([nome]) => nome !== SEM_OP)
+    .map(([nome, a], i) => {
+      const horas = Math.max(1, (a.fim - a.ini) / 3600000);
+      return {
+        id: i + 1,
+        nome: nomeDeOperador(nome),
+        turno: '',
+        lig: a.lig,
+        cont: a.cont,
+        conv: a.lig ? Math.round((a.cont / a.lig) * 100) : 0,
+        ader: media(a.aders),
+        tsec: media(a.segs),
+        votos: 0, // voto não é atribuível ao operador: o ClickUp não guarda quem o registrou
+        ligh: Math.round((a.lig / horas) * 10) / 10,
+      };
+    })
+    .sort((x, y) => y.lig - x.lig);
+
+  const segs = todas
+    .map((t) => duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO)))
+    .filter((n): n is number => n !== null)
+    .sort((a, b) => a - b);
+
+  return {
+    serie,
+    telefonistas,
+    totalLigacoes: todas.length,
+    totalContatos: todas.filter(contato).length,
+    semDesfecho: todas.filter((t) => !temDesfecho(t)).length,
+    semOperador,
+    desfechoDeApp: {
+      comOperador: todas.filter(comOperador).length,
+      atendidas: todas.filter((t) => comOperador(t) && contato(t)).length,
+      semDesfecho: todas.filter((t) => comOperador(t) && !temDesfecho(t)).length,
+    },
+    tempoMedio: {
+      atual: mediana(segs),
+      min: segs[0] ?? 0,
+      mediana: mediana(segs),
+      max: segs[segs.length - 1] ?? 0,
+      amostra: segs.length,
+    },
+    parcial: !ultima,
+  };
+}
+
+export const CHAVE_CAMPANHA = 'campanha';
+
+/** Resumo da Central de Campanha, com cache (varre a Lista 02, mesmo custo do resumo). */
+export function campanhaComCache(): Promise<ResumoCampanha> {
+  return comCache(CHAVE_CAMPANHA, PAINEL_TTL_CLICKUP_MS, resumoCampanhaAoVivo);
+}
