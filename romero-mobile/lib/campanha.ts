@@ -188,7 +188,7 @@ export function tomAderencia(ader: number): "good" | "warn" | "crit" {
 
 /* ── Os números, contados da fonte ─────────────────────────────────────── */
 
-type CampanhaReal = {
+export type CampanhaReal = {
   serie: { dia: string; ligacoes: number; contatos: number }[];
   tempoMedio: { atual: number; min: number; mediana: number; max: number; amostra: number };
   telefonistas: {
@@ -227,7 +227,7 @@ const VAZIO: CampanhaReal = {
   aderenciaMedia: 0,
 };
 
-const real: CampanhaReal = VAZIO;
+
 
 /** Barra proporcional à MAIOR da lista — é assim que o painel as desenha. */
 function barras(
@@ -247,17 +247,21 @@ function barras(
 /** Faixa-alvo de duração, em segundos. É meta de operação, não medição. */
 const FAIXA_ALVO: readonly [number, number] = [60, 180];
 
-const votosRomero = real.intencao.find((i) => i.rotulo === "Romero")?.sim ?? 0;
-const votosAndreza = real.intencao.find((i) => i.rotulo === "Andreza")?.sim ?? 0;
-const diasComDado = real.serie.length;
-const diasRestantes = Math.max(CONFIG_CAMPANHA.calendario.totalDias - diasComDado, 0);
-
 /** (meta − votos) ÷ dias restantes. Zero quando não há dias a dividir. */
-function ritmoNecessario(votos: number, meta: number): number {
+function ritmoNecessario(votos: number, meta: number, diasRestantes: number): number {
   return diasRestantes ? Math.max(Math.round((meta - votos) / diasRestantes), 0) : 0;
 }
 
-export const CAMPANHA: Campanha = {
+/** Monta o painel a partir da telemetria ao vivo (/api/mobile/campanha).
+    Era `const real = VAZIO` desde 15/08 (commit 93c0a31, 'sem telemetria ao vivo'):
+    a tela nasceu zerada esperando esta fonte. Agora `real` entra por parametro. */
+export function montarCampanha(real: CampanhaReal): Campanha {
+  const votosRomero = real.intencao.find((i) => i.rotulo === "Romero")?.sim ?? 0;
+  const votosAndreza = real.intencao.find((i) => i.rotulo === "Andreza")?.sim ?? 0;
+  const diasComDado = real.serie.length;
+  const diasRestantes = Math.max(CONFIG_CAMPANHA.calendario.totalDias - diasComDado, 0);
+
+  return {
   dia: diasComDado,
   totalDias: CONFIG_CAMPANHA.calendario.totalDias,
   inicio: CONFIG_CAMPANHA.calendario.inicio,
@@ -274,7 +278,7 @@ export const CAMPANHA: Campanha = {
       votos: votosRomero,
       meta: CONFIG_CAMPANHA.metas.romero,
       ritmoAtual: 0,
-      ritmoNecessario: ritmoNecessario(votosRomero, CONFIG_CAMPANHA.metas.romero),
+      ritmoNecessario: ritmoNecessario(votosRomero, CONFIG_CAMPANHA.metas.romero, diasRestantes),
       projecao: 0,
     },
     {
@@ -285,7 +289,7 @@ export const CAMPANHA: Campanha = {
       votos: votosAndreza,
       meta: CONFIG_CAMPANHA.metas.andreza,
       ritmoAtual: 0,
-      ritmoNecessario: ritmoNecessario(votosAndreza, CONFIG_CAMPANHA.metas.andreza),
+      ritmoNecessario: ritmoNecessario(votosAndreza, CONFIG_CAMPANHA.metas.andreza, diasRestantes),
       projecao: 0,
     },
   ],
@@ -342,10 +346,14 @@ export const CAMPANHA: Campanha = {
 
   sla: real.sla,
   cobertura: real.cobertura,
-};
+  };
+}
 
-/** Fonte e momento da extração — sem telemetria ao vivo, não há de quando. */
+/** Painel vazio — usado no primeiro render, antes da telemetria chegar. */
+export const CAMPANHA_VAZIA: Campanha = montarCampanha(VAZIO);
+
+/** Compat: a extração agora é ao vivo; a idade real vem do campo `idadeS` da rota. */
 export const CAMPANHA_GERADA_EM: string | null = null;
 
 /** Há telemetria suficiente para o painel dizer alguma coisa? */
-export const CAMPANHA_TEM_DADOS = real.totalLigacoes > 0;
+export const campanhaTemDados = (real: CampanhaReal): boolean => real.totalLigacoes > 0;
