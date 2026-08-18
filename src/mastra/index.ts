@@ -80,10 +80,15 @@ import {
   buscarLeadsNuncaLigados,
   registrarEnvioAudio,
   normalizarTelefoneE164,
+  // quick 260818-mv2: pré-check de WhatsApp ANTES do envio de áudio — marca
+  // o lead "Sem WhatsApp" (comenta + Ligação fechada) sem tocar em
+  // buscarLeadsNuncaLigados.
+  marcarLeadSemWhatsapp,
 } from './clickup';
 // Client Evolution API (Fase 12 Plano 01, D-06/D-08): choke-point único de
 // envio/status — enviarAudio LANÇA em falha (nunca 200 silencioso).
-import { enviarAudio, statusInstancia } from './evolution.ts';
+// numeroExisteNoWhatsapp (quick 260818-mv2): pré-check ANTES de enviarAudio.
+import { enviarAudio, statusInstancia, numeroExisteNoWhatsapp } from './evolution.ts';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
 // remove a task recem-iniciada do cache POR OPERADOR (D-04) — iniciarLigacao
@@ -1127,6 +1132,7 @@ export const mastra = new Mastra({
           const mimetype = body.mimetype != null ? String(body.mimetype) : undefined;
           if (!audioBase64) return c.json({ erro: 'audioBase64 obrigatório' }, 400);
           let telefoneE164: string;
+          let idLeadGhl = '';
           try {
             // validarLeadDaLista01 é o guard anti-IDOR E devolve a task já lida
             // — reaproveita pra ler o telefone sem um segundo GET ao ClickUp.
@@ -1135,6 +1141,7 @@ export const mastra = new Mastra({
             const e164 = telefoneRaw ? normalizarTelefoneE164(telefoneRaw) : null;
             if (!e164) return c.json({ erro: 'Lead sem telefone válido' }, 422);
             telefoneE164 = e164;
+            idLeadGhl = valorCampoLead(task, CAMPOS_LEADS.ID_LEAD_GHL);
           } catch (e) {
             console.error('[discador] erro ao resolver lead pro envio de áudio:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
@@ -1142,6 +1149,27 @@ export const mastra = new Mastra({
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao carregar o lead' }, 502);
+          }
+          try {
+            // Pré-check (quick 260818-mv2): checa o número na Evolution ANTES
+            // de gastar throttle/rate-limit num envio que nunca vai chegar.
+            // Só marca "sem WhatsApp" quando a Evolution AFIRMA exists===false
+            // — erro de rede/HTTP cai no catch abaixo, MESMO tratamento de
+            // "desconectado" de hoje (nunca marca o lead por ambiguidade).
+            const existe = await numeroExisteNoWhatsapp(telefoneE164);
+            if (!existe) {
+              await marcarLeadSemWhatsapp({
+                leadTaskId: leadId,
+                idLeadGhl,
+                telefone: telefoneE164,
+                usuario: gate.usuario,
+              });
+              return c.json({ status: 'sem_whatsapp' });
+            }
+          } catch (e) {
+            // LGPD: nunca logar telefone/CPF em claro — só a mensagem/classe.
+            console.error('[discador] falha no pré-check de WhatsApp:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'envio_falhou', desconectado: true }, 502);
           }
           try {
             // enviarAudio já passa pelo rate limiter interno (D-06) e LANÇA em

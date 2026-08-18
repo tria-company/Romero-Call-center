@@ -1226,6 +1226,69 @@ export async function registrarEnvioAudio(args: {
 }
 
 /**
+ * Marca um lead como "sem WhatsApp" após o pré-check (evolution.ts,
+ * `numeroExisteNoWhatsapp`) AFIRMAR `exists === false` (quick 260818-mv2).
+ * Best-effort (WR-03, mesmo molde de `registrarEnvioAudio`) — NUNCA lança: o
+ * handler já se comprometeu com a resposta `sem_whatsapp`, uma falha aqui só
+ * faz o lead reaparecer no próximo lote (degradação aceitável). Duas
+ * escritas independentes, cada uma no seu try/catch:
+ * (a) comenta na task do LEAD;
+ * (b) cria uma Ligação (Lista 02) "Sem WhatsApp" FECHADA vinculada ao lead —
+ *     o MESMO mecanismo que `buscarLeadsNuncaLigados` usa pra excluir um lead
+ *     do lote (ÚNICA fonte-de-verdade, não reimplementado aqui). Reusa a
+ *     string literal EXATA `'Sem WhatsApp'` (já é categoria de MOTIVO_FALHA).
+ * LGPD: telefone SEMPRE mascarado via `mascararTelefone` nos warns — nunca em
+ * claro; nenhum CPF/áudio/apikey nesta função.
+ */
+export async function marcarLeadSemWhatsapp(args: {
+  leadTaskId: string;
+  idLeadGhl: string;
+  telefone: string;
+  usuario: string;
+}): Promise<void> {
+  try {
+    const linhas = [`📵 Sem WhatsApp — número não encontrado no envio de áudio`, `👤 ${args.usuario}`];
+    await comentarTask(args.leadTaskId, linhas.join('\n'));
+  } catch (e) {
+    const mascarado = mascararTelefone(args.telefone);
+    console.warn(
+      `[clickup] marcarLeadSemWhatsapp: comentário na task do lead falhou (tel ${mascarado}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  try {
+    const e164 = normalizarTelefoneE164(args.telefone);
+    const idLead = args.idLeadGhl || args.leadTaskId;
+    const novaTask = await criarTask(CLICKUP_LIST_LIGACOES, {
+      name: 'Sem WhatsApp — pulado',
+      custom_fields: [
+        { id: CAMPOS_LIGACOES.ID_LEAD, value: idLead },
+        { id: CAMPOS_LIGACOES.MOTIVO_FALHA, value: 'Sem WhatsApp' },
+        { id: CAMPOS_LIGACOES.ATENDEU, value: false },
+        ...(e164 ? [{ id: CAMPOS_LIGACOES.TELEFONE, value: e164 }] : []),
+      ],
+    });
+    if (!novaTask?.id) {
+      console.warn('[clickup] marcarLeadSemWhatsapp: criarTask retornou sem id — lead pode reaparecer no lote');
+      return;
+    }
+    try {
+      await setCustomField(novaTask.id, CAMPOS_LIGACOES.LEAD_REL, { add: [args.leadTaskId] });
+    } catch (e) {
+      console.warn(
+        `[clickup] marcarLeadSemWhatsapp (${novaTask.id}): LEAD_REL não foi setado (ID_LEAD já garante a exclusão): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    await fecharLigacao(novaTask.id);
+  } catch (e) {
+    const mascarado = mascararTelefone(args.telefone);
+    console.warn(
+      `[clickup] marcarLeadSemWhatsapp: criação da Ligação "Sem WhatsApp" falhou (tel ${mascarado}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
  * Resolve o `taskId` do lead (Lista 01 LEADS) a partir de uma task de
  * Ligação (Lista 02) — OPER-05, Claude's Discretion (03-CONTEXT.md): tenta
  * primeiro `CAMPOS_LIGACOES.LEAD_REL` (relationship nativo, valor = array de

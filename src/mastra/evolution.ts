@@ -265,3 +265,41 @@ export async function statusInstancia(): Promise<StatusInstanciaEvolution> {
   const state = j.instance?.state ?? '';
   return { conectado: state === 'open' };
 }
+
+// ===== Pré-check de número no WhatsApp (quick 260818-mv2) =====
+
+/**
+ * Pré-checa se `telefoneE164` existe no WhatsApp via a instância dedicada,
+ * ANTES de gastar o throttle de `enviarAudio` num número que nunca vai
+ * receber. Passa pelo choke-point `fetchEvolution` (mesmo rate limiter/apikey
+ * de enviarAudio/statusInstancia). SEMÂNTICA CRÍTICA: só retorna `false`
+ * quando a Evolution AFIRMA `exists === false` para o número; qualquer outra
+ * coisa (array vazio, entrada ausente, `exists` undefined, shape inesperado)
+ * retorna `true` — nunca marcar um lead como "sem WhatsApp" por resposta
+ * ambígua. LANÇA `Error` com prefixo `[evolution]` em falha de rede OU HTTP
+ * não-2xx (D-08) — o caller trata isso como o mesmo caso de "desconectado",
+ * NUNCA como "sem WhatsApp". LGPD: nunca loga telefone/apikey/jid — só
+ * status/classe do erro.
+ */
+export async function numeroExisteNoWhatsapp(telefoneE164: string): Promise<boolean> {
+  if (!EVOLUTION_INSTANCE) {
+    throw new Error('[evolution] EVOLUTION_INSTANCE ausente — sem instância dedicada configurada');
+  }
+  let res: Response;
+  try {
+    res = await fetchEvolution(`/chat/whatsappNumbers/${EVOLUTION_INSTANCE}`, {
+      method: 'POST',
+      body: JSON.stringify({ numbers: [telefoneE164] }),
+    });
+  } catch (e) {
+    throw new Error(`[evolution] falha de rede ao checar número no WhatsApp: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[evolution] pré-check de WhatsApp falhou (${res.status})`);
+  }
+  const j = (await res.json().catch(() => [])) as Array<{ exists?: boolean; jid?: string; number?: string }>;
+  if (!Array.isArray(j) || j.length === 0) return true;
+  const entrada = j.find((x) => x.number === telefoneE164) ?? j[0];
+  if (entrada?.exists === false) return false;
+  return true;
+}
