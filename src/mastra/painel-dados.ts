@@ -135,10 +135,23 @@ export async function contarCadastrosBanco(): Promise<number | null> {
 
 // ===== 2. Votos — do CLICKUP ao vivo, não do espelho congelado =====
 
+/** Distribuição da pergunta de voto de UM candidato. `base` = quem de fato respondeu. */
+export interface IntencaoCandidato {
+  rotulo: string;
+  sim: number;
+  nao: number;
+  naoDeclarou: number;
+  /** sim + nao + naoDeclarou. NÃO é a base inteira — ver nota em `contarVotosClickUp`. */
+  base: number;
+}
+
 export interface VotosAoVivo {
   romero: number;
   andressa: number;
   apoiadores: number;
+  intencao: IntencaoCandidato[];
+  /** Apoiadores distintos por cidade. Quem não tem cidade entra como "sem cidade". */
+  votosPorCidade: { rotulo: string; n: number }[];
   /** true = algum contador bateu no teto de páginas; o número é um piso, não o total. */
   parcial: boolean;
 }
@@ -152,26 +165,37 @@ export interface VotosAoVivo {
  * limita o custo (o retorno marca `parcial` quando o teto é atingido, para a UI poder
  * rotular "1.200+" em vez de mentir um total exato).
  *
- * Devolve os IDs, não só a contagem: `apoiadores` precisa da UNIÃO dos dois conjuntos
- * (quem confirmou nos dois candidatos é UMA pessoa). Sem os ids sobrava estimar, e
- * qualquer estimativa aqui erra — soma conta duas vezes, máximo subestima.
+ * Devolve id E CIDADE de cada task, não só a contagem. O id é necessário porque
+ * `apoiadores` é a UNIÃO dos dois conjuntos (quem confirma nos dois candidatos é UMA
+ * pessoa, e somar contaria duas vezes). A cidade sai de graça: a resposta do ClickUp já
+ * traz a task inteira, com todos os custom fields — descartá-la era jogar fora dado já
+ * pago para depois precisar dele.
  */
-async function contarPorCustomField(fieldId: string, valor: string): Promise<{ ids: string[]; parcial: boolean }> {
+async function contarPorCustomField(
+  fieldId: string,
+  valor: string,
+): Promise<{ tasks: { id: string; cidade: string }[]; parcial: boolean }> {
   if (!CLICKUP_API_TOKEN) throw new Error('[painel] CLICKUP_API_TOKEN ausente — nao da para contar votos');
   const filtro = encodeURIComponent(JSON.stringify([{ field_id: fieldId, operator: '=', value: valor }]));
   let page = 0;
-  const ids: string[] = [];
+  const tasks: { id: string; cidade: string }[] = [];
   let ultima = false;
   while (!ultima && page < PAINEL_MAX_PAGINAS) {
     const url = `${CLICKUP_BASE_URL}/list/${CLICKUP_LIST_LEADS}/task?page=${page}&include_closed=true&custom_fields=${filtro}`;
     const res = await fetchTimeout(url, { headers: { Authorization: CLICKUP_API_TOKEN } });
     if (!res.ok) throw new Error(`[painel] HTTP ${res.status} ao contar custom field na Lista 01`);
     const data = await res.json();
-    for (const t of data?.tasks || []) if (t?.id) ids.push(String(t.id));
+    for (const t of data?.tasks || []) {
+      if (!t?.id) continue;
+      const cidade = String(
+        (t.custom_fields || []).find((c: { id?: string }) => c?.id === CAMPOS_LEADS.CIDADE)?.value ?? '',
+      ).trim();
+      tasks.push({ id: String(t.id), cidade });
+    }
     ultima = Boolean(data?.last_page);
     page += 1;
   }
-  return { ids, parcial: !ultima };
+  return { tasks, parcial: !ultima };
 }
 
 /**
@@ -187,16 +211,64 @@ async function contarPorCustomField(fieldId: string, valor: string): Promise<{ i
 export async function contarVotosClickUp(): Promise<VotosAoVivo> {
   const idR = CAMPOS_LEADS.CONFIRMOU_VOTO_ROMERO;
   const idA = CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA;
-  const [r, a] = await Promise.all([
+
+  // 6 consultas (3 opções × 2 candidatos) em PARALELO. Sequencial seriam ~12s de cache
+  // frio, porque cada filtro por custom field custa ~2s; em paralelo fica no tempo da
+  // mais lenta. O `nao`/`naoDeclarou` não é enfeite: sem eles não há denominador, e uma
+  // barra de intenção sem base é só um número solto.
+  const [rSim, rNao, rNd, aSim, aNao, aNd] = await Promise.all([
     contarPorCustomField(idR, OPCOES_LEADS[idR].sim),
+    contarPorCustomField(idR, OPCOES_LEADS[idR].nao),
+    contarPorCustomField(idR, OPCOES_LEADS[idR].naoDeclarou),
     contarPorCustomField(idA, OPCOES_LEADS[idA].sim),
+    contarPorCustomField(idA, OPCOES_LEADS[idA].nao),
+    contarPorCustomField(idA, OPCOES_LEADS[idA].naoDeclarou),
   ]);
-  const uniao = new Set<string>([...r.ids, ...a.ids]);
+
+  // Apoiadores = UNIÃO dos dois conjuntos de "sim": quem confirma nos dois é uma pessoa.
+  const uniao = new Map<string, string>(); // taskId -> cidade
+  for (const t of [...rSim.tasks, ...aSim.tasks]) if (!uniao.has(t.id)) uniao.set(t.id, t.cidade);
+
+  // Cidade do APOIADOR distinto, não do voto — senão quem confirma nos dois candidatos
+  // conta duas vezes na mesma cidade. Sem cidade vira rótulo próprio: o total do gráfico
+  // continua batendo com o número de apoiadores, em vez de encolher em silêncio.
+  const porCidade = new Map<string, number>();
+  for (const cidade of uniao.values()) {
+    const k = cidade || 'sem cidade';
+    porCidade.set(k, (porCidade.get(k) ?? 0) + 1);
+  }
+  const votosPorCidade = [...porCidade.entries()]
+    .map(([rotulo, n]) => ({ rotulo, n }))
+    .sort((a, b) => b.n - a.n);
+
+  // `base` é quem RESPONDEU a pergunta, não a base de cadastros. Uma taxa de intenção
+  // sobre 224 mil cadastros seria sempre 0% — mediria cobertura da pesquisa, não
+  // intenção. O rótulo do card já mostra "base N", então a amostra fica visível na tela
+  // e ninguém lê "100%" sem ver que o N é pequeno.
+  const intencao: IntencaoCandidato[] = [
+    {
+      rotulo: 'Romero',
+      sim: rSim.tasks.length,
+      nao: rNao.tasks.length,
+      naoDeclarou: rNd.tasks.length,
+      base: rSim.tasks.length + rNao.tasks.length + rNd.tasks.length,
+    },
+    {
+      rotulo: 'Andreza',
+      sim: aSim.tasks.length,
+      nao: aNao.tasks.length,
+      naoDeclarou: aNd.tasks.length,
+      base: aSim.tasks.length + aNao.tasks.length + aNd.tasks.length,
+    },
+  ];
+
   return {
-    romero: r.ids.length,
-    andressa: a.ids.length,
+    romero: rSim.tasks.length,
+    andressa: aSim.tasks.length,
     apoiadores: uniao.size,
-    parcial: r.parcial || a.parcial,
+    intencao,
+    votosPorCidade,
+    parcial: [rSim, rNao, rNd, aSim, aNao, aNd].some((x) => x.parcial),
   };
 }
 
