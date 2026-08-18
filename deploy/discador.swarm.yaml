@@ -20,6 +20,15 @@ services:
       ## ☎️ Wavoip — token do device pro SDK do navegador (WebRTC)
       - WAVOIP_DEVICE_TOKEN=${WAVOIP_DEVICE_TOKEN}
 
+      ## 📲 Evolution API — canal dedicado de envio de áudio no WhatsApp (Fase 12)
+      ## Valores REAIS no ~/discador.yaml da VPS (nunca no repo). Referência:
+      ## EVOLUTION_API_URL ex.: https://apievo.gst.dev.br/ ; EVOLUTION_INSTANCE
+      ## ex.: romero-call-center ; EVOLUTION_API_KEY é SECRET (apikey da Evolution).
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE}
+      - EVOLUTION_MAX_POR_MINUTO=${EVOLUTION_MAX_POR_MINUTO}
+
       ## 🔐 Login do discador (closers)
       ## DISCADOR_USERS: "user:sha256hex,..."  |  DISCADOR_SESSION_SECRET: segredo HMAC
       - DISCADOR_USERS=${DISCADOR_USERS}
