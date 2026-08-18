@@ -30,6 +30,24 @@ import {
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 
+// ===== Erro tipado de throttle (IN-03) =====
+
+/**
+ * Erro tipado lançado por `adquirirTokenEvolution()` quando o cap de envio
+ * SEGURA (bounded-wait esgotado ou falha do backend do limiter). IN-03: o
+ * caller (`classificarFalhaEnvioAudio` em index.ts) classifica pelo TIPO
+ * (`instanceof EvolutionThrottleError`) em vez de casar a substring `throttle`
+ * na mensagem — o texto humano-legível pode mudar sem quebrar a classificação
+ * de três vias. A marca `code` dá um discriminador estável e serializável.
+ */
+export class EvolutionThrottleError extends Error {
+  readonly code = 'evolution_throttle' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'EvolutionThrottleError';
+  }
+}
+
 // ===== Rate limiter EMBUTIDO (D-06) — mesma casca de rate-limiter-clickup.ts =====
 
 const MODO: 'redis' | 'memoria' = REDIS_URL ? 'redis' : 'memoria';
@@ -155,7 +173,7 @@ export async function adquirirTokenEvolution(): Promise<void> {
     try {
       tentativa = MODO === 'redis' ? await tentarTokenRedis() : tentarTokenMem();
     } catch (e) {
-      throw new Error(
+      throw new EvolutionThrottleError(
         `[evolution] throttle: falha ao adquirir token (${e instanceof Error ? e.message : String(e)}) — cap segura, envio abortado`,
       );
     }
@@ -163,7 +181,7 @@ export async function adquirirTokenEvolution(): Promise<void> {
 
     const decorrido = Date.now() - inicio;
     if (decorrido >= RL_EVOLUTION_WAIT_MAX_MS) {
-      throw new Error('[evolution] throttle: teto de espera atingido — cap segura (sem fail-open), envio abortado');
+      throw new EvolutionThrottleError('[evolution] throttle: teto de espera atingido — cap segura (sem fail-open), envio abortado');
     }
     const restante = RL_EVOLUTION_WAIT_MAX_MS - decorrido;
     const delay = Math.max(1, Math.min(tentativa.esperaMs, PASSO_ESPERA_MS, restante));
@@ -240,6 +258,9 @@ export async function enviarAudio(telefoneE164: string, audioBase64: string, mim
       }),
     });
   } catch (e) {
+    // IN-03: preserva o tipo do throttle pra classificação no caller — não
+    // re-embrulha em "falha de rede" (que apagaria o instanceof).
+    if (e instanceof EvolutionThrottleError) throw e;
     throw new Error(`[evolution] falha de rede ao enviar áudio: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!res.ok) {
@@ -307,6 +328,9 @@ export async function numeroExisteNoWhatsapp(telefoneE164: string): Promise<bool
       body: JSON.stringify({ numbers: [telefoneE164] }),
     });
   } catch (e) {
+    // IN-03: preserva o tipo do throttle pra classificação no caller — não
+    // re-embrulha em "falha de rede" (que apagaria o instanceof).
+    if (e instanceof EvolutionThrottleError) throw e;
     throw new Error(`[evolution] falha de rede ao checar número no WhatsApp: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!res.ok) {

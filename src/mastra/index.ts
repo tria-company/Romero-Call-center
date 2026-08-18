@@ -88,7 +88,7 @@ import {
 // Client Evolution API (Fase 12 Plano 01, D-06/D-08): choke-point único de
 // envio/status — enviarAudio LANÇA em falha (nunca 200 silencioso).
 // numeroExisteNoWhatsapp (quick 260818-mv2): pré-check ANTES de enviarAudio.
-import { enviarAudio, statusInstancia, numeroExisteNoWhatsapp } from './evolution.ts';
+import { enviarAudio, statusInstancia, numeroExisteNoWhatsapp, EvolutionThrottleError } from './evolution.ts';
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
 // remove a task recem-iniciada do cache POR OPERADOR (D-04) — iniciarLigacao
@@ -198,8 +198,13 @@ import {
  * na dúvida (probe também falha) NUNCA afirma "desconectado" — mas também
  * nunca reporta sucesso; sempre um não-2xx.
  */
-async function classificarFalhaEnvioAudio(msg: string): Promise<{ erro: string; desconectado?: true }> {
-  if (msg.includes('throttle')) return { erro: 'throttle' };
+async function classificarFalhaEnvioAudio(e: unknown): Promise<{ erro: string; desconectado?: true }> {
+  // IN-03: classifica o throttle pelo TIPO do erro (marca estável vinda do
+  // evolution.ts), não pela substring da mensagem. Mantém o casamento por texto
+  // só como fallback defensivo — se o throttle chegar re-embrulhado por algum
+  // caminho, ainda cai no ramo neutro correto (retry), nunca em "desconectado".
+  const msg = e instanceof Error ? e.message : String(e);
+  if (e instanceof EvolutionThrottleError || msg.includes('throttle')) return { erro: 'throttle' };
   try {
     const { conectado } = await statusInstancia();
     if (!conectado) return { erro: 'envio_falhou', desconectado: true };
@@ -1197,7 +1202,7 @@ export const mastra = new Mastra({
             console.error('[discador] falha no pré-check de WhatsApp:', msg);
             // WR-01: mesma classificação do envio — throttle/transiente NÃO é
             // sessão fora; só afirma `desconectado` com status REAL confirmando.
-            return c.json(await classificarFalhaEnvioAudio(msg), 502);
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
           try {
             // enviarAudio já passa pelo rate limiter interno (D-06) e LANÇA em
@@ -1212,7 +1217,7 @@ export const mastra = new Mastra({
             // `desconectado` — throttle (D-06 segurando) e transientes viram erro
             // neutro (retry); só afirma `desconectado` com status REAL confirmando
             // sessão fora, pra não instruir "reconecte o WhatsApp" à toa.
-            return c.json(await classificarFalhaEnvioAudio(msg), 502);
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
           // Registro best-effort na Lista Audios (WR-03) — o envio (efeito
           // primário) já aconteceu; uma falha aqui nunca desfaz/mascara o envio.
