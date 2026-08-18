@@ -341,9 +341,24 @@ export interface TelefonistaCampanha {
   ligh: number;   // ligações por hora
 }
 
+export interface MotivoNaoContato {
+  rotulo: string;
+  n: number;
+  /** % sobre as ligações que TÊM motivo — não sobre o total (ver nota em `agruparMotivos`). */
+  pctTotal: number;
+}
+
 export interface ResumoCampanha {
   serie: DiaCampanha[];
   telefonistas: TelefonistaCampanha[];
+  motivosNaoContato: MotivoNaoContato[];
+  /**
+   * Falhas do NOSSO lado, separadas dos motivos do eleitor. "Transcrição não obtida" é
+   * ligação que FOI atendida e que só não conseguimos transcrever — deixá-la no gráfico
+   * contaria um problema nosso como recusa de quem atendeu. Fica exposto aqui para o
+   * número não sumir sem registro.
+   */
+  falhasTecnicas: { rotulo: string; n: number }[];
   totalLigacoes: number;
   totalContatos: number;
   /** Sem desfecho gravado: o denominador honesto da taxa depende disto. */
@@ -378,6 +393,106 @@ export function duracaoEmSegundos(valor: unknown): number | null {
   const seg = Number(m[2] || 0);
   const total = min * 60 + seg;
   return total > 0 ? total : null;
+}
+
+/**
+ * Motivos que descrevem uma FALHA NOSSA, não uma reação do eleitor. Medido em 18/08: das
+ * 42 ligações com motivo, 4 eram "Transcrição não obtida após 3 tentativas" — a chamada
+ * foi atendida e a transcrição é que falhou. Contá-la como motivo de não-contato inverte
+ * a leitura do gráfico.
+ */
+const PADROES_FALHA_TECNICA = [/transcri/i];
+
+/**
+ * Sinônimos do campo MOTIVO, que é TEXTO LIVRE. Normalizar caixa e acento NÃO resolve: os
+ * valores reais divergem na PALAVRA, não na grafia — "Não atende" (32) e "não atendida"
+ * (4) viram "nao atende" e "nao atendida", que continuam sendo strings diferentes. Só um
+ * mapa explícito junta.
+ *
+ * É decisão de produto, não regra técnica: cada linha afirma "estes dois textos são o
+ * mesmo motivo". Mantido aqui, curto e visível, para ser revisado quando a operação
+ * inventar uma redação nova — e não escondido numa heurística de similaridade, que
+ * juntaria motivos distintos sem ninguém perceber.
+ *
+ * Chave: forma normalizada. Valor: rótulo canônico exibido no gráfico.
+ */
+const SINONIMOS_MOTIVO: Record<string, string> = {
+  'nao atende': 'Não atende',
+  'nao atendida': 'Não atende',
+  'nao atendeu': 'Não atende',
+  'recusada': 'Recusada pelo lead',
+  'recusada pelo lead': 'Recusada pelo lead',
+  'recusou': 'Recusada pelo lead',
+  'ocupado': 'Ocupado',
+  'chamou e caiu': 'Chamou e caiu',
+};
+
+/** Chave de agrupamento: sem acento, minúscula, espaços colapsados. */
+function chaveMotivo(bruto: string): string {
+  return bruto
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // faixa de diacriticos combinantes
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Agrupa os motivos por forma canônica. O campo é TEXTO livre e a mesma coisa aparece
+ * escrita de dois jeitos — medido em 18/08: "Não atende" (25) e "não atendida" (3) são o
+ * mesmo motivo, assim como "Recusada pelo lead" (5) e "recusada" (2). Sem agrupar, o
+ * gráfico desenha a mesma barra duas vezes e nenhuma das duas tem o número certo.
+ *
+ * O rótulo vem de SINONIMOS_MOTIVO quando o texto é conhecido; quando não é, exibe a
+ * grafia mais frequente do próprio grupo — motivo novo aparece no gráfico com o texto que
+ * a operação escreveu, em vez de ser engolido por um "outros".
+ *
+ * `pctTotal` é sobre as ligações COM motivo, não sobre todas. Motivo só existe quando há
+ * desfecho, e 105 das 167 não têm — usar o total faria toda barra parecer minúscula por
+ * causa do que não foi registrado, e não do que aconteceu.
+ */
+export function agruparMotivos(
+  brutos: string[],
+): { motivos: MotivoNaoContato[]; tecnicas: { rotulo: string; n: number }[] } {
+  const grupos = new Map<string, Map<string, number>>();
+  const tecnicasMap = new Map<string, number>();
+
+  for (const bruto of brutos) {
+    const txt = String(bruto ?? '').trim();
+    if (!txt) continue;
+    if (PADROES_FALHA_TECNICA.some((re) => re.test(txt))) {
+      tecnicasMap.set(txt, (tecnicasMap.get(txt) ?? 0) + 1);
+      continue;
+    }
+    const norm = chaveMotivo(txt);
+    // O sinônimo decide o grupo E o rótulo. Texto desconhecido vira grupo próprio com a
+    // grafia original — motivo novo APARECE no gráfico em vez de sumir num "outros".
+    const canonico = SINONIMOS_MOTIVO[norm];
+    const k = canonico ? chaveMotivo(canonico) : norm;
+    const variantes = grupos.get(k) ?? new Map<string, number>();
+    const rotulo = canonico ?? txt;
+    variantes.set(rotulo, (variantes.get(rotulo) ?? 0) + 1);
+    grupos.set(k, variantes);
+  }
+
+  const total = [...grupos.values()].reduce(
+    (soma, variantes) => soma + [...variantes.values()].reduce((a, b) => a + b, 0),
+    0,
+  );
+
+  const motivos = [...grupos.values()]
+    .map((variantes) => {
+      const n = [...variantes.values()].reduce((a, b) => a + b, 0);
+      const rotulo = [...variantes.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      return { rotulo, n, pctTotal: total ? Math.round((n / total) * 100) : 0 };
+    })
+    .sort((a, b) => b.n - a.n);
+
+  const tecnicas = [...tecnicasMap.entries()]
+    .map(([rotulo, n]) => ({ rotulo, n }))
+    .sort((a, b) => b.n - a.n);
+
+  return { motivos, tecnicas };
 }
 
 /**
@@ -489,6 +604,11 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     })
     .sort((x, y) => y.lig - x.lig);
 
+  // --- motivos de nao-contato ---
+  const { motivos, tecnicas } = agruparMotivos(
+    todas.map((t) => String(valorCampo(t, CAMPOS_LIGACOES.MOTIVO_FALHA) ?? '')),
+  );
+
   const segs = todas
     .map((t) => duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO)))
     .filter((n): n is number => n !== null)
@@ -497,6 +617,8 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
   return {
     serie,
     telefonistas,
+    motivosNaoContato: motivos,
+    falhasTecnicas: tecnicas,
     totalLigacoes: todas.length,
     totalContatos: todas.filter(contato).length,
     semDesfecho: todas.filter((t) => !temDesfecho(t)).length,
