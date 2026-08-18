@@ -137,9 +137,19 @@ import {
   marcarEventoWebhook,
   listarLeadsEspelho,
   atualizarVotoEspelho,
-  contarVotosEspelho,
   type RecorteEspelho,
 } from './supabase';
+import {
+  cadastrosComCache,
+  votosComCache,
+  ligacoesComCache,
+  campanhaComCache,
+  CHAVE_CAMPANHA,
+  idadeCacheSegundos,
+  CHAVE_CADASTROS,
+  CHAVE_VOTOS,
+  CHAVE_LIGACOES,
+} from './painel-dados.ts';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
 // lida no request) mora na camada Redis-ou-memoria (estado-webhook.ts) —
 // alternavel por REDIS_URL sem reescrever o handler abaixo. Resolucao de
@@ -833,25 +843,94 @@ export const mastra = new Mastra({
         },
       },
       {
-        // Números do DASHBOARD do gestor (u10): cadastros na base (task_count do
-        // ClickUp, barato) + votos confirmados/apoiadores (contagem no espelho).
-        // `populado:false` = espelho ainda não backfillado -> a UI mostra "—".
+        // Central de Campanha — producao diaria, ranking de telefonistas e taxa de
+        // atendimento, agregados da Lista 02 LIGACOES (painel-dados.ts).
+        //
+        // A tela existia desde 15/08 mostrando "sem dados" por decisao: o commit 93c0a31
+        // trocou a leitura de um reais.json estatico por `const real = VAZIO`, com a nota
+        // "sem telemetria ao vivo". Esta rota e a telemetria que faltava.
+        //
+        // Gate de gestor (mesma visao das outras rotas do painel). Somente leitura.
+        path: '/api/discador/campanha',
+        method: 'GET',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
+          try {
+            const r = await campanhaComCache();
+            return c.json({ ...r, idadeS: idadeCacheSegundos(CHAVE_CAMPANHA) });
+          } catch (e) {
+            console.error('[painel] campanha indisponivel:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar os numeros da campanha' }, 502);
+          }
+        },
+      },
+      {
+        // Números do DASHBOARD do gestor — lidos AO VIVO da fonte correta (painel-dados.ts).
+        //
+        // Antes (diagnóstico de 18/08/2026) os três números vinham da fonte errada:
+        //   cadastros -> task_count da Lista 01 (100.007), ignorando as 224.542 pessoas
+        //                de users_romero; 124.535 pessoas nunca apareciam no painel.
+        //   votos     -> espelho `discador_leads_espelho`, um snapshot único de 17/08 15:30
+        //                (todas as linhas com o mesmo `atualizado_em`). Voto novo não aparecia.
+        //   ligações  -> NÃO EXISTIAM. Nenhuma rota do painel lia a Lista 02, embora ela
+        //                tivesse 167 ligações (145 em 24h, 62 atendidas, 25 analisadas).
+        //
+        // Agora: cadastros do Postgres, votos e ligações do ClickUp ao vivo. Cada bloco
+        // degrada sozinho (`Promise.allSettled`) — uma fonte fora do ar não derruba o
+        // painel inteiro, e a UI mostra "—" só no número afetado. Nada aqui escreve.
         path: '/api/discador/painel-numeros',
         method: 'GET',
         handler: async (c) => {
           const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
-          const [cadastros, votos] = await Promise.all([
-            contarLeadsDaLista().catch(() => null),
-            contarVotosEspelho().catch(() => ({ populado: false, romero: 0, andressa: 0, apoiadores: 0 })),
+
+          const [rCad, rVotos, rLig] = await Promise.allSettled([
+            cadastrosComCache(),
+            votosComCache(),
+            ligacoesComCache(),
           ]);
+          if (rCad.status === 'rejected') console.error('[painel] cadastros indisponivel:', rCad.reason instanceof Error ? rCad.reason.message : String(rCad.reason));
+          if (rVotos.status === 'rejected') console.error('[painel] votos indisponivel:', rVotos.reason instanceof Error ? rVotos.reason.message : String(rVotos.reason));
+          if (rLig.status === 'rejected') console.error('[painel] ligacoes indisponivel:', rLig.reason instanceof Error ? rLig.reason.message : String(rLig.reason));
+
+          const cadastros = rCad.status === 'fulfilled' ? rCad.value : null;
+          const votos = rVotos.status === 'fulfilled' ? rVotos.value : null;
+          const lig = rLig.status === 'fulfilled' ? rLig.value : null;
+
           return c.json({
+            // cadastros agora é a BASE (Postgres), não a Lista 01 do ClickUp
             cadastros,
-            votosPopulados: votos.populado,
-            votosRomero: votos.romero,
-            votosAndressa: votos.andressa,
-            apoiadores: votos.apoiadores,
+            cadastrosFonte: 'banco',
+            cadastrosIdadeS: idadeCacheSegundos(CHAVE_CADASTROS),
+
+            // `votosPopulados` mantido para compatibilidade com a UI atual: agora significa
+            // "consegui ler os votos do ClickUp", não "o espelho foi backfillado".
+            votosPopulados: votos !== null,
+            votosRomero: votos?.romero ?? 0,
+            votosAndressa: votos?.andressa ?? 0,
+            apoiadores: votos?.apoiadores ?? 0,
+            votosParcial: votos?.parcial ?? false,
+            votosIdadeS: idadeCacheSegundos(CHAVE_VOTOS),
+
+            // bloco novo — o registro das ligações que o painel nunca mostrou
+            ligacoes: lig
+              ? {
+                  total: lig.total,
+                  hoje: lig.hoje,
+                  atendidasHoje: lig.atendidasHoje,
+                  naoAtendidasHoje: lig.naoAtendidasHoje,
+                  atendidasTotal: lig.atendidasTotal,
+                  comGravacao: lig.comGravacao,
+                  comTranscricao: lig.comTranscricao,
+                  comAnaliseIa: lig.comAnaliseIa,
+                  ultimaEm: lig.ultimaEm,
+                  parcial: lig.parcial,
+                }
+              : null,
+            ligacoesIdadeS: idadeCacheSegundos(CHAVE_LIGACOES),
           });
         },
       },

@@ -1,5 +1,8 @@
+"use client";
+
 import type { ReactNode } from "react";
-import { CAMPANHA, type BarraCampanha, type IntencaoVoto } from "@/lib/campanha";
+import { type BarraCampanha, type IntencaoVoto } from "@/lib/campanha";
+import { useCampanhaReal } from "@/lib/campanha-real";
 import { fmtInt, fmtMinSeg } from "@/lib/format";
 import { COR, GraficoAcumulado, GraficoProducao, Tendencias } from "./CampanhaGraficos";
 import { Ranking } from "./RankingCampanha";
@@ -42,7 +45,8 @@ import { Ranking } from "./RankingCampanha";
    ══════════════════════════════════════════════════════════════════════════ */
 
 export function SecaoCampanha() {
-  const c = CAMPANHA;
+  const campanha = useCampanhaReal();
+  const c = campanha.dados;
   /* Sem série de votos datada, o gráfico de acumulado não tem o que plotar. */
   const temAcumulado = c.serie.some((d) => d.acumulado > 0);
 

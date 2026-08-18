@@ -3,11 +3,14 @@ import { exigirSessao } from "@/lib/autorizacao";
 import { chamarDiscador } from "@/lib/discador-servidor";
 
 /**
- * Rota-ponte: os números do dashboard do gestor (cadastros na base + votos
- * confirmados/apoiadores) do backend do discador, com o Bearer do PRÓPRIO usuário
- * (o backend gate por papel gestor). Sem token no navegador.
+ * Rota-ponte: os números do dashboard do gestor (cadastros na base, votos
+ * confirmados/apoiadores e o resumo das ligações) do backend do discador, com o
+ * Bearer do PRÓPRIO usuário (o backend gate por papel gestor). Sem token no navegador.
  *
- * Forma: `{ cadastros, votosPopulados, votosRomero, votosAndressa, apoiadores }`.
+ * Forma: `{ cadastros, cadastrosFonte, votosPopulados, votosRomero, votosAndressa,
+ * apoiadores, votosParcial, ligacoes, *IdadeS }` — `ligacoes` é o bloco novo (total,
+ * hoje, atendidasHoje, comAnaliseIa, ultimaEm...) e os `*IdadeS` dizem há quantos
+ * segundos cada número foi lido da fonte.
  * LGPD: só agregados, nada de PII.
  */
 
