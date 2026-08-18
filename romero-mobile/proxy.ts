@@ -33,6 +33,17 @@ export default async function proxy(req: NextRequest) {
       url.search = "";
       return NextResponse.redirect(url);
     }
+
+    // Rota só-romero: /audios (ENVIO-07). A barreira REAL é server-side (o
+    // backend do discador reaplica sessaoRomero — 12-03); este redirect + a
+    // ausência da aba na TabBar são defesa-em-profundidade.
+    const soRomero = pathname === "/audios" || pathname.startsWith("/audios/");
+    if (soRomero && sessao.usuario !== "romero") {
+      const url = req.nextUrl.clone();
+      url.pathname = "/fila";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
     return NextResponse.next();
   }
 

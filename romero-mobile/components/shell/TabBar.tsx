@@ -57,9 +57,9 @@ function useBarraRecolhida(ativo: boolean): boolean {
   return recolhida;
 }
 
-export function TabBar({ papel }: { papel: "gestor" | "atendente" }) {
+export function TabBar({ papel, usuario }: { papel: "gestor" | "atendente"; usuario?: string }) {
   const pathname = usePathname();
-  const destinos = destinosVisiveis(papel);
+  const destinos = destinosVisiveis(papel, usuario);
   // Sem selo de contagem na aba Fila: a única fonte ao vivo é o backend do
   // discador (useFilaReal), que não vale um fetch aqui no chrome. A contagem
   // aparece dentro da própria tela de Fila.
