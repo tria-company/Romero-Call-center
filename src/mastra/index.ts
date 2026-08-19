@@ -1382,6 +1382,12 @@ export const mastra = new Mastra({
                   hoje: lig.hoje,
                   atendidasHoje: lig.atendidasHoje,
                   naoAtendidasHoje: lig.naoAtendidasHoje,
+                  // Sem este campo o Início dividia as atendidas pelo TOTAL do dia, e a
+                  // Central pelas que TÊM desfecho — duas "taxas de atendimento" com o
+                  // mesmo nome e resultados a 23x de distância (medido em 19/08: 1% contra
+                  // 23%). Publicar o denominador honesto aqui é o que deixa as duas telas
+                  // fazerem a MESMA conta.
+                  semDesfechoHoje: lig.semDesfechoHoje,
                   atendidasTotal: lig.atendidasTotal,
                   comGravacao: lig.comGravacao,
                   comTranscricao: lig.comTranscricao,
