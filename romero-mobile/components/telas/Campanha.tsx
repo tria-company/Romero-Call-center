@@ -180,7 +180,11 @@ export function SecaoCampanha() {
       </div>
 
       {/* ── ranking (única parte interativa) ─────────────────────────────── */}
-      <Ranking telefonistas={c.telefonistas} equipeTotal={c.equipeTotal} />
+      <Ranking
+        telefonistas={c.telefonistas}
+        equipeTotal={c.equipeTotal}
+        semOperador={campanha.semOperador}
+      />
 
       {/* ── três recortes finais ─────────────────────────────────────────── */}
       <div className="card">
