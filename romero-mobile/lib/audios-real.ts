@@ -32,6 +32,10 @@ const INTERVALO_POLL_LISTA_MS = 30_000;
 /** Um lead da Lista 01 que nunca teve Ligação — espelha `LeadNuncaLigado` do backend (12-03/buscarLeadsNuncaLigados). */
 export type LeadAudioReal = {
   leadTaskId: string;
+  /** Task da LIGAÇÃO (Lista 02) quando a linha vem da fila do Romero (fonte
+   *  "fila", 2026-08-19) — o botão de ligar abre ESSA Ligação direto no
+   *  discador (auto=1), sem criar avulsa. Ausente na fonte nunca-ligados. */
+  ligacaoTaskId?: string;
   nome: string;
   telefone: string;
   /** `CAMPOS_LEADS.ORIGEM` cru (pode ser "") — alimenta os chips dinâmicos (ENVIO-04, D-04/D-05). */
@@ -39,7 +43,7 @@ export type LeadAudioReal = {
   /** Selo da conversa (Fase 13 fatia 2): pode ligar? Avaliado no backend
    *  (LLM com debounce de 60s por mensagem do lead; heurística de fallback).
    *  Ausente em backends antigos → a linha rende sem selo. */
-  conversa?: { status: "ligar" | "nao_ligar" | "sem_conversa"; motivo: string };
+  conversa?: { status: "ligar" | "nao_ligar" | "indefinido" | "aguardando" | "enviar_audio"; motivo: string };
   /** Última mensagem da conversa (2026-08-19): ordena a lista como WhatsApp
    *  (o backend já manda ordenado) e acende a bolinha quando `deNos` é false
    *  E `lida` é false (abrir a conversa marca como lida no banco). `preview`
@@ -52,6 +56,9 @@ export type EstadoAudiosReais = {
   origens: string[];
   carregando: boolean; // carga inicial da lista
   erro: boolean; // falhou ao carregar a lista (erro só no bloco da lista, item 6)
+  /** fonte "fila": o operador não tem mapeamento de assignee configurado —
+   *  distinto de fila vazia (mesma régua da fila clássica, WR-03). */
+  semMapeamento: boolean;
   recarregar: () => void;
   /**
    * Estado REAL da instância dedicada (D-08). Começa `false` (nunca finge
@@ -66,11 +73,17 @@ export type EstadoAudiosReais = {
  * Leads nunca-ligados + origens (ENVIO-03/04) e status de conexão da
  * instância dedicada (D-08, poll leve). Os dois ciclos são INDEPENDENTES.
  */
-export function useAudiosReais(): EstadoAudiosReais {
+export function useAudiosReais(
+  /** "fila" (default, 2026-08-19): a fila de Ligações do Romero É a lista —
+   *  cada task de Ligação criada pra ele vira linha com chat/áudio/ligação.
+   *  "nunca-ligados": o lote da campanha (fonte antiga, rota /audios). */
+  fonte: "fila" | "nunca-ligados" = "fila",
+): EstadoAudiosReais {
   const [leads, setLeads] = React.useState<LeadAudioReal[]>([]);
   const [origens, setOrigens] = React.useState<string[]>([]);
   const [carregando, setCarregando] = React.useState(true);
   const [erro, setErro] = React.useState(false);
+  const [semMapeamento, setSemMapeamento] = React.useState(false);
   const [conectado, setConectado] = React.useState(false);
 
   const geracaoRef = React.useRef(0);
@@ -86,7 +99,7 @@ export function useAudiosReais(): EstadoAudiosReais {
       setErro(false);
     }
     try {
-      const r = await fetch("/api/mobile/audios", { cache: "no-store" });
+      const r = await fetch(fonte === "fila" ? "/api/mobile/audios/fila" : "/api/mobile/audios", { cache: "no-store" });
       if (geracaoRef.current !== g) return;
       if (!r.ok) {
         if (!silencioso) {
@@ -99,10 +112,12 @@ export function useAudiosReais(): EstadoAudiosReais {
       const d = (await r.json().catch(() => null)) as {
         leads?: LeadAudioReal[];
         origens?: string[];
+        semMapeamento?: boolean;
       } | null;
       if (geracaoRef.current !== g) return;
       setLeads(d?.leads ?? []);
       setOrigens(d?.origens ?? []);
+      setSemMapeamento(d?.semMapeamento === true);
       setErro(false);
     } catch {
       if (geracaoRef.current === g && !silencioso) {
@@ -113,7 +128,7 @@ export function useAudiosReais(): EstadoAudiosReais {
     } finally {
       if (geracaoRef.current === g && !silencioso) setCarregando(false);
     }
-  }, []);
+  }, [fonte]);
 
   const consultarStatus = React.useCallback(async () => {
     try {
@@ -151,7 +166,7 @@ export function useAudiosReais(): EstadoAudiosReais {
     void carregarLista();
   }, [carregarLista]);
 
-  return { leads, origens, carregando, erro, recarregar, conectado };
+  return { leads, origens, carregando, erro, semMapeamento, recarregar, conectado };
 }
 
 /* ── Envio ───────────────────────────────────────────────────────────────── */
