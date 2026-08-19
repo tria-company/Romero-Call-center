@@ -21,6 +21,7 @@ export const COR: Record<TomCampanha, string> = {
   good: "var(--good)",
   warn: "var(--warn)",
   crit: "var(--crit)",
+  faint: "var(--faint)",
 };
 
 /* ── Votos acumulados vs meta · toda a campanha ────────────────────────── */

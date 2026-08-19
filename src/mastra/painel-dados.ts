@@ -407,7 +407,14 @@ export interface TelefonistaCampanha {
   lig: number;
   cont: number;
   conv: number;   // % de conversão = contatos / ligações
-  ader: number;   // aderência ao script (0 quando não avaliada)
+  /** Aderência ao script em PERCENTUAL (0–100), convertida da nota 0–10 do Agente de
+   *  Análise. Vale 0 tanto para "avaliada com nota 0" quanto para "nunca avaliada" —
+   *  quem separa os dois casos é `aderAmostra`, e a tela precisa olhar os dois. */
+  ader: number;
+  /** Quantas ligações do operador têm nota de aderência. 0 = nunca avaliada: a tela mostra
+   *  "—" em vez de 0%, senão quem nunca foi ouvido aparece como o pior da equipe. Medido
+   *  em 19/08: só 52 das 1.345 ligações tinham nota, e 15 dos 28 operadores tinham zero. */
+  aderAmostra: number;
   tsec: number;   // tempo médio em segundos
   votos: number;
   ligh: number;   // ligações por hora
@@ -587,6 +594,35 @@ function mediana(ordenados: number[]): number {
 }
 
 /**
+ * Teto da nota de aderência ao script. NÃO é escolha deste módulo: é o contrato do Agente
+ * de Análise, que pede à IA "um numero de 0 a 10" (analise.ts) e trava o resultado nessa
+ * faixa antes de gravar no ClickUp. O dossiê imprime a mesma nota como "N/10".
+ */
+const NOTA_ADERENCIA_MAX = 10;
+
+/**
+ * Média das notas de aderência convertida em PERCENTUAL.
+ *
+ * O painel sempre desenhou este número com um `%` colado e o comparou contra 80/70 (verde/
+ * âmbar/vermelho) — mas o que chegava aqui era a nota 0–10 crua. O efeito, medido em
+ * 19/08 sobre as 52 notas existentes (min 0, max 8): uma ligação avaliada com 8 de 10
+ * aparecia como "8%" e levava a bolinha VERMELHA de "treino", e o limiar de 80% era
+ * inalcançável por construção — o teto da escala é 10.
+ *
+ * A conversão é feita aqui, e não na tela, porque `ader` é publicado como percentual no
+ * contrato da rota: quem consumir a API recebe a mesma unidade que o painel desenha.
+ *
+ * O `clamp` protege contra nota digitada à mão no ClickUp fora da escala do agente (um
+ * "85" viraria 850%). Sem amostra devolve 0, e `aderAmostra` é quem diz à tela que isso é
+ * ausência de avaliação, não desempenho ruim.
+ */
+function aderenciaEmPct(notas: number[]): number {
+  if (notas.length === 0) return 0;
+  const media = notas.reduce((s, n) => s + n, 0) / notas.length;
+  return Math.max(0, Math.min(100, Math.round((media / NOTA_ADERENCIA_MAX) * 100)));
+}
+
+/**
  * Agrega a Lista 02 por DIA e por OPERADOR. Uma varredura só alimenta os três cards —
  * produção diária, ranking de telefonistas e taxa de atendimento — e o cache absorve o
  * custo (~3,8s hoje, 167 ligações em 2 páginas).
@@ -647,8 +683,15 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     if (contato(t)) a.cont += 1;
     const seg = duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO));
     if (seg) a.segs.push(seg);
-    const ader = Number(valorCampo(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT));
-    if (Number.isFinite(ader) && ader > 0) a.aders.push(ader);
+    // `preenchido` antes de `Number`: o campo AUSENTE vira NaN (filtrado pelo isFinite),
+    // mas o campo VAZIO ('') vira 0 — e um 0 falso baixaria a média de quem nunca foi
+    // avaliado. A nota 0 REAL entra: ela é a pior avaliação possível, não a ausência de
+    // avaliação, e o `> 0` de antes a descartava — medido em 19/08, 19 das 52 notas eram
+    // 0, todas jogadas fora, e a média saía só dos sobreviventes.
+    if (preenchido(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT)) {
+      const nota = Number(valorCampo(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT));
+      if (Number.isFinite(nota)) a.aders.push(nota);
+    }
     const ts = Number(t.date_created);
     if (ts) { a.ini = Math.min(a.ini, ts); a.fim = Math.max(a.fim, ts); }
     porOp.set(nome, a);
@@ -668,7 +711,8 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
         lig: a.lig,
         cont: a.cont,
         conv: a.lig ? Math.round((a.cont / a.lig) * 100) : 0,
-        ader: media(a.aders),
+        ader: aderenciaEmPct(a.aders),
+        aderAmostra: a.aders.length,
         tsec: media(a.segs),
         votos: 0, // voto não é atribuível ao operador: o ClickUp não guarda quem o registrou
         ligh: Math.round((a.lig / horas) * 10) / 10,

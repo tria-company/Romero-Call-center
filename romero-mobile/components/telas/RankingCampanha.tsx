@@ -33,7 +33,9 @@ function valorMetrica(o: Telefonista, k: MetricaRanking): string {
     case "lig":
       return fmtInt(o.lig);
     case "ader":
-      return `${o.ader}%`;
+      // "—" e não "0%": sem ligação analisada não há aderência a mostrar, e o zero era
+      // lido como desempenho péssimo por quem olha a tela.
+      return o.aderAmostra > 0 ? `${o.ader}%` : "—";
     case "tsec":
       return fmtMinSeg(o.tsec);
     case "ligh":
@@ -92,7 +94,8 @@ export function Ranking({
       </div>
 
       <div className="rk-sub legenda">
-        ● verde aderência ≥80% · ● âmbar 70–79% · ● vermelho &lt;70% (treino)
+        ● verde aderência ≥80% · ● âmbar 70–79% · ● vermelho &lt;70% (treino) · ● cinza sem
+        ligação analisada
       </div>
     </div>
   );
@@ -123,7 +126,7 @@ function LinhaRanking({
       </div>
       <div className="rinfo">
         <div className="rn">
-          <span className="rstat" style={{ background: COR[tomAderencia(o.ader)] }} />
+          <span className="rstat" style={{ background: COR[tomAderencia(o.ader, o.aderAmostra)] }} />
           {o.nome}
         </div>
         <div className="rs">{o.turno || `${o.lig} lig. · ${o.cont} contatos`}</div>
