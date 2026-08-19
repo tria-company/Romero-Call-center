@@ -177,6 +177,15 @@ const ultimosEventosWebhook: unknown[] = [];
  *  no pior caso re-avisa uma queda antiga respeitando o cooldown). */
 let ultimoAlertaQuedaTs = 0;
 let quedaAlertada = false;
+/** Alerta de queda de device de ATENDENTE (Quick 260819-p1r): estado de
+ *  edge-trigger por-device (decidirAlertaQuedaDevice, alerta-queda-device.ts)
+ *  alimentado pelo branch DEVICE do webhook Wavoip. RESSALVA — mesma
+ *  limitação do estado anti-flap do chip acima: este Map vive em memória
+ *  POR-RÉPLICA/processo (perde no restart; em multi-réplica cada réplica tem
+ *  seu próprio estado e pode duplicar o alerta de uma mesma queda — o
+ *  cooldown limita a repetição, mas não elimina entre réplicas distintas).
+ *  Resolver de vez pediria estado compartilhado (Redis) — fica pra depois. */
+const estadoAlertaDevice = new Map<string, EstadoDeviceAlerta>();
 /** INBOUND → FILA (2026-08-19, pedido do gestor): "se uma pessoa mandar
  *  mensagem para o número, tem que aparecer na tela" — mensagem recebida sem
  *  Ligação ABERTA do Romero pra aquele telefone cria uma avulsa na hora
@@ -584,6 +593,14 @@ import {
   garantirInventarioWavoip,
   snapshotDevicesWavoip,
 } from './wavoip-api.ts';
+
+// Máscara de telefone (D-09/OBS-03, fonte única) — usada na mensagem de
+// alerta de queda de device do atendente (Quick 260819-p1r), nunca o número
+// em claro. decidirAlertaQuedaDevice/EstadoDeviceAlerta: função PURA de
+// edge-trigger (queda->grupo, alerta-queda-device.ts) reusada no branch
+// DEVICE do webhook Wavoip abaixo.
+import { mascararTelefone } from './mascarar.ts';
+import { decidirAlertaQuedaDevice, type EstadoDeviceAlerta } from './alerta-queda-device.ts';
 
 /**
  * WR-01: classifica uma falha de envio de áudio pro cliente SEM colapsar todo
@@ -2910,7 +2927,71 @@ export const mastra = new Mastra({
               }
             }
 
-            // DEVICE e outros eventos: nao aplicaveis.
+            // ---------------- DEVICE: alerta de queda do numero Wavoip de um ATENDENTE (Quick 260819-p1r) ----------------
+            // Best-effort (T-p1r-02): todo o branch em try/catch — evento
+            // DEVICE malformado NUNCA vira 500 nem derruba o recebimento de
+            // CALL/RECORD (que ja retornaram acima). Nao muda durabilidade
+            // nem o log geral de shape (ambos ja pulam DEVICE por design —
+            // heartbeat frequente).
+            if (evento === 'DEVICE') {
+              try {
+                // LOG DE SHAPE LGPD-SAFE (INCOGNITA #1): o shape real do
+                // payload DEVICE em producao ainda nao esta confirmado —
+                // loga SO as chaves presentes + o status, JAMAIS
+                // telefone/token/phone em claro (T-p1r-01).
+                console.log(`[wavoip] DEVICE shape keys=[${Object.keys(payload).join(',')}] status=${String(payload.status ?? '')}`);
+
+                // Extracao defensiva: nomes de campo do payload real do
+                // webhook DEVICE nao sao garantidos (ver nota no config no
+                // topo do arquivo) — tenta id/device_id/token, nessa ordem.
+                const deviceIdBruto = String(payload.id ?? payload.device_id ?? payload.token ?? '').trim();
+                const status = String(payload.status ?? '');
+                const conectado = status.toLowerCase() === 'open';
+
+                // Mapeamento pra deviceId conhecido (INCOGNITA #2): (a) casa
+                // com donosDevices()/snapshotDevicesWavoip(); (b) senao,
+                // payload.phone -> deviceIdPorNumero (reverso numero->device).
+                const donos = donosDevices();
+                const idsConhecidos = new Set<string>([
+                  ...Object.keys(donos),
+                  ...snapshotDevicesWavoip().map((dv) => dv.id),
+                ]);
+                let chaveConhecida: string | null = idsConhecidos.has(deviceIdBruto) ? deviceIdBruto : null;
+                if (!chaveConhecida && payload.phone) {
+                  chaveConhecida = deviceIdPorNumero(String(payload.phone).replace(/[^\d]/g, ''));
+                }
+
+                // GATE: sem identificador estavel (nem deviceId conhecido nem
+                // bruto), NAO processa — evita spam com evento nao-atribuivel
+                // (T-p1r-03). Segue pro return comum.
+                const chave = chaveConhecida || deviceIdBruto;
+                if (chave) {
+                  const prev = estadoAlertaDevice.get(chave);
+                  const d = decidirAlertaQuedaDevice(prev, conectado, Date.now(), ALERTA_QUEDA_COOLDOWN_MS);
+                  estadoAlertaDevice.set(chave, d.novoEstado);
+
+                  if (d.disparar) {
+                    const nome = chaveConhecida ? donos[chaveConhecida] : undefined;
+                    const rotulo = nome ? `atendente ${nome}` : 'atendente';
+                    // Numero SEMPRE mascarado (LGPD) — nunca em claro no log
+                    // nem na mensagem do grupo (T-p1r-01).
+                    const numeroBruto = snapshotDevicesWavoip().find((dv) => dv.id === chave)?.numero || String(payload.phone ?? '');
+                    const numeroMascarado = mascararTelefone(numeroBruto);
+                    if (d.tipo === 'queda') {
+                      void enviarAlertaGrupo(`🔴 Número do ${rotulo} caiu do WhatsApp (final ${numeroMascarado}). Reconectar.`);
+                    } else if (d.tipo === 'volta') {
+                      void enviarAlertaGrupo(`🟢 Número do ${rotulo} reconectou (final ${numeroMascarado}).`);
+                    }
+                  }
+                  return c.json({ status: 'device', alertado: d.disparar });
+                }
+              } catch (e) {
+                console.error('[wavoip] falha ao processar evento DEVICE (best-effort, ignorado):', e instanceof Error ? e.message : String(e));
+              }
+              return c.json({ status: 'ignorado', evento });
+            }
+
+            // outros eventos: nao aplicaveis.
             return c.json({ status: 'ignorado', evento });
           } catch (erro) {
             console.error('[wavoip] Erro no webhook:', erro);
