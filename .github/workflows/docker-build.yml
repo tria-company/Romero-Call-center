@@ -46,7 +46,12 @@ jobs:
             # o rollout falha e o Swarm reverte sozinho (D-03/T-09-03).
             rc=0
             if docker service ls --filter name=discador_discador --format '{{.Name}}' | grep -q discador_discador; then
-              docker service update --force --image discador-wavoip:latest discador_discador || rc=$?
+              # --env-add: entrega/atualiza envs novas SEM depender do yaml da VPS
+              # (o service update sozinho nao adiciona env). Fase 13: token do
+              # receptor do webhook da Evolution, vindo do secret do Actions.
+              docker service update --force --image discador-wavoip:latest \
+                --env-add "EVOLUTION_WEBHOOK_TOKEN=${{ secrets.EVOLUTION_WEBHOOK_TOKEN }}" \
+                discador_discador || rc=$?
             else
               docker stack deploy --resolve-image=never -c ~/discador.yaml discador || rc=$?
             fi

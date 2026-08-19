@@ -28,6 +28,11 @@ services:
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE}
       - EVOLUTION_MAX_POR_MINUTO=${EVOLUTION_MAX_POR_MINUTO}
+      ## Fase 13: token do RECEPTOR do webhook da Evolution (mensagens do lead).
+      ## Gere com `openssl rand -hex 24`; o MESMO valor vai na URL configurada na
+      ## instância Evolution (…/api/evolution/webhook?token=<valor>). Sem ele o
+      ## receptor fica desabilitado (403) e as respostas dos leads não entram.
+      - EVOLUTION_WEBHOOK_TOKEN=${EVOLUTION_WEBHOOK_TOKEN}
 
       ## 🔐 Login do discador (closers)
       ## DISCADOR_USERS: "user:sha256hex,..."  |  DISCADOR_SESSION_SECRET: segredo HMAC
