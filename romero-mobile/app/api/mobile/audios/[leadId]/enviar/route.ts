@@ -25,6 +25,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ leadId
   const r = await chamarDiscador(`/api/discador/audios/${encodeURIComponent(leadId)}/enviar`, gate.sessao.dToken, {
     method: "POST",
     body,
+    // 60s: checagem de WhatsApp + upload do áudio + throttle Evolution podem
+    // passar (bem) dos 8s default — abortar no meio deixava envio órfão.
+    timeoutMs: 60_000,
   });
 
   return NextResponse.json(r.dados ?? { erro: "Sem resposta." }, {

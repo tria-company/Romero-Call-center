@@ -36,6 +36,15 @@ export type LeadAudioReal = {
   telefone: string;
   /** `CAMPOS_LEADS.ORIGEM` cru (pode ser "") — alimenta os chips dinâmicos (ENVIO-04, D-04/D-05). */
   origem: string;
+  /** Selo da conversa (Fase 13 fatia 2): pode ligar? Avaliado no backend
+   *  (LLM com debounce de 60s por mensagem do lead; heurística de fallback).
+   *  Ausente em backends antigos → a linha rende sem selo. */
+  conversa?: { status: "ligar" | "nao_ligar" | "sem_conversa"; motivo: string };
+  /** Última mensagem da conversa (2026-08-19): ordena a lista como WhatsApp
+   *  (o backend já manda ordenado) e acende a bolinha quando `deNos` é false
+   *  E `lida` é false (abrir a conversa marca como lida no banco). `preview`
+   *  já vem limpo de rótulos. */
+  ultima?: { ts: number; deNos: boolean; tipo: string; preview: string; lida?: boolean } | null;
 };
 
 export type EstadoAudiosReais = {
@@ -194,5 +203,96 @@ export async function enviarAudioParaLead(
     return { tipo: "erro" };
   } catch {
     return { tipo: "erro" };
+  }
+}
+
+/**
+ * Envia uma mensagem de TEXTO pro lead (Fase 13 fatia 2 — chat de verdade).
+ * Mesmo contrato discriminado do envio de áudio.
+ */
+export async function enviarTextoParaLead(leadId: string, texto: string): Promise<ResultadoEnvioAudio> {
+  try {
+    const r = await fetch(`/api/mobile/audios/${encodeURIComponent(leadId)}/mensagem`, {
+      method: "POST",
+      headers: CABECALHO_JSON,
+      body: JSON.stringify({ texto }),
+    });
+    const d = (await r.json().catch(() => null)) as { status?: string; desconectado?: boolean } | null;
+    if (d?.status === "sem_whatsapp") return { tipo: "sem_whatsapp" };
+    if (r.ok) return { tipo: "sucesso" };
+    if (d?.desconectado === true) return { tipo: "desconectado" };
+    return { tipo: "erro" };
+  } catch {
+    return { tipo: "erro" };
+  }
+}
+
+/** Uma mensagem da conversa REAL de WhatsApp com o lead (Fase 13, fatia 1). */
+export type MensagemConversa = {
+  id: string;
+  /** true = mensagem NOSSA; false = resposta do LEAD. */
+  deNos: boolean;
+  /** timestamp em ms. */
+  ts: number;
+  tipo: "texto" | "audio" | "outro";
+  texto: string | null;
+  /** transcrição (Deepgram) quando a mensagem é de áudio; null se indisponível. */
+  transcricao: string | null;
+};
+
+/**
+ * A conversa real com o lead (ponte `/api/mobile/audios/:leadId/conversa`) —
+ * mensagens dos DOIS lados, com transcrição dos áudios. `null` em falha
+ * (a conversa segue com as bolhas da sessão). LGPD: nada logado.
+ */
+export async function buscarConversaLead(leadTaskId: string): Promise<MensagemConversa[] | null> {
+  try {
+    const r = await fetch(`/api/mobile/audios/${encodeURIComponent(leadTaskId)}/conversa`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const d = (await r.json().catch(() => null)) as { mensagens?: MensagemConversa[] } | null;
+    return Array.isArray(d?.mensagens) ? d.mensagens : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mídia (base64→data-URI) de uma mensagem de áudio — o ▶ das bolhas usa isso
+ * sob demanda. `null` em falha (o botão simplesmente não toca).
+ */
+export async function buscarMidiaMensagem(mensagemId: string): Promise<string | null> {
+  try {
+    const r = await fetch(`/api/mobile/audios/mensagem/${encodeURIComponent(mensagemId)}/midia`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const d = (await r.json().catch(() => null)) as { base64?: string; mimetype?: string } | null;
+    if (!d?.base64) return null;
+    return `data:${d.mimetype || "audio/ogg"};base64,${d.base64}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Um envio registrado na Lista 03, na visão da conversa (bolha persistente). */
+export type EnvioHistorico = {
+  /** DATA_DO_ENVIO em ms (0 quando o registro não tem data). */
+  em: number;
+  por: string;
+  /** URL assinada do anexo de áudio (null = registro sem anexo → bolha sem player). */
+  audioUrl: string | null;
+};
+
+/**
+ * Histórico de envios do lead (ponte `/api/mobile/audios/:leadId/historico`).
+ * `null` em qualquer falha — a conversa segue só com as bolhas da sessão
+ * (best-effort; nunca lança). LGPD: nada logado.
+ */
+export async function buscarHistoricoLead(leadTaskId: string): Promise<EnvioHistorico[] | null> {
+  try {
+    const r = await fetch(`/api/mobile/audios/${encodeURIComponent(leadTaskId)}/historico`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const d = (await r.json().catch(() => null)) as { envios?: EnvioHistorico[] } | null;
+    return Array.isArray(d?.envios) ? d.envios : null;
+  } catch {
+    return null;
   }
 }

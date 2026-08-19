@@ -1,83 +1,150 @@
 "use client";
 
 import * as React from "react";
-import { Mic, Pause, Play, RotateCcw, Square } from "lucide-react";
-// Helper PURO de iniciais — fora de qualquer store/localStorage.
+import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Send } from "lucide-react";
 import { iniciais } from "@/lib/leads-util";
-import { fmtTelefone } from "@/lib/contato";
-import { enviarAudioParaLead, useAudiosReais } from "@/lib/audios-real";
-import type { LeadAudioReal } from "@/lib/audios-real";
-import { Autobox, BlocoLista, Skels, Vhead } from "./blocos";
+import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
+import { iniciarLigacaoReal } from "@/lib/leads-real";
+import { buscarConversaLead, buscarMidiaMensagem, enviarAudioParaLead, enviarTextoParaLead, useAudiosReais } from "@/lib/audios-real";
+import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
+import { Autobox, Vhead } from "./blocos";
 
-/* TELA · LISTA DE ÁUDIOS (Fase 12, canal de envio Evolution API)
-   Única superfície de UI da fase (12-UI-SPEC.md). Fonte: `useAudiosReais`
-   (leads nunca-ligados + origens + status da instância dedicada), servida
-   por `/api/mobile/audios*` (rotas-ponte romero-only, 12-04).
+/* TELA · ÁUDIOS — estilo WhatsApp, CONVERSA por lead. Toca no lead → abre a
+   conversa dele; grava (segurar o microfone) e o áudio vira uma mensagem de voz
+   enviada. O áudio gravado fica PRONTO e serve pros próximos leads (grava uma
+   vez, manda pra vários — D-03).
+   Fonte: `useAudiosReais` via `/api/mobile/audios*` (romero-only, 12-04).
 
-   Ordem topo → base (12-UI-SPEC §"Screen /audios"): Vhead → banner de conexão
-   (D-08, SEMPRE visível) → chips de ORIGEM (D-04/D-05, "Todos" primeiro) →
-   cartão "Áudio pronto" (gravação/preview, MediaRecorder, D-01/D-02/D-03) →
-   lista de leads com envio por linha (D-06/D-07/D-08). Erro/vazio POR BLOCO —
-   a lista falhar não derruba banner nem cartão (item 6 do UI-SPEC).
+   Renderiza de dois jeitos (ENVIO-08):
+   · `embutido` → vista "Áudios" do DROPDOWN de "Ações" (a Fila), sem cabeçalho
+     próprio — o título é o dropdown da tela-mãe;
+   · padrão    → tela própria em /audios (rota direta de rollback).
+   A CONVERSA é overlay `position:fixed` — cobre a tela dos dois jeitos.
+   LGPD: telefone sempre mascarado; nunca logar telefone/leadId/base64. */
 
-   Peso local 700 (não o 800 herdado de `h1`/`.qtop b`/`.igv`): esta tela
-   colapsa pra 2 pesos (400/700, ver 12-UI-SPEC §Typography) — override só
-   aqui, `@layer base` global não muda.
-
-   LGPD: telefone sempre mascarado (`fmtTelefone`); nunca logar
-   telefone/leadId/base64 do áudio. */
-
-/** mm:ss, tabular-nums (Display do 12-UI-SPEC). */
 function fmtMMSS(ms: number): string {
-  const totalSeg = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(totalSeg / 60);
-  const s = totalSeg % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
+const AV_CORES = ["#e17076", "#7bc862", "#65aadd", "#a695e7", "#ee7aae", "#6ec9cb", "#f2749a", "#5db075", "#e59f4a"];
+function corAvatar(nome: string): string {
+  let h = 0;
+  for (let i = 0; i < nome.length; i++) h = (h * 31 + nome.charCodeAt(i)) >>> 0;
+  return AV_CORES[h % AV_CORES.length];
+}
+const ONDAS = Array.from({ length: 20 }, (_, i) => 5 + Math.round(Math.abs(Math.sin(i * 1.35)) * 14));
+
 type EstadoGravacao = "vazio" | "gravando" | "preview";
+/** Uma mensagem de áudio numa conversa: sobe OTIMISTA ("enviando", relógio)
+ *  e confirma ("ok", ✓✓) — como no WhatsApp. Falha remove a bolha e vira
+ *  mensagem de sistema no fio. `src` é o que o ▶ toca: data-URI (bolha da
+ *  sessão) ou URL do anexo no ClickUp (bolha vinda do histórico/Lista 03);
+ *  sem src, a bolha aparece sem player. `durMs` só existe pra bolha da sessão. */
+type Bolha = {
+  hora: string;
+  durMs?: number;
+  status: "enviando" | "ok";
+  src?: string | null;
+  /** 'texto' = mensagem digitada (Fase 13 fatia 2); default áudio. */
+  tipo?: "audio" | "texto";
+  texto?: string;
+};
 
-/** Estado de envio de UMA linha — badge/erro por lead, nunca trava a lista (D-07). */
-type EstadoEnvioLinha =
-  | { tipo: "idle" }
-  | { tipo: "enviando" }
-  | { tipo: "enviado"; hora: string }
-  | { tipo: "desconectado" }
-  | { tipo: "sem-whatsapp" }
-  | { tipo: "erro" };
+/** Hora da bolha: HH:MM se for de hoje; senão dd/MM HH:MM (histórico). */
+function fmtQuandoBolha(em: number): string {
+  if (!em) return "—";
+  const d = new Date(em);
+  const hoje = new Date();
+  const mesmaData = d.toDateString() === hoje.toDateString();
+  const hhmm = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  return mesmaData ? hhmm : `${d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} ${hhmm}`;
+}
+/** Situação do último envio numa conversa (pra mostrar aviso no fio). */
+type SituacaoLead = "sem-whatsapp" | "desconectado" | "erro" | null;
 
-const ENVIO_IDLE: EstadoEnvioLinha = { tipo: "idle" };
+export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
+  const { leads, carregando, erro, recarregar, conectado } = useAudiosReais();
+  /* Filtro pelo selo (2026-08-19) — o backend já manda a lista ordenada por
+     última mensagem (quem falou por último no topo, estilo WhatsApp). */
+  const [filtroSelo, setFiltroSelo] = React.useState<"todos" | "ligar" | "nao_ligar" | "sem_conversa">("todos");
 
-export function Audios() {
-  const { leads, origens, carregando, erro, recarregar, conectado } = useAudiosReais();
-  const [origemAtiva, setOrigemAtiva] = React.useState<string>("todos");
-
-  // Recorte por ORIGEM é client-side (mesmo molde de Base.tsx/RECORTES) — o
-  // backend já entrega só os leads nunca-ligados; o chip só filtra a página.
   const leadsFiltrados = React.useMemo(
-    () => (origemAtiva === "todos" ? leads : leads.filter((l) => l.origem === origemAtiva)),
-    [leads, origemAtiva],
+    () => (filtroSelo === "todos" ? leads : leads.filter((l) => (l.conversa?.status ?? "sem_conversa") === filtroSelo)),
+    [leads, filtroSelo],
   );
 
-  // "Apareça 10 e vá carregando": a tela mostra 10 e revela +10 sozinha, a cada
-  // poucos segundos, até exibir todo o lote já carregado. Reseta pra 10 ao trocar
-  // de origem (o chip volta a mostrar um lote enxuto).
+  // "Apareça 10 e vá carregando" — por ROLAGEM (2026-08-19): o sentinela no fim
+  // da lista (`au-more`) revela +10 ao entrar na viewport, no lugar do timer de
+  // 2,5s — quem rola vê mais na hora; quem não rola não empilha linha à toa.
   const [visiveis, setVisiveis] = React.useState(10);
   React.useEffect(() => {
     setVisiveis(10);
-  }, [origemAtiva]);
+  }, [filtroSelo]);
+  const sentinelaRef = React.useRef<HTMLDivElement | null>(null);
   React.useEffect(() => {
     if (visiveis >= leadsFiltrados.length) return;
-    const id = window.setTimeout(() => setVisiveis((v) => v + 10), 2500);
-    return () => window.clearTimeout(id);
+    const el = sentinelaRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entradas) => {
+        if (entradas.some((e) => e.isIntersecting)) setVisiveis((v) => v + 10);
+      },
+      { rootMargin: "360px 0px" }, // começa a revelar ~1 tela antes do fim
+    );
+    io.observe(el);
+    return () => io.disconnect();
   }, [visiveis, leadsFiltrados.length]);
   const leadsVisiveis = leadsFiltrados.slice(0, visiveis);
 
-  /* ── Cartão "Áudio pronto" (D-01/D-02/D-03) — o "compositor": grava uma vez,
-     o mesmo áudio serve pra vários leads sem regravar. ────────────────────── */
+  /* ── Ligação Wavoip de dentro da conversa (2026-08-19) — mesmo circuito do
+     PerfilLead: token buscado ao MONTAR (pop-up blocker exige `window.open`
+     síncrono no gesto), `iniciarLigacaoReal` cria a Ligação avulsa e a aba já
+     aberta navega pro discador com deep-link da task. Obs.: com a Ligação
+     criada, o lead SAI da lista de nunca-ligados no próximo refresh — é o
+     funil desenhado (áudio → respondeu → ligou → vira Ligação). ── */
+  const [tokenCC, setTokenCC] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    let vivo = true;
+    fetch("/api/callcenter/token", { method: "POST" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (vivo) setTokenCC(d?.token ?? null);
+      })
+      .catch(() => {
+        /* call center fora do ar: o botão degrada para login manual */
+      });
+    return () => {
+      vivo = false;
+    };
+  }, []);
+  const [ligando, setLigando] = React.useState(false);
+  function ligarParaLead(lead: LeadAudioReal) {
+    if (ligando) return;
+    vibrar();
+    setLigando(true);
+    const w = window.open("about:blank", "_blank");
+    iniciarLigacaoReal(lead.leadTaskId).then((taskId) => {
+      if (montadoRef.current) setLigando(false);
+      if (!taskId) {
+        if (w) w.close(); // sem Ligação criada: fecha a aba órfã (igual PerfilLead)
+        return;
+      }
+      // auto=1: o discador disca SOZINHO ao abrir a Ligação (pedido 2026-08-19
+      // — um toque = ligar). O fragmento já existe (task sempre presente aqui).
+      const url = urlCallCenter(tokenCC, taskId) + "&auto=1";
+      if (w) {
+        w.location.href = url;
+      } else {
+        window.open(url, "_blank");
+      }
+    });
+  }
+
+  /* ── Gravação (D-01/D-02/D-03) — grava uma vez, serve pra vários leads. ── */
   const [estadoGravacao, setEstadoGravacao] = React.useState<EstadoGravacao>("vazio");
   const [erroMic, setErroMic] = React.useState<string | null>(null);
-  const [duracaoMs, setDuracaoMs] = React.useState(0); // cronômetro ao vivo (gravando)
+  const [duracaoMs, setDuracaoMs] = React.useState(0);
   const [duracaoPreviewMs, setDuracaoPreviewMs] = React.useState(0);
   const [audioUrl, setAudioUrl] = React.useState<string | null>(null);
   const [audioBase64, setAudioBase64] = React.useState<string | null>(null);
@@ -90,10 +157,7 @@ export function Audios() {
   const cronometroRef = React.useRef<number | null>(null);
   const inicioGravacaoRef = React.useRef(0);
   const audioElRef = React.useRef<HTMLAudioElement | null>(null);
-  // WR-04: guarda os setState assíncronos (onstop/FileReader) contra a tela já
-  // desmontada — parar o recorder no cleanup dispara `onstop` DEPOIS do
-  // unmount, então sem essa flag o montarPreview faria setState num componente
-  // morto.
+  const soltarPendenteRef = React.useRef(false);
   const montadoRef = React.useRef(true);
 
   const pararCronometro = React.useCallback(() => {
@@ -104,8 +168,6 @@ export function Audios() {
   }, []);
 
   const montarPreview = React.useCallback((blob: Blob, decorridoMs: number) => {
-    // WR-04: se a tela desmontou antes do `onstop` chegar aqui, não toca em
-    // state — só libera o blob e sai (senão vaza o object URL sem preview).
     if (!montadoRef.current) return;
     const url = URL.createObjectURL(blob);
     setAudioUrl((antiga) => {
@@ -117,19 +179,13 @@ export function Audios() {
     const reader = new FileReader();
     reader.onloadend = () => {
       if (!montadoRef.current) return;
-      const resultado = reader.result;
-      if (typeof resultado === "string") {
-        setAudioBase64(resultado.split(",")[1] ?? "");
-      }
+      const r = reader.result;
+      if (typeof r === "string") setAudioBase64(r.split(",")[1] ?? "");
     };
     reader.readAsDataURL(blob);
     setEstadoGravacao("preview");
   }, []);
 
-  // Toque em "Gravar áudio": getUserMedia SÍNCRONO dentro do gesto, SEM
-  // await antes — restrição de iOS (web/app.js `iniciarLigacao`). O
-  // MediaRecorder é criado só quando a Promise resolve; o gesto em si já
-  // disparou getUserMedia antes de qualquer await.
   function iniciarGravacao() {
     setErroMic(null);
     let promessa: Promise<MediaStream>;
@@ -154,38 +210,45 @@ export function Audios() {
         };
         rec.onstop = () => {
           const decorridoMs = Date.now() - inicioGravacaoRef.current;
-          const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeAlvo });
-          montarPreview(blob, decorridoMs);
           stream.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
+          if (decorridoMs < 600) {
+            if (montadoRef.current) setEstadoGravacao("vazio");
+            return;
+          }
+          const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeAlvo });
+          montarPreview(blob, decorridoMs);
         };
         rec.start();
         inicioGravacaoRef.current = Date.now();
         setDuracaoMs(0);
         setEstadoGravacao("gravando");
         pararCronometro();
-        cronometroRef.current = window.setInterval(() => {
-          setDuracaoMs(Date.now() - inicioGravacaoRef.current);
-        }, 250);
+        cronometroRef.current = window.setInterval(() => setDuracaoMs(Date.now() - inicioGravacaoRef.current), 200);
+        if (soltarPendenteRef.current) {
+          soltarPendenteRef.current = false;
+          pararGravacao();
+        }
       })
-      .catch(() => {
-        // NotAllowedError/SecurityError (permissão negada) ou qualquer outra
-        // falha de captura caem na mesma copy do 12-UI-SPEC — a causa
-        // provável pro usuário é sempre "permissão do navegador".
-        setErroMic(
-          "Não conseguimos acessar o microfone. Verifique a permissão do navegador para gravar.",
-        );
-      });
+      .catch(() => setErroMic("Não conseguimos acessar o microfone. Verifique a permissão do navegador."));
   }
-
   function pararGravacao() {
     pararCronometro();
     recorderRef.current?.stop();
   }
-
+  function aoApertarMic(e: React.PointerEvent) {
+    e.preventDefault();
+    if (estadoGravacao !== "vazio") return;
+    soltarPendenteRef.current = false;
+    iniciarGravacao();
+  }
+  function aoSoltarMic() {
+    if (estadoGravacao === "gravando") pararGravacao();
+    else soltarPendenteRef.current = true;
+  }
   function regravar() {
-    setAudioUrl((antiga) => {
-      if (antiga) URL.revokeObjectURL(antiga);
+    setAudioUrl((a) => {
+      if (a) URL.revokeObjectURL(a);
       return null;
     });
     setAudioBase64(null);
@@ -193,7 +256,6 @@ export function Audios() {
     setTocando(false);
     setEstadoGravacao("vazio");
   }
-
   function alternarReproducao() {
     const el = audioElRef.current;
     if (!el) return;
@@ -201,222 +263,501 @@ export function Audios() {
     else el.pause();
   }
 
-  // Limpa recursos vivos (recorder + stream de mic + object URL) ao desmontar
-  // a tela. WR-04: para o MediaRecorder ANTES dos tracks (senão fica em
-  // `recording` com a fonte encerrada por baixo) e marca a tela como desmontada
-  // pra que o `onstop`/FileReader assíncronos não façam setState num componente
-  // morto (guardados em montarPreview).
-  React.useEffect(
-    () => () => {
+  React.useEffect(() => {
+    // REARMAR o guard no body é obrigatório: no StrictMode (dev) o React roda
+    // mount → cleanup → mount de novo; sem esta linha o cleanup deixava
+    // montadoRef=false pra sempre e montarPreview desistia em silêncio — a
+    // gravação congelava em "solte para parar".
+    montadoRef.current = true;
+    return () => {
       montadoRef.current = false;
       pararCronometro();
       try {
         recorderRef.current?.stop();
       } catch {
-        /* recorder já parado/inativo — ignora */
+        /* ignora */
       }
       streamRef.current?.getTracks().forEach((t) => t.stop());
-      setAudioUrl((atual) => {
-        if (atual) URL.revokeObjectURL(atual);
-        return atual;
+      setAudioUrl((a) => {
+        if (a) URL.revokeObjectURL(a);
+        return a;
       });
-    },
-    [pararCronometro],
-  );
-
-  /* ── Envio por linha (D-06/D-07/D-08) ─────────────────────────────────── */
-  const [enviosPorLead, setEnviosPorLead] = React.useState<Record<string, EstadoEnvioLinha>>({});
-  const [avisoSemAudioLead, setAvisoSemAudioLead] = React.useState<string | null>(null);
-  const avisoTimeoutRef = React.useRef<number | null>(null);
+    };
+  }, [pararCronometro]);
 
   const audioPronto = estadoGravacao === "preview" && !!audioBase64;
 
-  async function enviarParaLead(lead: LeadAudioReal) {
-    const jaEnviando = enviosPorLead[lead.leadTaskId]?.tipo === "enviando";
-    if (jaEnviando) return;
-    if (!audioPronto || !conectado) {
-      // Toast leve: só o hint "grave um áudio primeiro" (a causa mais comum
-      // de o botão estar "desabilitado") — não bloqueia navegação nem trava
-      // a linha; some sozinho.
-      setAvisoSemAudioLead(lead.leadTaskId);
-      if (avisoTimeoutRef.current != null) window.clearTimeout(avisoTimeoutRef.current);
-      avisoTimeoutRef.current = window.setTimeout(() => setAvisoSemAudioLead(null), 2200);
+  /* ── Conversa por lead + dropdown ─────────────────────────────────────── */
+  const [leadAberto, setLeadAberto] = React.useState<LeadAudioReal | null>(null);
+  const [bolhasPorLead, setBolhasPorLead] = React.useState<Record<string, Bolha[]>>({});
+  /* Qual ÁUDIO (identidade = prefixo do base64) já foi enviado pra cada lead
+     NESTA sessão — decide a barra da conversa: o MESMO áudio não se reenvia
+     (barra esvazia, vira microfone), mas um áudio NOVO reabre o envio. Não dá
+     pra usar só "tem bolha?": com o histórico persistente toda conversa antiga
+     tem bolha, e a barra nunca mais ofereceria o Enviar. */
+  const [audioEnviadoPorLead, setAudioEnviadoPorLead] = React.useState<Record<string, string>>({});
+  const [situacaoPorLead, setSituacaoPorLead] = React.useState<Record<string, SituacaoLead>>({});
+  const [enviandoLead, setEnviandoLead] = React.useState<string | null>(null);
+  const [avisoSemAudio, setAvisoSemAudio] = React.useState(false);
+  const avisoRef = React.useRef<number | null>(null);
+  const threadRef = React.useRef<HTMLDivElement | null>(null);
+
+  /* ── Conversa REAL (Fase 13, fatia 1): ao abrir, o painel busca as mensagens
+        do WhatsApp com o lead (DOIS lados, com transcrição dos áudios) e faz
+        poll de 10s enquanto a conversa está aberta. Quando a conversa chega,
+        as bolhas de sessão já CONFIRMADAS saem (a mensagem real substitui);
+        as "enviando" ficam até o desfecho. ── */
+  const [conversaPorLead, setConversaPorLead] = React.useState<Record<string, MensagemConversa[]>>({});
+  const [conversaCarregando, setConversaCarregando] = React.useState(false);
+  const atualizarConversa = React.useCallback(async (leadTaskId: string, silencioso: boolean) => {
+    if (!silencioso) setConversaCarregando(true);
+    const msgs = await buscarConversaLead(leadTaskId);
+    if (msgs) {
+      setConversaPorLead((p) => ({ ...p, [leadTaskId]: msgs }));
+      setBolhasPorLead((p) => ({ ...p, [leadTaskId]: (p[leadTaskId] ?? []).filter((b) => b.status === "enviando") }));
+    }
+    setConversaCarregando(false);
+  }, []);
+  const jaTemConversaRef = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const lead = leadAberto;
+    if (!lead) return;
+    const id = lead.leadTaskId;
+    void atualizarConversa(id, jaTemConversaRef.current.has(id));
+    jaTemConversaRef.current.add(id);
+    const timer = window.setInterval(() => void atualizarConversa(id, true), 10_000);
+    return () => window.clearInterval(timer);
+  }, [leadAberto, atualizarConversa]);
+
+  /* ── Player das bolhas: UM <audio> compartilhado; ▶ toca o src da bolha
+        (data-URI da sessão ou mídia baixada da conversa), toque de novo pausa.
+        Chave string: mensagens usam o id da Evolution, sessão usa "s<i>". ── */
+  const [bolhaTocando, setBolhaTocando] = React.useState<string | null>(null);
+  const [midiaCarregando, setMidiaCarregando] = React.useState<string | null>(null);
+  const bolhaAudioRef = React.useRef<HTMLAudioElement | null>(null);
+  const midiaCacheRef = React.useRef<Map<string, string>>(new Map());
+  function alternarBolha(chave: string, src: string) {
+    const el = bolhaAudioRef.current;
+    if (!el) return;
+    if (bolhaTocando === chave) {
+      el.pause();
       return;
     }
-    setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "enviando" } }));
-    // A espera do rate limiter (D-06/D-07) acontece DENTRO desta chamada — a
-    // linha fica com o badge "Aguardando ritmo seguro…" (tipo "enviando")
-    // pelo tempo que ela durar, sem travar o resto da lista.
-    const resultado = await enviarAudioParaLead(lead.leadTaskId, audioBase64!, audioMime);
-    if (resultado.tipo === "sucesso") {
-      const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-      setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "enviado", hora } }));
-    } else if (resultado.tipo === "desconectado") {
-      setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "desconectado" } }));
-    } else if (resultado.tipo === "sem_whatsapp") {
-      // Estado TERMINAL (D-decisão 2, quick 260818-mv2): sem fila automática,
-      // sem botão de retry — o operador segue pelo contato manual.
-      setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "sem-whatsapp" } }));
+    el.src = src;
+    el.play()
+      .then(() => setBolhaTocando(chave))
+      .catch(() => setBolhaTocando(null));
+  }
+  async function tocarMensagem(m: MensagemConversa) {
+    if (bolhaTocando === m.id) {
+      bolhaAudioRef.current?.pause();
+      return;
+    }
+    let src = midiaCacheRef.current.get(m.id) ?? null;
+    if (!src) {
+      setMidiaCarregando(m.id);
+      src = await buscarMidiaMensagem(m.id);
+      setMidiaCarregando(null);
+      if (!src) return; // mídia expirada/indisponível: o toque simplesmente não toca
+      midiaCacheRef.current.set(m.id, src);
+    }
+    alternarBolha(m.id, src);
+  }
+  React.useEffect(() => {
+    // trocou/fechou a conversa: para o que estiver tocando
+    bolhaAudioRef.current?.pause();
+    setBolhaTocando(null);
+  }, [leadAberto]);
+
+  // rola pro fim quando chega bolha/mensagem/situação nova
+  React.useEffect(() => {
+    if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
+  }, [leadAberto, bolhasPorLead, situacaoPorLead, conversaPorLead]);
+
+  async function enviarNaConversa(lead: LeadAudioReal) {
+    if (enviandoLead) return;
+    if (!audioPronto || !conectado) {
+      setAvisoSemAudio(true);
+      if (avisoRef.current != null) window.clearTimeout(avisoRef.current);
+      avisoRef.current = window.setTimeout(() => setAvisoSemAudio(false), 2200);
+      return;
+    }
+    const id = lead.leadTaskId;
+    const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    // OTIMISTA (pedido do gestor): a bolha SOBE NA HORA em estado "enviando"
+    // (relógio) e o compose volta pro microfone — nada de áudio "travado" na
+    // barra. Confirmou → ✓✓. Falhou → a bolha desce e o fio mostra o motivo.
+    setEnviandoLead(id);
+    setAudioEnviadoPorLead((p) => ({ ...p, [id]: audioBase64!.slice(0, 32) }));
+    setSituacaoPorLead((p) => ({ ...p, [id]: null }));
+    setBolhasPorLead((p) => ({
+      ...p,
+      [id]: [
+        ...(p[id] ?? []),
+        // src = data-URI do próprio áudio: o ▶ da bolha TOCA (independe do blob
+        // da barra, que pode ser regravado/limpo depois).
+        { hora, durMs: duracaoPreviewMs, status: "enviando", src: `data:${audioMime};base64,${audioBase64}` },
+      ],
+    }));
+    const r = await enviarAudioParaLead(id, audioBase64!, audioMime);
+    setEnviandoLead(null);
+    if (r.tipo === "sucesso") {
+      setBolhasPorLead((p) => ({
+        ...p,
+        [id]: (p[id] ?? []).map((b, i, arr) => (i === arr.length - 1 && b.status === "enviando" ? { ...b, status: "ok" } : b)),
+      }));
+      // em ~1,5s a conversa real traz a mensagem enviada (e substitui a bolha)
+      window.setTimeout(() => void atualizarConversa(id, true), 1500);
     } else {
-      setEnviosPorLead((prev) => ({ ...prev, [lead.leadTaskId]: { tipo: "erro" } }));
+      setBolhasPorLead((p) => ({ ...p, [id]: (p[id] ?? []).filter((b) => b.status !== "enviando") }));
+      // falhou: libera o reenvio DESTE áudio pra este lead (a barra volta pronta)
+      setAudioEnviadoPorLead((p) => {
+        const { [id]: _descartado, ...resto } = p;
+        return resto;
+      });
+      setSituacaoPorLead((p) => ({
+        ...p,
+        [id]: r.tipo === "sem_whatsapp" ? "sem-whatsapp" : r.tipo === "desconectado" ? "desconectado" : "erro",
+      }));
     }
   }
 
-  return (
-    <div className="view">
-      <Vhead
-        titulo={<span style={{ fontWeight: 700 }}>Lista de Áudios</span>}
-        sub={`${leadsFiltrados.length} ${leadsFiltrados.length === 1 ? "lead" : "leads"}`}
-      />
+  /* Envio de TEXTO (Fase 13 fatia 2) — mesmo padrão otimista do áudio. */
+  const [textoDigitado, setTextoDigitado] = React.useState("");
+  async function enviarTextoNaConversa(lead: LeadAudioReal) {
+    const texto = textoDigitado.trim();
+    if (!texto || enviandoLead) return;
+    if (!conectado) {
+      setAvisoSemAudio(true);
+      if (avisoRef.current != null) window.clearTimeout(avisoRef.current);
+      avisoRef.current = window.setTimeout(() => setAvisoSemAudio(false), 2200);
+      return;
+    }
+    const id = lead.leadTaskId;
+    const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    setEnviandoLead(id);
+    setTextoDigitado("");
+    setSituacaoPorLead((p) => ({ ...p, [id]: null }));
+    setBolhasPorLead((p) => ({ ...p, [id]: [...(p[id] ?? []), { hora, status: "enviando", tipo: "texto", texto }] }));
+    const r = await enviarTextoParaLead(id, texto);
+    setEnviandoLead(null);
+    if (r.tipo === "sucesso") {
+      setBolhasPorLead((p) => ({
+        ...p,
+        [id]: (p[id] ?? []).map((b, i, arr) => (i === arr.length - 1 && b.status === "enviando" ? { ...b, status: "ok" } : b)),
+      }));
+      window.setTimeout(() => void atualizarConversa(id, true), 1500);
+    } else {
+      setBolhasPorLead((p) => ({ ...p, [id]: (p[id] ?? []).filter((b) => b.status !== "enviando") }));
+      setTextoDigitado(texto); // devolve o texto pra barra — dá pra corrigir/tentar de novo
+      setSituacaoPorLead((p) => ({
+        ...p,
+        [id]: r.tipo === "sem_whatsapp" ? "sem-whatsapp" : r.tipo === "desconectado" ? "desconectado" : "erro",
+      }));
+    }
+  }
 
-      {/* Banner de conexão (D-08) — SEMPRE visível, nunca colapsável/omitido,
-          independente do estado da lista/cartão abaixo. */}
-      <Autobox
-        tom={conectado ? "go" : "warn"}
-        titulo={conectado ? "Número conectado" : "Número desconectado"}
-      >
-        {conectado
-          ? "Os áudios estão saindo normalmente."
-          : "Reconecte o WhatsApp dedicado — nenhum áudio sai enquanto a sessão estiver fora."}
-      </Autobox>
+  /* Linha de baixo de cada conversa: o NÚMERO do lead (pedido explícito — o
+     operador confere o telefone sem abrir a conversa). Estados sobrepõem:
+     sem-whatsapp esconde o número (lead pulado, não é mais discável por áudio);
+     enviado mantém o número junto do selo. Exibir ≠ logar (LGPD ok). */
+  function statusLista(lead: LeadAudioReal): { txt: string; cls: string } {
+    if (situacaoPorLead[lead.leadTaskId] === "sem-whatsapp") return { txt: "🚫 sem WhatsApp — pulado", cls: "semwa" };
+    // "enviado" pelo rastro do envio desta sessão (audioEnviadoPorLead) — a
+    // bolha confirmada é substituída pela conversa real, então não serve de marca.
+    if (audioEnviadoPorLead[lead.leadTaskId]) return { txt: `🎤 enviado · ${fmtTelefone(lead.telefone) || "sem telefone"}`, cls: "sent" };
+    // fmtTelefone('') devolve '' (não "—"): sem o fallback a linha ficaria em branco.
+    return { txt: fmtTelefone(lead.telefone) || "sem telefone", cls: "" };
+  }
 
-      {/* Tira de chips de ORIGEM (D-04/D-05) — "Todos" primeiro + valores
-          distintos vindos do endpoint, sem rótulo hardcoded além de "Todos". */}
-      <div className="scroll-x">
-        <button
-          type="button"
-          className={origemAtiva === "todos" ? "seg on" : "seg"}
-          style={{ fontWeight: 700 }}
-          onClick={() => setOrigemAtiva("todos")}
-        >
-          Todos
-        </button>
-        {origens.map((o) => (
+  /* ═══════════════ CONVERSA (por lead) ═══════════════ */
+  if (leadAberto) {
+    const bolhas = bolhasPorLead[leadAberto.leadTaskId] ?? [];
+    const conversa = conversaPorLead[leadAberto.leadTaskId] ?? [];
+    const situ = situacaoPorLead[leadAberto.leadTaskId] ?? null;
+    const enviando = enviandoLead === leadAberto.leadTaskId;
+    const gravando = estadoGravacao === "gravando";
+    return (
+      <div className="au-conv">
+        <style>{AU_CSS}</style>
+        <div className="au-chead">
+          <button type="button" className="au-back" onClick={() => setLeadAberto(null)} aria-label="Voltar">
+            <ArrowLeft size={24} />
+          </button>
+          <span className="au-av sm" style={{ background: corAvatar(leadAberto.nome) }}>
+            {iniciais(leadAberto.nome)}
+          </span>
+          <div className="au-ct">
+            <div className="au-cnm">{leadAberto.nome}</div>
+            <div className="au-cst">{fmtTelefone(leadAberto.telefone)}</div>
+          </div>
           <button
-            key={o}
             type="button"
-            className={origemAtiva === o ? "seg on" : "seg"}
-            style={{ fontWeight: 700 }}
-            onClick={() => setOrigemAtiva(o)}
+            className="au-callbtn"
+            onClick={() => ligarParaLead(leadAberto)}
+            disabled={ligando}
+            aria-label="Ligar para o lead (call center)"
+            title="Ligar (call center)"
           >
-            {o}
+            {ligando ? <span className="au-spin" /> : <Phone size={19} />}
+          </button>
+        </div>
+
+        <div className="au-thread" ref={threadRef}>
+          {/* com mensagens de outros dias na conversa, "HOJE" mentiria */}
+          <div className="au-day">
+            {conversa.some((m) => fmtQuandoBolha(m.ts).includes("/")) ? "CONVERSA" : "HOJE"}
+          </div>
+          {conversa.length === 0 && bolhas.length === 0 && situ !== "sem-whatsapp" && (
+            <div className="au-hintbig">
+              {conversaCarregando ? (
+                <>Carregando a conversa…</>
+              ) : (
+                <>
+                  Nenhuma mensagem ainda.
+                  <br />
+                  {audioPronto
+                    ? "Toque em Enviar para mandar o áudio."
+                    : "Segure o microfone e solte para gravar o áudio."}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── a conversa REAL (dois lados), vinda do WhatsApp ── */}
+          {conversa.map((m) =>
+            m.tipo === "outro" ? null : (
+              <div key={m.id} className={"au-bubble" + (m.deNos ? "" : " in")}>
+                {m.tipo === "audio" ? (
+                  <>
+                    <div className="au-voice">
+                      <button
+                        type="button"
+                        className="au-vplay"
+                        onClick={() => void tocarMensagem(m)}
+                        aria-label={bolhaTocando === m.id ? "Pausar áudio" : "Ouvir áudio"}
+                      >
+                        {midiaCarregando === m.id ? (
+                          <span className="au-spin" />
+                        ) : bolhaTocando === m.id ? (
+                          <Pause size={16} />
+                        ) : (
+                          <Play size={16} />
+                        )}
+                      </button>
+                      <span className={"au-vwave" + (bolhaTocando === m.id ? " play" : "")}>
+                        {ONDAS.map((h, j) => (
+                          <i key={j} style={{ height: h }} />
+                        ))}
+                      </span>
+                    </div>
+                    {m.transcricao && <div className="au-trans">“{m.transcricao.replace(/Falante \d+:\s*/g, "").trim()}”</div>}
+                  </>
+                ) : (
+                  <div className="au-btxt">{m.texto}</div>
+                )}
+                <div className="au-meta">
+                  {fmtQuandoBolha(m.ts)} {m.deNos && <CheckCheck size={14} className="au-mck" />}
+                </div>
+              </div>
+            ),
+          )}
+
+          {/* ── bolhas da SESSÃO (envio em andamento / recém-confirmado — a
+                 conversa real substitui no próximo refresh) ── */}
+          {bolhas.map((b, i) => (
+            <div key={`s${i}`} className="au-bubble">
+              {b.tipo === "texto" ? (
+                <div className="au-btxt">{b.texto}</div>
+              ) : (
+                <div className="au-voice">
+                  {b.src ? (
+                    <button
+                      type="button"
+                      className="au-vplay"
+                      onClick={() => alternarBolha(`s${i}`, b.src!)}
+                      aria-label={bolhaTocando === `s${i}` ? "Pausar áudio" : "Ouvir áudio"}
+                    >
+                      {bolhaTocando === `s${i}` ? <Pause size={16} /> : <Play size={16} />}
+                    </button>
+                  ) : (
+                    <span className="au-vplay off">
+                      <Mic size={15} />
+                    </span>
+                  )}
+                  <span className={"au-vwave" + (bolhaTocando === `s${i}` ? " play" : "")}>
+                    {ONDAS.map((h, j) => (
+                      <i key={j} style={{ height: h }} />
+                    ))}
+                  </span>
+                  {typeof b.durMs === "number" && b.durMs > 0 && <span className="au-vdur">{fmtMMSS(b.durMs)}</span>}
+                </div>
+              )}
+              <div className="au-meta">
+                {b.hora}{" "}
+                {b.status === "enviando" ? (
+                  /* subiu otimista: relógio até o backend confirmar (WhatsApp-like) */
+                  <Clock size={13} className="au-mwait" />
+                ) : (
+                  <CheckCheck size={14} className="au-mck" />
+                )}
+              </div>
+            </div>
+          ))}
+          {/* player compartilhado das bolhas (som apenas; sem UI própria) */}
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <audio
+            ref={bolhaAudioRef}
+            onPause={() => setBolhaTocando(null)}
+            onEnded={() => setBolhaTocando(null)}
+            style={{ display: "none" }}
+          />
+          {situ === "sem-whatsapp" && <div className="au-sysmsg semwa">🚫 Este número não tem WhatsApp — pulado.</div>}
+          {situ === "desconectado" && <div className="au-sysmsg semwa">Não enviou — número desconectado.</div>}
+          {situ === "erro" && <div className="au-sysmsg semwa">O envio falhou. Toque em Enviar para tentar de novo.</div>}
+          {avisoSemAudio && <div className="au-sysmsg">{conectado ? "Grave um áudio primeiro." : "Sessão desconectada."}</div>}
+        </div>
+
+        {/* compose: áudio pronto E ESTE áudio ainda não foi mandado pra ESTE
+            lead → play + Enviar; senão → segurar mic. Depois do envio a barra
+            ESVAZIA (a bolha já subiu no fio) — o mesmo áudio segue pronto pros
+            PRÓXIMOS leads (D-03), e um áudio NOVO reabre o envio aqui. */}
+        <div className="au-compose">
+          {audioPronto && audioBase64 && audioEnviadoPorLead[leadAberto.leadTaskId] !== audioBase64.slice(0, 32) ? (
+            <>
+              <div className="au-field ready">
+                <button type="button" className="au-play" onClick={alternarReproducao} aria-label={tocando ? "Pausar" : "Reproduzir"}>
+                  {tocando ? <Pause size={17} /> : <Play size={17} />}
+                </button>
+                <span className={"au-wave" + (tocando ? " play" : "")} aria-hidden="true">
+                  {ONDAS.map((h, i) => (
+                    <i key={i} style={{ height: h }} />
+                  ))}
+                </span>
+                <span className="au-dur">{fmtMMSS(duracaoPreviewMs)}</span>
+                {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                <audio
+                  ref={audioElRef}
+                  src={audioUrl ?? undefined}
+                  onPlay={() => setTocando(true)}
+                  onPause={() => setTocando(false)}
+                  onEnded={() => setTocando(false)}
+                  style={{ display: "none" }}
+                />
+                <button type="button" className="au-trashmini" onClick={regravar} aria-label="Regravar">
+                  <RotateCcw size={17} />
+                </button>
+              </div>
+              <button
+                type="button"
+                className="au-mic send"
+                disabled={enviando}
+                onClick={() => void enviarNaConversa(leadAberto)}
+                aria-label="Enviar áudio"
+              >
+                {enviando ? <span className="au-spin lg" /> : <Send size={22} />}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className={"au-field" + (gravando ? " rec" : "")}>
+                {gravando ? (
+                  <>
+                    <span className="au-recdot" />
+                    <span className="au-rectime">{fmtMMSS(duracaoMs)}</span>
+                    <span className="au-slide">solte para parar</span>
+                  </>
+                ) : (
+                  /* chat de verdade (Fase 13 fatia 2): digita = manda TEXTO;
+                     vazio = segura o microfone e manda ÁUDIO (WhatsApp-like) */
+                  <input
+                    className="au-txtin"
+                    type="text"
+                    value={textoDigitado}
+                    onChange={(e) => setTextoDigitado(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void enviarTextoNaConversa(leadAberto);
+                      }
+                    }}
+                    placeholder={erroMic ?? "Mensagem…"}
+                    enterKeyHint="send"
+                    maxLength={4096}
+                  />
+                )}
+              </div>
+              {textoDigitado.trim() && !gravando ? (
+                <button
+                  type="button"
+                  className="au-mic send"
+                  disabled={!!enviandoLead}
+                  onClick={() => void enviarTextoNaConversa(leadAberto)}
+                  aria-label="Enviar mensagem"
+                >
+                  {enviandoLead ? <span className="au-spin lg" /> : <Send size={22} />}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={"au-mic" + (gravando ? " recording" : "")}
+                  onPointerDown={aoApertarMic}
+                  onPointerUp={aoSoltarMic}
+                  onPointerCancel={aoSoltarMic}
+                  onPointerLeave={aoSoltarMic}
+                  onContextMenu={(e) => e.preventDefault()}
+                  aria-label="Gravar áudio (segure)"
+                >
+                  <Mic size={23} />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  /* ═══════════════ LISTA (nunca-ligados) ═══════════════ */
+  const conteudo = (
+    <>
+      {/* Banner de conexão SÓ quando há problema (pedido 2026-08-19): conectado
+          é silêncio; o aviso aparece apenas com a sessão comprovadamente fora. */}
+      {conectado === false && (
+        <Autobox tom="warn" titulo="Número desconectado">
+          Reconecte o WhatsApp dedicado — nenhum áudio sai enquanto a sessão estiver fora.
+        </Autobox>
+      )}
+
+      {/* Filtro pelo SELO da conversa (pedido 2026-08-19) — substitui os chips
+          de origem (ENVIO-04): o operador filtra por "posso ligar?", não por
+          onde o lead entrou. */}
+      <div className="scroll-x">
+        {(
+          [
+            ["todos", "Todos"],
+            ["ligar", "Ligar"],
+            ["nao_ligar", "Não ligar"],
+            ["sem_conversa", "Sem conversa"],
+          ] as const
+        ).map(([valor, rotulo]) => (
+          <button
+            key={valor}
+            type="button"
+            className={filtroSelo === valor ? "seg on" : "seg"}
+            style={{ fontWeight: 700 }}
+            onClick={() => setFiltroSelo(valor)}
+          >
+            {rotulo}
           </button>
         ))}
       </div>
 
-      {/* Cartão "Áudio pronto" — o compositor. Fica ANTES da lista, nunca faz
-          parte dela; o mesmo áudio em preview serve pra vários leads (D-03). */}
-      <BlocoLista titulo="Áudio pronto">
-        {estadoGravacao === "vazio" && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
-            <Mic size={40} style={{ color: "var(--romero)", marginBottom: 14 }} />
-            {erroMic && (
-              <div style={{ fontSize: 12, marginBottom: 10, color: "#ff9b9b", lineHeight: 1.5 }}>
-                {erroMic}
-              </div>
-            )}
-            <button
-              type="button"
-              className="cta"
-              onClick={iniciarGravacao}
-              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-            >
-              <Mic size={18} />
-              Gravar áudio
-            </button>
-            <div className="dim2" style={{ fontSize: "var(--t-body)", fontWeight: 400, lineHeight: 1.5, marginTop: 12 }}>
-              Grave uma vez — o mesmo áudio fica pronto para os próximos leads.
-            </div>
-          </div>
-        )}
-
-        {estadoGravacao === "gravando" && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
-              <span className="pulse" style={{ background: "var(--alert)", boxShadow: "0 0 0 0 rgba(255,107,107,.55)" }} />
-              <span
-                style={{
-                  fontSize: "var(--t-num)",
-                  fontWeight: 700,
-                  fontVariantNumeric: "tabular-nums",
-                  letterSpacing: "-0.03em",
-                }}
-              >
-                {fmtMMSS(duracaoMs)}
-              </span>
-            </div>
-            <button
-              type="button"
-              className="cta"
-              onClick={pararGravacao}
-              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-            >
-              <Square size={18} />
-              Parar
-            </button>
-          </div>
-        )}
-
-        {estadoGravacao === "preview" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <button
-                type="button"
-                onClick={alternarReproducao}
-                aria-label={tocando ? "Pausar" : "Reproduzir"}
-                style={{
-                  flex: "none",
-                  minWidth: 44,
-                  minHeight: 44,
-                  borderRadius: "50%",
-                  background: "rgba(255,255,255,.08)",
-                  border: "1px solid var(--line-2)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "var(--ink)",
-                }}
-              >
-                {tocando ? <Pause size={20} /> : <Play size={20} />}
-              </button>
-              <span
-                style={{
-                  fontSize: "var(--t-num)",
-                  fontWeight: 700,
-                  fontVariantNumeric: "tabular-nums",
-                  letterSpacing: "-0.03em",
-                }}
-              >
-                {fmtMMSS(duracaoPreviewMs)}
-              </span>
-              {/* eslint-disable-next-line jsx-a11y/media-has-caption -- nota de voz curta, sem faixa de legenda aplicável */}
-              <audio
-                ref={audioElRef}
-                src={audioUrl ?? undefined}
-                onPlay={() => setTocando(true)}
-                onPause={() => setTocando(false)}
-                onEnded={() => setTocando(false)}
-                style={{ display: "none" }}
-              />
-            </div>
-            <div className="acts">
-              <button
-                type="button"
-                className="act cl"
-                onClick={regravar}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-              >
-                <RotateCcw size={16} />
-                Regravar
-              </button>
-            </div>
-          </div>
-        )}
-      </BlocoLista>
-
       {carregando ? (
-        <div className="stack">
-          <Skels alturas={[64, 64, 64]} />
+        <div className="au-list">
+          <div className="au-more">
+            <span className="au-spin" /> carregando…
+          </div>
         </div>
       ) : erro ? (
         <div className="empty">
@@ -428,111 +769,170 @@ export function Audios() {
       ) : leadsFiltrados.length === 0 ? (
         <div className="empty">
           <b>Nenhum lead pendente aqui</b>
-          Todos os leads desta aba já foram contatados ou não há leads dessa origem ainda. Troque de
-          aba ou volte mais tarde.
+          Todos os leads já foram contatados ou não há leads dessa origem ainda.
         </div>
       ) : (
-        <div className="stack">
-          {leadsVisiveis.map((lead) => (
-            <LinhaLead
-              key={lead.leadTaskId}
-              lead={lead}
-              estadoEnvio={enviosPorLead[lead.leadTaskId] ?? ENVIO_IDLE}
-              habilitado={audioPronto && conectado}
-              avisoAtivo={avisoSemAudioLead === lead.leadTaskId}
-              onEnviar={() => void enviarParaLead(lead)}
-            />
-          ))}
+        <div className="au-list" role="list">
+          {leadsVisiveis.map((lead) => {
+            const st = statusLista(lead);
+            // Selo "posso ligar?" (Fase 13 fatia 2): sem-whatsapp da sessão
+            // sobrepõe; senão vale a avaliação do backend (LLM/heurística).
+            const selo =
+              situacaoPorLead[lead.leadTaskId] === "sem-whatsapp"
+                ? { status: "nao_ligar" as const, motivo: "Número sem WhatsApp" }
+                : lead.conversa;
+            return (
+              <div key={lead.leadTaskId} className="au-row" role="listitem" tabIndex={0} onClick={() => setLeadAberto(lead)} onKeyDown={(e) => (e.key === "Enter" ? setLeadAberto(lead) : null)}>
+                <span className="au-av" style={{ background: corAvatar(lead.nome) }}>
+                  {iniciais(lead.nome)}
+                  {/* bolinha: mensagem do LEAD ainda NÃO LIDA — abrir a
+                      conversa marca como lida (no banco) e apaga a bolinha */}
+                  {lead.ultima && !lead.ultima.deNos && !lead.ultima.lida && (
+                    <span className="au-dot" aria-label="Mensagem nova do lead" />
+                  )}
+                </span>
+                <span className="au-rc">
+                  <span className="au-name">{lead.nome}</span>
+                  <span className={"au-sub " + st.cls}>{st.txt}</span>
+                  {lead.ultima && !lead.ultima.deNos && !lead.ultima.lida && lead.ultima.preview && (
+                    <span className="au-prev">{lead.ultima.preview}</span>
+                  )}
+                </span>
+                {selo && (
+                  <span className="au-lado">
+                    <span
+                      className={
+                        "au-selo " + (selo.status === "ligar" ? "ligar" : selo.status === "nao_ligar" ? "nao" : "sem")
+                      }
+                    >
+                      {selo.status === "ligar" ? "Ligar" : selo.status === "nao_ligar" ? "Não ligar" : "Sem conversa"}
+                    </span>
+                    {selo.motivo && <span className="au-balao">{selo.motivo}</span>}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+          {leadsVisiveis.length < leadsFiltrados.length && (
+            <div className="au-more" ref={sentinelaRef}>
+              <span className="au-spin" /> carregando mais…
+            </div>
+          )}
         </div>
       )}
-    </div>
+    </>
   );
-}
 
-/** Uma linha de lead com badge de envio (idle/enviando/enviado/desconectado/erro) e botão à direita. */
-function LinhaLead({
-  lead,
-  estadoEnvio,
-  habilitado,
-  avisoAtivo,
-  onEnviar,
-}: {
-  lead: LeadAudioReal;
-  estadoEnvio: EstadoEnvioLinha;
-  habilitado: boolean;
-  avisoAtivo: boolean;
-  onEnviar: () => void;
-}) {
+  // Embutido (vista "Áudios" do dropdown de Ações): só o conteúdo — o título
+  // já é o próprio dropdown da tela-mãe; sem wrapper `.view` (o pai já é a tela).
+  if (embutido) {
+    return (
+      <>
+        <style>{AU_CSS}</style>
+        {conteudo}
+      </>
+    );
+  }
+
+  // Tela própria (/audios) — rota direta de rollback, sem dropdown.
   return (
-    <div className="task" style={{ alignItems: "center" }}>
-      <span className="av">{iniciais(lead.nome)}</span>
-      <span style={{ flex: 1, minWidth: 0 }}>
-        <span className="tn trunc" style={{ display: "block" }}>
-          {lead.nome}
-        </span>
-        <span className="tm trunc" style={{ display: "block" }}>
-          {fmtTelefone(lead.telefone)}
-        </span>
-        {lead.origem && (
-          <span className="tags" style={{ marginTop: 7 }}>
-            <span className="tag">{lead.origem}</span>
-          </span>
-        )}
-
-        {estadoEnvio.tipo === "enviando" && (
-          <span className="tags" style={{ marginTop: 7 }}>
-            <span className="tag pe">Aguardando ritmo seguro…</span>
-          </span>
-        )}
-        {estadoEnvio.tipo === "enviado" && (
-          <span className="tags" style={{ marginTop: 7 }}>
-            <span className="tag ok">Áudio enviado · {estadoEnvio.hora}</span>
-          </span>
-        )}
-        {estadoEnvio.tipo === "desconectado" && (
-          <div style={{ fontSize: 11.5, marginTop: 6, color: "#ff9b9b", lineHeight: 1.4 }}>
-            Não foi possível enviar — o número está desconectado. Reconecte o WhatsApp e tente de
-            novo.
-          </div>
-        )}
-        {estadoEnvio.tipo === "sem-whatsapp" && (
-          <div style={{ fontSize: 11.5, marginTop: 6, color: "#ff9b9b", lineHeight: 1.4 }}>
-            Sem WhatsApp — pulado. Este número não tem WhatsApp; siga pelo contato manual.
-          </div>
-        )}
-        {estadoEnvio.tipo === "erro" && (
-          <button
-            type="button"
-            onClick={onEnviar}
-            style={{ fontSize: 11.5, marginTop: 6, color: "#ff9b9b", textAlign: "left" }}
-          >
-            O envio falhou. Toque para tentar de novo.
-          </button>
-        )}
-        {avisoAtivo && (
-          <div className="dim2" style={{ fontSize: 11, marginTop: 6 }}>
-            grave um áudio primeiro
-          </div>
-        )}
-      </span>
-      <button
-        type="button"
-        className="cta"
-        onClick={onEnviar}
-        disabled={estadoEnvio.tipo === "enviando"}
-        aria-label="Enviar áudio"
-        style={{
-          flex: "none",
-          width: "auto",
-          padding: "9px 14px",
-          fontSize: "var(--t-micro)",
-          minWidth: 44,
-          minHeight: 44,
-          opacity: habilitado || estadoEnvio.tipo === "enviando" ? 1 : 0.4,
-        }}
-      >
-        Enviar áudio
-      </button>
+    <div className="view au-view">
+      <style>{AU_CSS}</style>
+      <Vhead titulo="Áudios" sub="mandar pros nunca-ligados" live={conectado ? "conectado" : undefined} />
+      {conteudo}
     </div>
   );
 }
+
+const AU_CSS = `
+.au-view{ position:relative; }
+.au-list{ display:flex; flex-direction:column; gap:0; }
+.au-row{ display:flex; align-items:center; gap:12px; padding:11px 4px; cursor:pointer; position:relative; border-radius:12px; transition:background .12s; -webkit-tap-highlight-color:transparent; }
+.au-row:active{ background:var(--card); }
+.au-row:focus-visible{ outline:2px solid var(--go); outline-offset:2px; }
+.au-row + .au-row::before{ content:""; position:absolute; left:60px; right:6px; top:0; height:1px; background:var(--line); }
+.au-av{ width:47px; height:47px; border-radius:50%; flex:none; display:grid; place-items:center; color:#0b141a; font-weight:800; font-size:15px; position:relative; }
+.au-dot{ position:absolute; top:-1px; right:-1px; width:13px; height:13px; border-radius:50%; background:var(--go); border:2.5px solid var(--bg-0); }
+.au-prev{ font-size:12.5px; font-weight:700; color:var(--go); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.au-av.sm{ width:38px; height:38px; font-size:13px; }
+.au-rc{ flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.au-name{ font-size:15px; font-weight:700; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.au-sub{ font-size:13px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; gap:5px; }
+.au-sub.sent{ color:var(--go); }
+.au-sub.semwa{ color:var(--alert); }
+.au-trail{ flex:none; width:26px; display:grid; place-items:center; color:var(--go); }
+.au-ck{ color:var(--go); }
+/* selo "posso ligar?" + balão do motivo, no canto direito da linha */
+.au-lado{ flex:none; display:flex; flex-direction:column; align-items:flex-end; gap:4px; max-width:172px; }
+.au-selo{ font-size:10px; font-weight:800; letter-spacing:.03em; text-transform:uppercase; padding:3px 8px; border-radius:999px; white-space:nowrap; }
+.au-selo.ligar{ background:color-mix(in srgb, var(--go) 18%, transparent); color:var(--go); }
+.au-selo.nao{ background:color-mix(in srgb, var(--alert) 16%, transparent); color:var(--alert); }
+.au-selo.sem{ background:var(--card-2); color:var(--dim); }
+/* motivo INTEIRO, sem cortar (pedido do gestor): o balão cresce em altura,
+   quebra linha e a linha da lista acompanha — legibilidade > compacidade. */
+.au-balao{ max-width:100%; font-size:10.5px; line-height:1.4; color:var(--dim); background:var(--card-2); border-radius:10px 10px 3px 10px; padding:5px 9px; white-space:normal; overflow-wrap:break-word; text-align:right; }
+.au-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--go); animation:auSpin .7s linear infinite; }
+.au-spin.lg{ width:20px; height:20px; border-color:rgba(6,32,21,.35); border-top-color:#062015; }
+@keyframes auSpin{ to{ transform:rotate(360deg); } }
+.au-more{ display:flex; align-items:center; justify-content:center; gap:8px; padding:14px; color:var(--dim-2); font-size:12.5px; }
+
+
+/* ── conversa ── */
+.au-conv{ position:fixed; inset:0; z-index:200; display:flex; flex-direction:column; background:var(--bg-0); }
+.au-chead{ flex:none; display:flex; align-items:center; gap:8px; padding:calc(var(--safe-t) + 8px) 10px 10px 2px; background:var(--bg-1); border-bottom:1px solid var(--line); }
+.au-back{ background:none; border:none; color:var(--ink); cursor:pointer; padding:6px; display:grid; place-items:center; }
+.au-callbtn{ margin-left:auto; flex:none; width:38px; height:38px; border-radius:50%; border:none; background:var(--go); color:#fff; display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-callbtn:active{ filter:brightness(.9); }
+.au-callbtn:disabled{ opacity:.6; cursor:default; }
+.au-ct{ min-width:0; }
+.au-cnm{ font-size:16px; font-weight:700; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.au-cst{ font-size:12px; color:var(--dim); }
+.au-thread{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:8px; }
+.au-day{ align-self:center; background:var(--card-2); color:var(--dim); font-size:11px; padding:5px 12px; border-radius:8px; margin-bottom:4px; }
+.au-hintbig{ align-self:center; color:var(--dim); font-size:13.5px; text-align:center; margin:auto 24px; line-height:1.7; }
+.au-bubble{ align-self:flex-end; max-width:80%; background:color-mix(in srgb, var(--go) 24%, var(--bg-1)); border-radius:12px 12px 4px 12px; padding:8px 10px 6px; animation:auB .2s ease both; }
+.au-bubble.in{ align-self:flex-start; background:var(--card-2); border-radius:12px 12px 12px 4px; }
+.au-btxt{ font-size:14px; color:var(--ink); line-height:1.45; word-break:break-word; white-space:pre-wrap; }
+.au-trans{ margin-top:6px; padding-top:5px; border-top:1px solid color-mix(in srgb, var(--ink) 12%, transparent); font-size:12px; font-style:italic; color:var(--dim); line-height:1.5; }
+@keyframes auB{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:none; } }
+.au-voice{ display:flex; align-items:center; gap:9px; min-width:196px; }
+.au-vplay{ width:34px; height:34px; border-radius:50%; flex:none; display:grid; place-items:center; background:rgba(255,255,255,.14); color:var(--ink); border:none; cursor:pointer; padding:0; -webkit-tap-highlight-color:transparent; }
+.au-vplay:active{ transform:scale(.92); }
+.au-vplay.off{ opacity:.55; cursor:default; }
+.au-vwave{ flex:1; display:flex; align-items:center; gap:2.5px; height:24px; }
+.au-vwave i{ width:3px; border-radius:3px; background:var(--ink); opacity:.7; display:block; }
+.au-vwave.play i{ animation:auEq .9s ease-in-out infinite; }
+.au-vdur{ font-size:11px; color:var(--dim); flex:none; }
+.au-meta{ display:flex; align-items:center; gap:4px; justify-content:flex-end; margin-top:3px; font-size:10.5px; color:var(--dim); }
+.au-mck{ color:var(--go); }
+.au-mwait{ color:var(--dim); opacity:.85; }
+.au-sysmsg{ align-self:center; background:var(--card-2); color:var(--dim); font-size:12.5px; padding:7px 14px; border-radius:10px; text-align:center; max-width:86%; }
+.au-sysmsg.semwa{ color:var(--alert); }
+
+/* compose (conversa) */
+.au-compose{ flex:none; display:flex; align-items:center; gap:9px; padding:10px 10px calc(10px + var(--safe-b)); background:var(--bg-1); border-top:1px solid var(--line); }
+.au-view .au-compose{ position:fixed; left:50%; transform:translateX(-50%); bottom:calc(var(--tabbar-h) + var(--tabbar-gap) * 2 + var(--safe-b) + 10px); width:min(620px, calc(100% - var(--pad-x) * 2)); background:transparent; border:none; padding:0; z-index:30; }
+.au-field{ flex:1; min-height:50px; background:var(--bg-2); border:1px solid var(--line); border-radius:26px; display:flex; align-items:center; gap:10px; padding:0 10px 0 16px; overflow:hidden; color:var(--dim); font-size:14px; box-shadow:0 4px 14px rgba(0,0,0,.25); }
+.au-field .au-hint{ flex:1; }
+.au-txtin{ flex:1; min-width:0; height:100%; background:none; border:none; outline:none; color:var(--ink); font-size:14.5px; }
+.au-txtin::placeholder{ color:var(--dim); }
+.au-field.rec{ color:var(--ink); }
+.au-recdot{ width:11px; height:11px; border-radius:50%; background:var(--alert); flex:none; animation:auBlink 1s steps(2,start) infinite; }
+@keyframes auBlink{ 50%{ opacity:.25; } }
+.au-rectime{ font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums; }
+.au-slide{ margin-left:auto; color:var(--dim-2); font-size:12.5px; padding-right:6px; }
+.au-field.ready{ color:var(--ink); }
+.au-play{ width:32px; height:32px; border-radius:50%; flex:none; border:none; cursor:pointer; display:grid; place-items:center; background:color-mix(in srgb, var(--go) 18%, transparent); color:var(--go); }
+.au-wave{ flex:1; display:flex; align-items:center; gap:3px; height:26px; overflow:hidden; }
+.au-wave i{ width:3px; border-radius:3px; background:var(--go); opacity:.6; display:block; }
+.au-wave.play i{ animation:auEq .9s ease-in-out infinite; }
+@keyframes auEq{ 50%{ transform:scaleY(.4); } }
+.au-dur{ font-size:12.5px; color:var(--dim); font-variant-numeric:tabular-nums; flex:none; }
+.au-trashmini{ flex:none; background:none; border:none; color:var(--dim-2); padding:0 2px; cursor:pointer; display:grid; place-items:center; }
+.au-mic{ width:54px; height:54px; border-radius:50%; flex:none; border:none; cursor:pointer; background:var(--go); color:#062015; display:grid; place-items:center; box-shadow:0 4px 14px color-mix(in srgb, var(--go) 45%, transparent); transition:transform .1s, background .2s; touch-action:none; user-select:none; }
+.au-mic:active{ transform:scale(.94); }
+.au-mic.recording{ background:var(--alert); color:#fff; transform:scale(1.14); box-shadow:0 0 0 8px color-mix(in srgb, var(--alert) 16%, transparent); }
+.au-mic.send{ background:var(--go-strong, var(--go)); }
+.au-mic:disabled{ opacity:.7; }
+@media (prefers-reduced-motion:reduce){ .au-spin,.au-recdot,.au-wave i,.au-mic,.au-bubble{ animation:none!important; transition:none!important; } }
+`;

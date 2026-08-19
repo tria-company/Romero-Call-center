@@ -55,17 +55,13 @@ export default function manifest(): MetadataRoute.Manifest {
       tela("perfil", "Perfil do apoiador, com pet e atendimentos"),
     ],
 
+    // ENVIO-08: o menu do gestor virou Início · Ações · Perfil (Base saiu). O
+    // atalho de app segue o mesmo corte — só "Ações" (Fila + áudios), sem Base.
     shortcuts: [
       {
-        name: "Fila de hoje",
-        short_name: "Fila",
+        name: "Ações de hoje",
+        short_name: "Ações",
         url: "/fila",
-        icons: [{ src: "/icones/192", sizes: "192x192", type: "image/png" }],
-      },
-      {
-        name: "Base",
-        short_name: "Base",
-        url: "/base",
         icons: [{ src: "/icones/192", sizes: "192x192", type: "image/png" }],
       },
     ],

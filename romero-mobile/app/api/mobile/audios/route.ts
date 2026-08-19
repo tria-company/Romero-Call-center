@@ -19,7 +19,9 @@ export async function GET() {
   const gate = await exigirRomero();
   if (!gate.ok) return gate.resposta;
 
-  const r = await chamarDiscador("/api/discador/audios", gate.sessao.dToken);
+  // 60s: o backend varre o ClickUp (~15s no lote real, com variância) — o
+  // default de 8s da ponte abortava ANTES da resposta e a lista nunca chegava.
+  const r = await chamarDiscador("/api/discador/audios", gate.sessao.dToken, { timeoutMs: 60_000 });
 
   return NextResponse.json(r.dados ?? { erro: "Sem resposta." }, {
     status: r.status,
