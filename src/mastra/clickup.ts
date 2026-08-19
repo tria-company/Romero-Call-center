@@ -1052,10 +1052,28 @@ export async function criarLigacaoAvulsa(telefone: string, assigneeId?: string):
   }
 
   try {
-    const { tasks: leads } = await listarTasks(CLICKUP_LIST_LEADS);
-    const leadMatch = leads.find((t) =>
-      telefonesIguais(t.custom_fields?.find((c) => c.id === CAMPOS_LEADS.TELEFONE)?.value, telefone),
+    // 2026-08-19: o vínculo ao lead passou a buscar por FILTRO SERVER-SIDE do
+    // ClickUp (campo TELEFONE da Lista 01), com e sem o nono dígito — antes a
+    // varredura era só a PÁGINA 0 (100 de ~100k leads) e quase nunca achava
+    // (era por isso que avulsas ficavam sem vínculo/dossiê). Cada query ~2-3s;
+    // telefonesIguais revalida o match (o filtro do servidor é tolerante).
+    const d = telefone.replace(/\D/g, '');
+    const comPais = d.length >= 12 ? d : `55${d}`;
+    const candidatos = new Set<string>([`+${comPais}`]);
+    if (comPais.length === 12) candidatos.add(`+${comPais.slice(0, 4)}9${comPais.slice(4)}`);
+    if (comPais.length === 13 && comPais[4] === '9') candidatos.add(`+${comPais.slice(0, 4)}${comPais.slice(5)}`);
+    const resultados = await Promise.all(
+      [...candidatos].map((v) =>
+        listarTasks(CLICKUP_LIST_LEADS, {
+          customFields: [{ field_id: CAMPOS_LEADS.TELEFONE, operator: '=', value: v }],
+        })
+          .then((r) => r.tasks)
+          .catch(() => [] as TaskClickUp[]),
+      ),
     );
+    const leadMatch = resultados
+      .flat()
+      .find((t) => telefonesIguais(t.custom_fields?.find((c) => c.id === CAMPOS_LEADS.TELEFONE)?.value, telefone));
     if (leadMatch) {
       const idLead = String(
         leadMatch.custom_fields?.find((c) => c.id === CAMPOS_LEADS.ID_LEAD_GHL)?.value ?? leadMatch.id,

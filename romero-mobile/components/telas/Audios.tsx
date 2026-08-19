@@ -388,6 +388,11 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
 
   /* ── Conversa por lead + dropdown ─────────────────────────────────────── */
   const [leadAberto, setLeadAberto] = React.useState<LeadAudioReal | null>(null);
+  /* Bolinha de não-lida: o backend marca lido_em ao abrir a conversa, mas a
+     LISTA só refletia no poll de 30s — o operador voltava e via a bolinha
+     ainda acesa ("não marcou"). `lidosLocais` apaga OTIMISTA no toque; o
+     refresh seguinte confirma com o dado real. */
+  const [lidosLocais, setLidosLocais] = React.useState<Set<string>>(() => new Set());
   /* Ficha (dossiê + histórico) como overlay da conversa (2026-08-19) — abre no
      toque do NOME, fecha no voltar; trocar/fechar a conversa fecha junto. */
   const [fichaAberta, setFichaAberta] = React.useState(false);
@@ -961,6 +966,12 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                 ligarParaLead(lead);
                 return;
               }
+              // bolinha apaga NA HORA (o backend marca lido_em em paralelo)
+              setLidosLocais((p) => {
+                const n = new Set(p);
+                n.add(lead.leadTaskId);
+                return n;
+              });
               setLeadAberto(lead);
             };
             return (
@@ -968,15 +979,16 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                 <span className="au-av" style={{ background: corAvatar(lead.nome) }}>
                   {iniciais(lead.nome)}
                   {/* bolinha: mensagem do LEAD ainda NÃO LIDA — abrir a
-                      conversa marca como lida (no banco) e apaga a bolinha */}
-                  {lead.ultima && !lead.ultima.deNos && !lead.ultima.lida && (
+                      conversa marca como lida (banco) e apaga na hora
+                      (lidosLocais, otimista) */}
+                  {lead.ultima && !lead.ultima.deNos && !lead.ultima.lida && !lidosLocais.has(lead.leadTaskId) && (
                     <span className="au-dot" aria-label="Mensagem nova do lead" />
                   )}
                 </span>
                 <span className="au-rc">
                   <span className="au-name">{lead.nome}</span>
                   <span className={"au-sub " + st.cls}>{st.txt}</span>
-                  {lead.ultima && !lead.ultima.deNos && !lead.ultima.lida && lead.ultima.preview && (
+                  {lead.ultima && !lead.ultima.deNos && !lead.ultima.lida && !lidosLocais.has(lead.leadTaskId) && lead.ultima.preview && (
                     <span className="au-prev">{lead.ultima.preview}</span>
                   )}
                 </span>

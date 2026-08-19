@@ -75,6 +75,9 @@ import {
   // primitivos do desfecho (metadados + comentário + fechar), semântica própria.
   gravarMetadadosLigacao,
   fecharLigacao,
+  // Inbound → fila (2026-08-19): quem manda mensagem ganha Ligação; LEAD_REL
+  // da task recém-criada propaga o vínculo pro mapa/DB de mensagens.
+  CAMPOS_LIGACOES,
   // quick-260815-r3: "Ligar" na ficha cria uma Ligação avulsa ATRIBUÍDA ao
   // operador (deep-link do discador). valorCampoLead/CAMPOS_LEADS leem o
   // telefone do lead pra criar a avulsa (choke point de leitura de campo).
@@ -170,6 +173,57 @@ const ultimosEventosWebhook: unknown[] = [];
  *  no pior caso re-avisa uma queda antiga respeitando o cooldown). */
 let ultimoAlertaQuedaTs = 0;
 let quedaAlertada = false;
+/** INBOUND → FILA (2026-08-19, pedido do gestor): "se uma pessoa mandar
+ *  mensagem para o número, tem que aparecer na tela" — mensagem recebida sem
+ *  Ligação ABERTA do Romero pra aquele telefone cria uma avulsa na hora
+ *  (criarLigacaoAvulsa acha e vincula o LEAD da base pelo telefone via filtro
+ *  server-side → dossiê/histórico/chat funcionam) e a linha entra na lista no
+ *  próximo refresh. Mutex por telefone + cooldown seguram rajadas; grupos/
+ *  newsletters nunca chegam aqui (filtro do webhook). Nunca lança. */
+const criandoInbound = new Set<string>();
+const ultimoInboundTs = new Map<string, number>();
+const COOLDOWN_INBOUND_MS = 10 * 60_000;
+async function garantirLigacaoInbound(telefoneCanon: string, telefoneBruto: string): Promise<void> {
+  if (!telefoneCanon || !telefoneBruto) return;
+  const agora = Date.now();
+  if (criandoInbound.has(telefoneCanon)) return;
+  if (agora - (ultimoInboundTs.get(telefoneCanon) ?? 0) < COOLDOWN_INBOUND_MS) return;
+  criandoInbound.add(telefoneCanon);
+  try {
+    const assignee = assigneeDoOperador('romero');
+    if (!assignee) return;
+    // dedupe: já existe Ligação ABERTA do Romero com esse telefone? (a fila é
+    // cache-aside — barato; a comparação canônica tolera o nono dígito)
+    const fila = await buscarFilaLigacoes(assignee);
+    if (fila.some((i) => telefoneCanonico(i.telefone) === telefoneCanon)) {
+      ultimoInboundTs.set(telefoneCanon, agora);
+      return;
+    }
+    const { id } = await criarLigacaoAvulsa(telefoneBruto, assignee);
+    ultimoInboundTs.set(telefoneCanon, agora);
+    await invalidarFilaCache(assignee);
+    // propaga o vínculo (se criarLigacaoAvulsa achou o lead): mapa em memória
+    // pro restante do pipeline + lead_task_id retroativo nas mensagens do DB.
+    let leadId = '';
+    try {
+      const task = await lerTask(id);
+      const rel = task?.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.LEAD_REL)?.value;
+      leadId = Array.isArray(rel) && rel[0] ? String((rel[0] as { id?: unknown })?.id ?? rel[0]) : '';
+      if (leadId) {
+        leadPorTelefone.set(telefoneCanon, leadId);
+        void vincularLeadMensagensWhatsapp(telefoneCanon, leadId).catch(() => {});
+      }
+    } catch {
+      /* vínculo é best-effort — a task já existe e a linha vai aparecer */
+    }
+    // LGPD: nunca logar o telefone — só o id da task criada.
+    console.log(`[webhook] inbound sem Ligação aberta → task ${id} criada (lead ${leadId ? 'vinculado' : 'não encontrado'})`);
+  } catch (e) {
+    console.warn('[webhook] inbound: falha ao criar a Ligação:', e instanceof Error ? e.message : String(e));
+  } finally {
+    criandoInbound.delete(telefoneCanon);
+  }
+}
 /** telefone canônico (dígitos sem nono) → leadTaskId — populado pelos handlers
  *  de lista/conversa; permite ao WEBHOOK achar o lead pra avaliar. */
 const leadPorTelefone = new Map<string, string>();
@@ -2190,6 +2244,10 @@ export const mastra = new Mastra({
             // avaliação com debounce disparada PELO webhook (não depende da
             // conversa estar aberta no painel) — pedido do gestor.
             agendarAvaliacaoPorTelefone(rec.digitos, rec.ts);
+            // INBOUND → FILA (2026-08-19): sem Ligação aberta pra esse
+            // telefone, cria a avulsa (vínculo ao lead por telefone) — a
+            // pessoa APARECE na tela do Romero. Fire-and-forget.
+            void garantirLigacaoInbound(canonRec, rec.digitos[0] ?? '');
             console.log(`[webhook] mensagem recebida (${rec.tipo})`);
           }
           return c.json({ ok: true });
