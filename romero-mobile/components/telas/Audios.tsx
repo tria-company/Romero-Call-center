@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Send } from "lucide-react";
+import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Search, Send, X } from "lucide-react";
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { iniciarLigacaoReal } from "@/lib/leads-real";
@@ -63,16 +63,38 @@ function fmtQuandoBolha(em: number): string {
 /** Situação do último envio numa conversa (pra mostrar aviso no fio). */
 type SituacaoLead = "sem-whatsapp" | "desconectado" | "erro" | null;
 
+/** Selo por status (modelo de 4 estados, 2026-08-19) — rótulo + classe de cor.
+ *  enviar_audio = nada enviado/aguardando; indefinido = respondeu neutro (Romero
+ *  decide); ligar/nao_ligar = desfecho claro. */
+const SELO_UI: Record<"ligar" | "nao_ligar" | "indefinido" | "aguardando" | "enviar_audio", { rotulo: string; cls: string }> = {
+  enviar_audio: { rotulo: "Enviar áudio", cls: "envaudio" },
+  aguardando: { rotulo: "Aguardando", cls: "aguard" },
+  indefinido: { rotulo: "Indefinido", cls: "indef" },
+  ligar: { rotulo: "Ligar", cls: "ligar" },
+  nao_ligar: { rotulo: "Não ligar", cls: "nao" },
+};
+
 export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
-  const { leads, carregando, erro, recarregar, conectado } = useAudiosReais();
+  const { leads, carregando, erro, semMapeamento, recarregar, conectado } = useAudiosReais();
   /* Filtro pelo selo (2026-08-19) — o backend já manda a lista ordenada por
      última mensagem (quem falou por último no topo, estilo WhatsApp). */
-  const [filtroSelo, setFiltroSelo] = React.useState<"todos" | "ligar" | "nao_ligar" | "sem_conversa">("todos");
+  const [filtroSelo, setFiltroSelo] = React.useState<"todos" | "enviar_audio" | "aguardando" | "indefinido" | "ligar" | "nao_ligar">("todos");
+  /* Busca (2026-08-19) por nome OU telefone — filtra o LOTE já carregado (os
+     nunca-ligados de hoje), não a base inteira. Telefone casa por dígitos
+     (ignora +, espaços, parênteses). Compõe com o filtro de selo. */
+  const [busca, setBusca] = React.useState("");
 
-  const leadsFiltrados = React.useMemo(
-    () => (filtroSelo === "todos" ? leads : leads.filter((l) => (l.conversa?.status ?? "sem_conversa") === filtroSelo)),
-    [leads, filtroSelo],
-  );
+  const leadsFiltrados = React.useMemo(() => {
+    const porSelo = filtroSelo === "todos" ? leads : leads.filter((l) => (l.conversa?.status ?? "enviar_audio") === filtroSelo);
+    const q = busca.trim().toLowerCase();
+    if (!q) return porSelo;
+    const qDigitos = q.replace(/\D/g, "");
+    return porSelo.filter((l) => {
+      const nomeBate = l.nome.toLowerCase().includes(q);
+      const telBate = qDigitos.length > 0 && l.telefone.replace(/\D/g, "").includes(qDigitos);
+      return nomeBate || telBate;
+    });
+  }, [leads, filtroSelo, busca]);
 
   // "Apareça 10 e vá carregando" — por ROLAGEM (2026-08-19): o sentinela no fim
   // da lista (`au-more`) revela +10 ao entrar na viewport, no lugar do timer de
@@ -80,7 +102,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   const [visiveis, setVisiveis] = React.useState(10);
   React.useEffect(() => {
     setVisiveis(10);
-  }, [filtroSelo]);
+  }, [filtroSelo, busca]);
   const sentinelaRef = React.useRef<HTMLDivElement | null>(null);
   React.useEffect(() => {
     if (visiveis >= leadsFiltrados.length) return;
@@ -122,6 +144,15 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   function ligarParaLead(lead: LeadAudioReal) {
     if (ligando) return;
     vibrar();
+    // Fonte "fila" (2026-08-19): a linha JÁ é uma Ligação — handoff direto na
+    // MESMA aba com auto=1, exatamente como a fila clássica liga hoje (u7:
+    // mesma origem; o "voltar" do discador devolve pra cá).
+    if (lead.ligacaoTaskId) {
+      window.location.href = urlCallCenter(tokenCC, lead.ligacaoTaskId) + "&auto=1";
+      return;
+    }
+    // Fonte nunca-ligados (sem Ligação ainda): cria a avulsa e abre em aba nova
+    // (mesmo circuito do PerfilLead — window.open síncrono no gesto).
     setLigando(true);
     const w = window.open("about:blank", "_blank");
     iniciarLigacaoReal(lead.leadTaskId).then((taskId) => {
@@ -130,8 +161,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         if (w) w.close(); // sem Ligação criada: fecha a aba órfã (igual PerfilLead)
         return;
       }
-      // auto=1: o discador disca SOZINHO ao abrir a Ligação (pedido 2026-08-19
-      // — um toque = ligar). O fragmento já existe (task sempre presente aqui).
+      // auto=1: o discador disca SOZINHO ao abrir a Ligação (um toque = ligar).
       const url = urlCallCenter(tokenCC, taskId) + "&auto=1";
       if (w) {
         w.location.href = url;
@@ -729,6 +759,25 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         </Autobox>
       )}
 
+      {/* Busca por nome ou telefone (pedido 2026-08-19) — filtra o lote de hoje. */}
+      <div className="au-search">
+        <Search size={18} className="au-search-ic" aria-hidden />
+        <input
+          type="search"
+          inputMode="search"
+          className="au-search-in"
+          placeholder="Buscar por nome ou telefone…"
+          value={busca}
+          onChange={(e) => setBusca(e.target.value)}
+          aria-label="Buscar lead por nome ou telefone"
+        />
+        {busca && (
+          <button type="button" className="au-search-x" onClick={() => setBusca("")} aria-label="Limpar busca">
+            <X size={16} />
+          </button>
+        )}
+      </div>
+
       {/* Filtro pelo SELO da conversa (pedido 2026-08-19) — substitui os chips
           de origem (ENVIO-04): o operador filtra por "posso ligar?", não por
           onde o lead entrou. */}
@@ -736,9 +785,11 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         {(
           [
             ["todos", "Todos"],
+            ["enviar_audio", "Enviar áudio"],
+            ["aguardando", "Aguardando"],
+            ["indefinido", "Indefinido"],
             ["ligar", "Ligar"],
             ["nao_ligar", "Não ligar"],
-            ["sem_conversa", "Sem conversa"],
           ] as const
         ).map(([valor, rotulo]) => (
           <button
@@ -766,10 +817,23 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             tentar de novo
           </button>
         </div>
+      ) : semMapeamento ? (
+        <Autobox tom="warn" titulo="Fila não configurada">
+          Configure o mapeamento do operador no discador (painel /admin do call center).
+        </Autobox>
       ) : leadsFiltrados.length === 0 ? (
         <div className="empty">
-          <b>Nenhum lead pendente aqui</b>
-          Todos os leads já foram contatados ou não há leads dessa origem ainda.
+          {busca.trim() ? (
+            <>
+              <b>Nada encontrado</b>
+              Nenhum lead de hoje bate com “{busca.trim()}”.
+            </>
+          ) : (
+            <>
+              <b>Nenhuma ligação pra você aqui</b>
+              Quando criarem uma Ligação pra você, o lead aparece nesta lista.
+            </>
+          )}
         </div>
       ) : (
         <div className="au-list" role="list">
@@ -781,8 +845,17 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
               situacaoPorLead[lead.leadTaskId] === "sem-whatsapp"
                 ? { status: "nao_ligar" as const, motivo: "Número sem WhatsApp" }
                 : lead.conversa;
+            // Linha SEM lead vinculado (Ligação avulsa/manual sem LEAD_REL):
+            // não há conversa possível — o toque LIGA direto (handoff auto=1).
+            const abrir = () => {
+              if (!lead.leadTaskId) {
+                ligarParaLead(lead);
+                return;
+              }
+              setLeadAberto(lead);
+            };
             return (
-              <div key={lead.leadTaskId} className="au-row" role="listitem" tabIndex={0} onClick={() => setLeadAberto(lead)} onKeyDown={(e) => (e.key === "Enter" ? setLeadAberto(lead) : null)}>
+              <div key={lead.leadTaskId || lead.ligacaoTaskId} className="au-row" role="listitem" tabIndex={0} onClick={abrir} onKeyDown={(e) => (e.key === "Enter" ? abrir() : null)}>
                 <span className="au-av" style={{ background: corAvatar(lead.nome) }}>
                   {iniciais(lead.nome)}
                   {/* bolinha: mensagem do LEAD ainda NÃO LIDA — abrir a
@@ -800,13 +873,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                 </span>
                 {selo && (
                   <span className="au-lado">
-                    <span
-                      className={
-                        "au-selo " + (selo.status === "ligar" ? "ligar" : selo.status === "nao_ligar" ? "nao" : "sem")
-                      }
-                    >
-                      {selo.status === "ligar" ? "Ligar" : selo.status === "nao_ligar" ? "Não ligar" : "Sem conversa"}
-                    </span>
+                    <span className={"au-selo " + SELO_UI[selo.status].cls}>{SELO_UI[selo.status].rotulo}</span>
                     {selo.motivo && <span className="au-balao">{selo.motivo}</span>}
                   </span>
                 )}
@@ -838,7 +905,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   return (
     <div className="view au-view">
       <style>{AU_CSS}</style>
-      <Vhead titulo="Áudios" sub="mandar pros nunca-ligados" live={conectado ? "conectado" : undefined} />
+      <Vhead titulo="Áudios" sub="sua fila — mensagem, áudio e ligação" live={conectado ? "conectado" : undefined} />
       {conteudo}
     </div>
   );
@@ -846,6 +913,14 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
 
 const AU_CSS = `
 .au-view{ position:relative; }
+.au-search{ position:relative; display:flex; align-items:center; margin:2px 0 10px; }
+.au-search-ic{ position:absolute; left:12px; color:var(--dim); pointer-events:none; }
+.au-search-in{ width:100%; box-sizing:border-box; padding:11px 38px 11px 38px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:15px; outline:none; -webkit-appearance:none; }
+.au-search-in::placeholder{ color:var(--dim); }
+.au-search-in:focus{ border-color:var(--go); }
+.au-search-in::-webkit-search-cancel-button{ display:none; }
+.au-search-x{ position:absolute; right:8px; width:26px; height:26px; border:none; border-radius:50%; background:transparent; color:var(--dim); display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-search-x:active{ background:var(--line); }
 .au-list{ display:flex; flex-direction:column; gap:0; }
 .au-row{ display:flex; align-items:center; gap:12px; padding:11px 4px; cursor:pointer; position:relative; border-radius:12px; transition:background .12s; -webkit-tap-highlight-color:transparent; }
 .au-row:active{ background:var(--card); }
@@ -867,7 +942,9 @@ const AU_CSS = `
 .au-selo{ font-size:10px; font-weight:800; letter-spacing:.03em; text-transform:uppercase; padding:3px 8px; border-radius:999px; white-space:nowrap; }
 .au-selo.ligar{ background:color-mix(in srgb, var(--go) 18%, transparent); color:var(--go); }
 .au-selo.nao{ background:color-mix(in srgb, var(--alert) 16%, transparent); color:var(--alert); }
-.au-selo.sem{ background:var(--card-2); color:var(--dim); }
+.au-selo.indef{ background:color-mix(in srgb, #f5a623 20%, transparent); color:#f5a623; }
+.au-selo.envaudio{ background:color-mix(in srgb, var(--accent, #4a90e2) 18%, transparent); color:var(--accent, #4a90e2); }
+.au-selo.aguard{ background:var(--card-2); color:var(--dim); }
 /* motivo INTEIRO, sem cortar (pedido do gestor): o balão cresce em altura,
    quebra linha e a linha da lista acompanha — legibilidade > compacidade. */
 .au-balao{ max-width:100%; font-size:10.5px; line-height:1.4; color:var(--dim); background:var(--card-2); border-radius:10px 10px 3px 10px; padding:5px 9px; white-space:normal; overflow-wrap:break-word; text-align:right; }

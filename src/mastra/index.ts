@@ -226,13 +226,16 @@ function mesmoTelefoneDigitos(a: string, b: string): boolean {
   return !!A && !!B && (A === B || semNono(A) === semNono(B));
 }
 
-/* Selo "Ligar / Não ligar / Sem conversa" da lista (Fase 13 fatia 2).
-   Heurística EXPLÍCITA (MVP): recusa por palavras-chave na resposta; a análise
-   IA (Azure) da Fase 13 completa substitui esta régua sem mudar o contrato
-   {status, motivo}. Cache 60s da passada na Lista 03 (mesmo racional do lote). */
+/* Selo da lista (Fase 13; FUNIL de 5 etapas — pedido do gestor 2026-08-19):
+   - enviar_audio: etapa inicial, nada enviado ainda → a ação é mandar o áudio.
+   - aguardando: o áudio JÁ foi enviado, esperando a resposta do lead.
+   - indefinido: o lead respondeu, mas a resposta é NEUTRA — o Romero decide.
+   - ligar / nao_ligar: a resposta deixa claro o desfecho.
+   Heurística EXPLÍCITA de fallback (recusa por palavra-chave); a análise IA
+   (Azure) é a fonte principal. Cache 5min da passada na Lista 03. */
 const RECUSA_RE =
   /\b(n[aã]o\s+(quero|liga|ligue|me\s+ligue|tenho\s+interesse|perturb)|pare|para\s+de|remov[ae]|descadastr|sai\s+fora|nunca\s+mais|bloquea|denunci)\b/i;
-type StatusConversaLead = { status: 'ligar' | 'nao_ligar' | 'sem_conversa'; motivo: string };
+type StatusConversaLead = { status: 'ligar' | 'nao_ligar' | 'indefinido' | 'aguardando' | 'enviar_audio'; motivo: string };
 
 /* Avaliação da conversa (pedido do gestor 2026-08-19): TODA mensagem nova do
    lead reavalia o selo, mas com DEBOUNCE de 60s desde a ÚLTIMA mensagem — dá
@@ -242,7 +245,8 @@ type StatusConversaLead = { status: 'ligar' | 'nao_ligar' | 'sem_conversa'; moti
    persistido em ANALISE_IA no registro mais recente da Lista 03 (sobrevive a
    restart — `mapaConversaPorLead` lê de volta). */
 const AVALIACAO_DEBOUNCE_MS = 60_000;
-const avaliacaoPorLead = new Map<string, { paraContagem: number; status: 'ligar' | 'nao_ligar'; motivo: string }>();
+type DecisaoIA = 'ligar' | 'nao_ligar' | 'indefinido';
+const avaliacaoPorLead = new Map<string, { paraContagem: number; status: DecisaoIA; motivo: string }>();
 const avaliacaoEmVooPorLead = new Set<string>();
 
 async function avaliarConversaComDebounce(
@@ -261,17 +265,19 @@ async function avaliarConversaComDebounce(
       .map((m) => (limparRotuloFalante(m.transcricao) ?? m.texto ?? '').trim())
       .filter(Boolean)
       .join('\n');
-    let status: 'ligar' | 'nao_ligar' = corpo && RECUSA_RE.test(corpo) ? 'nao_ligar' : 'ligar';
-    let motivo = corpo ? `"${corpo.slice(0, 90)}"` : 'Respondeu — pode ligar';
+    // Heurística de fallback: só a recusa explícita vira 'nao_ligar'; qualquer
+    // outra resposta fica 'indefinido' (o LLM abaixo é quem decide 'ligar').
+    let status: DecisaoIA = corpo && RECUSA_RE.test(corpo) ? 'nao_ligar' : 'indefinido';
+    let motivo = corpo ? `"${corpo.slice(0, 90)}"` : 'Respondeu';
     try {
       const bruto = await chamarLLM(
         `Mensagens do lead:\n"""\n${corpo.slice(0, 1500)}\n"""`,
-        'Você avalia a resposta de um lead numa campanha de contato por WhatsApp. Responda APENAS um JSON {"ligar": boolean, "motivo": string}: "ligar"=true quando vale a pena ligar pra essa pessoa agora; "motivo" = frase curta (máx. 80 caracteres, português) explicando a decisão pro operador.',
+        'Você avalia a resposta de um lead numa campanha de contato por WhatsApp e classifica se vale a pena LIGAR pra essa pessoa agora. Responda APENAS um JSON {"decisao": "ligar" | "nao_ligar" | "indefinido", "motivo": string}. Use "ligar" quando a resposta demonstra interesse/abertura clara; "nao_ligar" quando recusa, pede pra parar ou demonstra hostilidade; "indefinido" quando a resposta é NEUTRA/ambígua e um humano precisa decidir. "motivo" = frase curta (máx. 80 caracteres, português) explicando a decisão pro operador.',
       );
       const m = bruto.match(/\{[\s\S]*\}/);
-      const j = m ? (JSON.parse(m[0]) as { ligar?: boolean; motivo?: string }) : null;
-      if (j && typeof j.ligar === 'boolean') {
-        status = j.ligar ? 'ligar' : 'nao_ligar';
+      const j = m ? (JSON.parse(m[0]) as { decisao?: string; motivo?: string }) : null;
+      if (j && (j.decisao === 'ligar' || j.decisao === 'nao_ligar' || j.decisao === 'indefinido')) {
+        status = j.decisao;
         if (j.motivo) motivo = String(j.motivo).slice(0, 120);
       }
     } catch (e) {
@@ -282,11 +288,8 @@ async function avaliarConversaComDebounce(
       const envios = await listarEnviosAudioDoLead(leadId);
       const ultimo = envios[envios.length - 1];
       if (ultimo?.taskId) {
-        await setCustomField(
-          ultimo.taskId,
-          CAMPOS_AUDIOS.ANALISE_IA,
-          `${status === 'ligar' ? 'LIGAR' : 'NÃO LIGAR'} — ${motivo}`,
-        );
+        const rotulo = status === 'ligar' ? 'LIGAR' : status === 'nao_ligar' ? 'NÃO LIGAR' : 'INDEFINIDO';
+        await setCustomField(ultimo.taskId, CAMPOS_AUDIOS.ANALISE_IA, `${rotulo} — ${motivo}`);
       }
     } catch (e) {
       console.warn('[discador] persistência da análise falhou:', e instanceof Error ? e.message : String(e));
@@ -301,16 +304,26 @@ function statusConversaDe(leadId: string, resumo?: ResumoConversaLead): StatusCo
   const aval = avaliacaoPorLead.get(leadId);
   if (aval) return { status: aval.status, motivo: aval.motivo };
   if (resumo?.analise) {
-    const naoLigar = resumo.analise.startsWith('NÃO LIGAR');
-    const motivo = resumo.analise.replace(/^(NÃO LIGAR|LIGAR)\s*—\s*/, '');
-    return { status: naoLigar ? 'nao_ligar' : 'ligar', motivo };
+    // rótulo persistido em ANALISE_IA: "INDEFINIDO — …" / "NÃO LIGAR — …" / "LIGAR — …"
+    const motivo = resumo.analise.replace(/^(NÃO LIGAR|LIGAR|INDEFINIDO)\s*—\s*/, '');
+    const status: StatusConversaLead['status'] = resumo.analise.startsWith('NÃO LIGAR')
+      ? 'nao_ligar'
+      : resumo.analise.startsWith('INDEFINIDO')
+        ? 'indefinido'
+        : 'ligar';
+    return { status, motivo };
   }
-  if (!resumo || resumo.envios === 0) return { status: 'sem_conversa', motivo: 'Nenhum contato ainda' };
-  if (!resumo.temResposta) return { status: 'sem_conversa', motivo: 'Mensagem enviada — sem resposta ainda' };
+  // funil: nada enviado → "Enviar áudio"; enviado sem resposta → "Aguardando".
+  if (!resumo || resumo.envios === 0) return { status: 'enviar_audio', motivo: 'Nenhum contato ainda' };
+  if (!resumo.temResposta) return { status: 'aguardando', motivo: 'Áudio enviado — aguardando resposta' };
+  // respondeu, mas sem avaliação IA: recusa explícita → não ligar; senão indefinido.
   if (resumo.respostaTexto && RECUSA_RE.test(resumo.respostaTexto)) {
     return { status: 'nao_ligar', motivo: `"${resumo.respostaTexto.slice(0, 90)}"` };
   }
-  return { status: 'ligar', motivo: resumo.respostaTexto ? `"${resumo.respostaTexto.slice(0, 90)}"` : 'Respondeu — pode ligar' };
+  return {
+    status: 'indefinido',
+    motivo: resumo.respostaTexto ? `"${resumo.respostaTexto.slice(0, 90)}"` : 'Respondeu — Romero decide',
+  };
 }
 let cacheStatusConversa: { mapa: Map<string, ResumoConversaLead>; em: number } | null = null;
 async function mapaConversaCacheado(): Promise<Map<string, ResumoConversaLead> | null> {
@@ -1484,6 +1497,74 @@ export const mastra = new Mastra({
           } catch (e) {
             console.error('[discador] erro ao buscar leads nunca-ligados:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao carregar os leads' }, 502);
+          }
+        },
+      },
+      {
+        // FILA DO ROMERO como lista de áudios (pedido do gestor 2026-08-19):
+        // "a fila de ligações É a lista de áudios" — cada task de Ligação
+        // criada pra ele vira uma linha com chat/áudio/ligação. Mesmo shape do
+        // GET /audios (selo do funil + última mensagem), MAIS `ligacaoTaskId`
+        // (a Ligação existente — o botão de ligar usa ela direto, sem criar
+        // avulsa). Sem itens sem leadTaskId não há conversa — ficam de fora.
+        path: '/api/discador/audios/fila',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const assignee = assigneeDoOperador(gate.usuario);
+          if (!assignee) return c.json({ leads: [], semMapeamento: true });
+          try {
+            const fila = await buscarFilaLigacoes(assignee);
+            const mapa = await mapaConversaCacheado();
+            const ultimas = await ultimasMensagensWhatsapp().catch((e) => {
+              console.warn('[discador] últimas mensagens indisponíveis (fila):', e instanceof Error ? e.message : String(e));
+              return null;
+            });
+            const leads = await Promise.all(
+              fila.map(async (i) => {
+                const leadTaskId = i.leadTaskId ?? '';
+                if (leadTaskId) leadPorTelefone.set(telefoneCanonico(i.telefone), leadTaskId);
+                // o nome da task vem "Ligação — <lead>"; avulsas vêm nomeadas
+                // pelo TELEFONE — nesses casos resolve o nome real no lead.
+                // prefixo com travessão (lote) OU hífen simples (manuais: "Ligação - Levi")
+                let nome = i.nome.replace(/^Ligação( avulsa)?\s*[—-]\s*/i, '');
+                if (leadTaskId && /^\+?\d[\d\s()-]*$/.test(nome)) {
+                  try {
+                    const task = await lerTask(leadTaskId);
+                    const doLead = task ? valorCampoLead(task as Parameters<typeof valorCampoLead>[0], CAMPOS_LEADS.NOME) : '';
+                    if (doLead) nome = doLead;
+                  } catch {
+                    /* mantém o telefone como nome — melhor que quebrar a lista */
+                  }
+                }
+                return {
+                  leadTaskId,
+                  ligacaoTaskId: i.taskId,
+                  nome,
+                  telefone: i.telefone,
+                  origem: '',
+                  // sem lead vinculado NÃO há conversa/chat — a linha entra
+                  // mesmo assim (a fila do Romero é TODA mostrada; sumir task
+                  // era o bug de 2026-08-19) e vira ligação direta no toque.
+                  conversa: leadTaskId
+                    ? statusConversaDe(leadTaskId, mapa?.get(leadTaskId))
+                    : { status: 'enviar_audio' as const, motivo: 'Sem lead vinculado — toque para ligar' },
+                  ultima: leadTaskId
+                    ? (ultimas?.porLead.get(leadTaskId) ??
+                       ultimas?.porTelefone.get(telefoneCanonico(i.telefone)) ??
+                       null)
+                    : (ultimas?.porTelefone.get(telefoneCanonico(i.telefone)) ?? null),
+                };
+              }),
+            );
+            // mesma régua da lista de áudios: quem falou por último no topo;
+            // sem mensagem, mantém a prioridade da fila (sort estável).
+            leads.sort((a, b) => (b.ultima?.ts ?? 0) - (a.ultima?.ts ?? 0));
+            return c.json({ leads, origens: [] });
+          } catch (e) {
+            console.error('[discador] erro na fila de áudios:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar a fila' }, 502);
           }
         },
       },
