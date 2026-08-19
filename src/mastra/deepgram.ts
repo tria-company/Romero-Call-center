@@ -291,6 +291,49 @@ export async function transcreverBytes(
 }
 
 /**
+ * Transcreve um áudio JÁ EM MEMÓRIA (mensagem de voz do WhatsApp — Fase 13):
+ * POST binário direto no /v1/listen, mesmos params/parse das calls (D-07),
+ * SEM rotularPapeis (voz única, não é diálogo de call). Fail-open: null em
+ * qualquer falha — o chamador decide seguir sem transcrição. LGPD: nunca loga
+ * bytes/telefone; só status/classe.
+ */
+export async function transcreverBuffer(bytes: Uint8Array, mimetype?: string): Promise<string | null> {
+  if (!DEEPGRAM_API_KEY) {
+    console.warn('[deepgram] DEEPGRAM_API_KEY nao configurado — transcricao pulada');
+    return null;
+  }
+  // Voz única (mensagem de WhatsApp): SEM diarização/utterances — com elas o
+  // parseTranscript montava "Falante 0: ..." (pedido 2026-08-19: só o texto).
+  // Só ESTA request muda; montarParamsListen segue intacto pro fluxo das calls.
+  const params = montarParamsListen();
+  params.set('diarize', 'false');
+  params.set('utterances', 'false');
+  try {
+    const res = await fetchTimeout(
+      `${DEEPGRAM_URL}?${params.toString()}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+          'Content-Type': (mimetype || 'audio/ogg').split(';')[0],
+          'Accept': 'application/json',
+        },
+        body: bytes as unknown as BodyInit,
+      },
+      TIMEOUT_TRANSCRICAO_MS,
+    );
+    if (!res.ok) {
+      console.error(`[deepgram] transcreverBuffer POST /v1/listen falhou (${res.status})`);
+      return null;
+    }
+    return parseTranscript(await res.json());
+  } catch (e) {
+    console.error('[deepgram] transcreverBuffer erro:', e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
+
+/**
  * Transcreve a gravacao da call a partir da record_url (Deepgram pre-recorded,
  * url-mode). Em falha 4xx do POST url-mode (ex: 411), cai pro fallback
  * binario (download + re-POST de bytes). Retorna o transcript (rotulado por

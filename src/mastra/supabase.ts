@@ -26,6 +26,7 @@ import {
   SUPABASE_TABLES_SERVICOS,
   SUPABASE_TABLE_WEBHOOK_EVENTOS,
   SUPABASE_TABLE_LEADS_ESPELHO,
+  SUPABASE_TABLE_MENSAGENS_WHATSAPP,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -660,6 +661,303 @@ export async function contarVotosEspelho(): Promise<{
     andressa: andressa ?? 0,
     apoiadores: apoiadores ?? 0,
   };
+}
+
+// ===== Conversa WhatsApp por lead (Fase 13 — campanha de áudios, sql/escala/03) =====
+//
+// Read-model da conversa (dois lados) + durabilidade das mensagens do webhook
+// Evolution: a UI lê daqui (ms, indexado) e nada se perde em restart do processo.
+// ClickUp Lista 03 segue o REGISTRO operacional (task por envio + anexo). Mesmo
+// molde de degradação do espelho: sem Supabase configurado -> no-op/null (a
+// conversa degrada pro caminho ClickUp/memória de hoje); erro de rede/HTTP LANÇA
+// (WR-03) e o caller loga-e-segue. NUNCA loga telefone/conteúdo/base64 (LGPD).
+
+export interface MensagemWhatsappRow {
+  id: string;
+  lead_task_id?: string | null;
+  telefone_canonico: string;
+  de_nos: boolean;
+  ts: string; // ISO
+  tipo: 'audio' | 'texto' | 'outro';
+  texto?: string | null;
+  transcricao?: string | null;
+  midia_base64?: string | null;
+  midia_mime?: string | null;
+  bruto?: unknown;
+}
+
+/** Upsert (merge por id) de UMA mensagem — chamado no envio (nosso) e na chegada
+ *  (webhook). No-op sem Supabase; erro de rede/HTTP LANÇA (caller loga-e-segue). */
+export async function salvarMensagemWhatsapp(row: MensagemWhatsappRow): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify([row]),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao salvar mensagem WhatsApp: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao salvar mensagem WhatsApp`);
+  }
+}
+
+/** Patch de uma mensagem já salva (transcrição pronta, vínculo de lead). 404 é
+ *  tolerado (linha ainda não existe — corrida benigna com o salvar). */
+export async function atualizarMensagemWhatsapp(
+  id: string,
+  patch: { transcricao?: string | null; lead_task_id?: string | null },
+): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?id=eq.${encodeURIComponent(id)}`,
+      { method: 'PATCH', headers: { ...headers(), 'Prefer': 'return=minimal' }, body: JSON.stringify(patch) },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao atualizar mensagem WhatsApp: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`[supabase] HTTP ${res.status} ao atualizar mensagem WhatsApp`);
+  }
+}
+
+/**
+ * Linha do tempo da conversa de um lead — casa por lead_task_id OU telefone
+ * canônico (mensagens do webhook chegam antes do vínculo). SEM midia_base64
+ * (pesada — a rota de mídia busca sob demanda via `buscarMidiaMensagemWhatsapp`).
+ * `null` = Supabase não configurado ou tabela ausente (caller cai no caminho
+ * atual); erro de rede/HTTP LANÇA (WR-03).
+ */
+export async function listarMensagensWhatsapp(opts: {
+  leadTaskId?: string;
+  telefoneCanonico?: string;
+  limite?: number;
+}): Promise<MensagemWhatsappRow[] | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const condicoes: string[] = [];
+  if (opts.leadTaskId) condicoes.push(`lead_task_id.eq.${opts.leadTaskId}`);
+  if (opts.telefoneCanonico) condicoes.push(`telefone_canonico.eq.${opts.telefoneCanonico}`);
+  if (condicoes.length === 0) return [];
+  const params = new URLSearchParams({
+    select: 'id,lead_task_id,telefone_canonico,de_nos,ts,tipo,texto,transcricao,midia_mime',
+    order: 'ts.asc',
+    limit: String(opts.limite ?? 500),
+  });
+  params.set('or', `(${condicoes.join(',')})`);
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?${params.toString()}`,
+      { headers: headers() },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar mensagens WhatsApp: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    if (res.status === 404) return null; // tabela ainda não aplicada -> fallback
+    throw new Error(`[supabase] HTTP ${res.status} ao listar mensagens WhatsApp`);
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? (data as MensagemWhatsappRow[]) : [];
+}
+
+/** Mídia (base64) de uma mensagem — playback instantâneo sem baixar do ClickUp/
+ *  Evolution. `null` = sem Supabase, sem linha ou sem mídia na linha. */
+export async function buscarMidiaMensagemWhatsapp(
+  id: string,
+): Promise<{ base64: string; mimetype: string } | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const params = new URLSearchParams({ select: 'midia_base64,midia_mime', id: `eq.${id}`, limit: '1' });
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?${params.toString()}`,
+      { headers: headers() },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar mídia de mensagem WhatsApp: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar mídia de mensagem WhatsApp`);
+  }
+  const data = (await res.json()) as Array<{ midia_base64?: string | null; midia_mime?: string | null }>;
+  const linha = Array.isArray(data) ? data[0] : null;
+  if (!linha?.midia_base64) return null;
+  return { base64: linha.midia_base64, mimetype: linha.midia_mime || 'audio/ogg' };
+}
+
+/** Vincula ao lead as mensagens que chegaram pelo webhook ANTES do vínculo
+ *  (lead_task_id nulo, casadas por telefone canônico). Best-effort do caller. */
+export async function vincularLeadMensagensWhatsapp(
+  telefoneCanonico: string,
+  leadTaskId: string,
+): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  if (!telefoneCanonico || !leadTaskId) return;
+  const params = new URLSearchParams({
+    telefone_canonico: `eq.${telefoneCanonico}`,
+    lead_task_id: 'is.null',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?${params.toString()}`,
+      {
+        method: 'PATCH',
+        headers: { ...headers(), 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ lead_task_id: leadTaskId }),
+      },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao vincular mensagens WhatsApp ao lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`[supabase] HTTP ${res.status} ao vincular mensagens WhatsApp ao lead`);
+  }
+}
+
+export interface UltimaMensagemLead {
+  ts: number; // ms
+  deNos: boolean;
+  tipo: 'audio' | 'texto' | 'outro';
+  preview: string;
+  /** true quando a mensagem do lead já foi vista (lido_em preenchido) — a
+   *  bolinha da lista só acende com mensagem do lead NÃO lida. */
+  lida: boolean;
+}
+
+/**
+ * Última mensagem por lead E por telefone canônico — ordena a lista de áudios
+ * como WhatsApp (quem falou por último no topo) e alimenta a bolinha de
+ * "lead esperando resposta" (última mensagem não é nossa). Uma consulta
+ * indexada (últimas 800 linhas por ts) reduzida aqui a 1 por chave — volume da
+ * campanha é baixo; quando crescer, vira VIEW distinct-on. `null` = sem
+ * Supabase/tabela (caller segue sem ordenação).
+ */
+export async function ultimasMensagensWhatsapp(): Promise<{
+  porLead: Map<string, UltimaMensagemLead>;
+  porTelefone: Map<string, UltimaMensagemLead>;
+} | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const params = new URLSearchParams({
+    select: 'lead_task_id,telefone_canonico,de_nos,ts,tipo,texto,transcricao,lido_em',
+    order: 'ts.desc',
+    limit: '800',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?${params.toString()}`,
+      { headers: headers() },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler últimas mensagens WhatsApp: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    throw new Error(`[supabase] HTTP ${res.status} ao ler últimas mensagens WhatsApp`);
+  }
+  const data = (await res.json()) as MensagemWhatsappRow[];
+  const porLead = new Map<string, UltimaMensagemLead>();
+  const porTelefone = new Map<string, UltimaMensagemLead>();
+  for (const r of Array.isArray(data) ? data : []) {
+    // rótulos "Falante N:" saem do preview (pedido 2026-08-19 — só o texto)
+    const cru = (r.texto ?? r.transcricao ?? '').replace(/Falante \d+:\s*/g, '').trim();
+    const um: UltimaMensagemLead = {
+      ts: Date.parse(r.ts) || 0,
+      deNos: r.de_nos,
+      tipo: r.tipo,
+      preview: (cru || (r.tipo === 'audio' ? '🎤 Áudio' : '')).slice(0, 120),
+      lida: !!(r as { lido_em?: string | null }).lido_em,
+    };
+    if (r.lead_task_id && !porLead.has(r.lead_task_id)) porLead.set(r.lead_task_id, um);
+    if (r.telefone_canonico && !porTelefone.has(r.telefone_canonico)) porTelefone.set(r.telefone_canonico, um);
+  }
+  return { porLead, porTelefone };
+}
+
+/** Marca como LIDAS as mensagens do lead (de_nos=false, lido_em nulo) — chamado
+ *  quando o operador ABRE a conversa (ver = ler, pedido 2026-08-19). Apaga a
+ *  bolinha da lista no próximo refresh. Best-effort do caller; 404 tolerado
+ *  (coluna/tabela ainda não migrada → bolinha segue sem estado de leitura). */
+export async function marcarMensagensLidas(
+  leadTaskId: string,
+  telefoneCanonico: string,
+): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  const condicoes: string[] = [];
+  if (leadTaskId) condicoes.push(`lead_task_id.eq.${leadTaskId}`);
+  if (telefoneCanonico) condicoes.push(`telefone_canonico.eq.${telefoneCanonico}`);
+  if (condicoes.length === 0) return;
+  const params = new URLSearchParams({
+    de_nos: 'is.false',
+    lido_em: 'is.null',
+  });
+  params.set('or', `(${condicoes.join(',')})`);
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?${params.toString()}`,
+      {
+        method: 'PATCH',
+        headers: { ...headers(), 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ lido_em: new Date().toISOString() }),
+      },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao marcar mensagens como lidas: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`[supabase] HTTP ${res.status} ao marcar mensagens como lidas`);
+  }
+}
+
+/** Resolve o lead de um telefone pelas mensagens já vinculadas — deixa o
+ *  webhook avaliar a conversa mesmo depois de restart (o índice em memória
+ *  `leadPorTelefone` zera). `null` = desconhecido/sem Supabase. */
+export async function buscarLeadPorTelefoneWhatsapp(
+  telefoneCanonico: string,
+): Promise<string | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  if (!telefoneCanonico) return null;
+  const params = new URLSearchParams({
+    select: 'lead_task_id',
+    telefone_canonico: `eq.${telefoneCanonico}`,
+    lead_task_id: 'not.is.null',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?${params.toString()}`,
+      { headers: headers() },
+    );
+  } catch {
+    return null; // consulta auxiliar do timer — falha silenciosa é aceitável aqui
+  }
+  if (!res.ok) return null;
+  const data = (await res.json()) as Array<{ lead_task_id?: string | null }>;
+  return data?.[0]?.lead_task_id ?? null;
 }
 
 /**

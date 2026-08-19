@@ -403,6 +403,15 @@ export const SUPABASE_TABLE_USUARIOS = process.env.SUPABASE_TABLE_USUARIOS || 'd
 export const SUPABASE_TABLE_LEADS_ESPELHO =
   process.env.SUPABASE_TABLE_LEADS_ESPELHO || 'discador_leads_espelho';
 
+// ===== Fase 13 — conversa WhatsApp por lead (campanha de áudios, sql/escala/03) =====
+//
+// Read-model da conversa (mensagens dos DOIS lados) + durabilidade do que chega
+// pelo webhook da Evolution: a UI lê daqui (ms) e nada se perde em restart do
+// processo. ClickUp Lista 03 segue o registro operacional. Default sensato, sem
+// console.warn (mesmo espírito de SUPABASE_TABLE_WEBHOOK_EVENTOS).
+export const SUPABASE_TABLE_MENSAGENS_WHATSAPP =
+  process.env.SUPABASE_TABLE_MENSAGENS_WHATSAPP || 'mensagens_whatsapp';
+
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook

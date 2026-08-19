@@ -138,11 +138,19 @@ async function testeWriteFieldIdOnly() {
   });
   checar(resultado?.id === 'audios-task-1', `registrarEnvioAudio() retorna a task criada (recebido: ${JSON.stringify(resultado)})`);
 
-  const idsEsperados = [CAMPOS_AUDIOS.DATA_DO_ENVIO, CAMPOS_AUDIOS.ENVIADO_POR, CAMPOS_AUDIOS.TELEFONE, CAMPOS_AUDIOS.AUDIO];
+  const idsEsperados = [CAMPOS_AUDIOS.DATA_DO_ENVIO, CAMPOS_AUDIOS.ENVIADO_POR, CAMPOS_AUDIOS.TELEFONE];
   const idsEnviados = (ultimoBodyCriarTask?.custom_fields || []).map((cf) => cf.id);
   checar(
     idsEsperados.every((id) => idsEnviados.includes(id)),
-    `custom_fields do POST usa os field-ids de CAMPOS_AUDIOS (DATA_DO_ENVIO/ENVIADO_POR/TELEFONE/AUDIO) (recebido: ${JSON.stringify(idsEnviados)})`,
+    `custom_fields do POST usa os field-ids de CAMPOS_AUDIOS (DATA_DO_ENVIO/ENVIADO_POR/TELEFONE) (recebido: ${JSON.stringify(idsEnviados)})`,
+  );
+  // Regressão 2026-08-18: AUDIO é type=attachment no ClickUp — string em
+  // custom_fields devolvia 400 e DERRUBAVA o registro inteiro. O áudio agora
+  // sobe como ANEXO (multipart) após a criação; o field-id AUDIO NUNCA pode
+  // voltar pro custom_fields da criação.
+  checar(
+    !idsEnviados.includes(CAMPOS_AUDIOS.AUDIO),
+    `AUDIO (attachment) NÃO vai em custom_fields — iria dar 400 e perder o registro (recebido: ${JSON.stringify(idsEnviados)})`,
   );
 }
 
