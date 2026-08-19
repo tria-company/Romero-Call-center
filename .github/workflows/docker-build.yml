@@ -1,66 +1,28 @@
 name: Deploy na VPS (Docker Swarm)
 
-# Trigger: push pra main (auto-deploy) OU manual via Actions -> Run workflow.
-#
-# Pre-requisito: o primeiro deploy precisa ter sido feito manualmente. Este
-# workflow assume que ja existe na VPS:
-#   - /opt/discador (clone do repo)
-#   - ~/discador.yaml (deploy/discador.swarm.yaml com os secrets reais editados)
-#   - stack 'discador' deployada pelo menos uma vez
-#
-# Secrets necessarios em Settings -> Secrets and variables -> Actions:
-#   - VPS_HOST: IP publico da VPS
-#   - VPS_USER: usuario SSH (ex: root)
-#   - VPS_SSH_KEY: chave SSH privada (conteudo do arquivo, geralmente ed25519)
+# ATENÇÃO: neste BRANCH (ops/diagnostico-vps) o conteúdo é DIAGNÓSTICO
+# somente-leitura — o deploy real vive na main. Dispatch:
+#   gh workflow run docker-build.yml --ref ops/diagnostico-vps
+# LGPD: imprime só NOMES de env (valores mascarados) e logs (o backend não
+# loga telefone/CPF por disciplina).
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch: # rodar manualmente em Actions -> Run workflow
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: Diagnostico (somente leitura)
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            set -e
-            cd /opt/discador
-            # Stash mudancas locais (ex.: deploy/discador.swarm.yaml com credenciais
-            # reais no lugar dos placeholders ${VAR}). Sem isso, git pull --ff-only
-            # falha quando a VPS tem yaml editado. As envs em runtime ficam no
-            # docker service, nao dependem do yaml local.
-            git stash --include-untracked || true
-            git pull --ff-only
-            docker build -t discador-wavoip:latest .
-            # stack deploy nao detecta mudanca quando so a imagem 'latest' tem
-            # novo conteudo (mesmo digest no spec). Por isso forcamos o service
-            # update -- assim a task e recriada com a imagem nova.
-            # rc captura o exit code do deploy sem deixar o 'set -e' abortar
-            # antes do diagnostico abaixo -- precisa rodar SEMPRE, mesmo quando
-            # o rollout falha e o Swarm reverte sozinho (D-03/T-09-03).
-            rc=0
-            if docker service ls --filter name=discador_discador --format '{{.Name}}' | grep -q discador_discador; then
-              # --env-add: entrega/atualiza envs novas SEM depender do yaml da VPS
-              # (o service update sozinho nao adiciona env). Fase 13: token do
-              # receptor do webhook da Evolution, vindo do secret do Actions.
-              docker service update --force --image discador-wavoip:latest \
-                --env-add "EVOLUTION_WEBHOOK_TOKEN=${{ secrets.EVOLUTION_WEBHOOK_TOKEN }}" \
-                discador_discador || rc=$?
-            else
-              docker stack deploy --resolve-image=never -c ~/discador.yaml discador || rc=$?
-            fi
-            # rolling update de 2 replicas em parallelism 1 + start-first +
-            # monitor (deploy/discador.swarm.yaml) demora mais que a 1 replica
-            # antiga -- 10s da mais folga antes do diagnostico abaixo.
-            sleep 10
-            # SEMPRE imprime o estado das tasks (2 replicas + eventuais tasks em
-            # rollback) -- auditabilidade do rollback automatico mesmo em falha.
-            docker service ps discador_discador --no-trunc --format 'table {{.ID}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}' | head -10
-            echo "[deploy] rollout rc=$rc"
-            exit "$rc"
+            echo "=== envs do service (SO NOMES) ==="
+            docker service inspect discador_discador --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | sed 's/=.*//' | sort
+            echo "=== replicas ==="
+            docker service ps discador_discador --format 'table {{.Name}}\t{{.CurrentState}}' | head -6
+            echo "=== logs recentes com erro/audios/clickup/supabase ==="
+            docker service logs --since 60m discador_discador 2>&1 | grep -i "erro\|error\|warn\|audios\|clickup\|supabase\|conversa" | tail -60
