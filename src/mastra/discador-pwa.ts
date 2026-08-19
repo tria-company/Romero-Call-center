@@ -356,6 +356,10 @@ export const DISCADOR_APP_JS = `(function(){
   var fila=null, filaPollInt=null;
   var timerInt=null, timerStart=0, conectandoTO=null;
   var wakeLock=null, emChamada=false, retornoPainel=null;
+  // auto=1 no fragmento (2026-08-19): handoff da conversa de áudios disca
+  // SOZINHO ao abrir a Ligação — one-shot (zera antes de discar; replaceState
+  // já impede rediscagem em refresh/back).
+  var autoLigar=false;
   var foiAtendida=false, desfechoEnviado=false, chamadaTaskId=null, votoAtualTaskId=null, votoSel={romero:null,andressa:null};
   // u13: tentativa não-atendida — discagemStart marca quando começou a chamar
   // (pra medir "quanto tempo tentou"); tentativaDiscada = a chamada chegou a
@@ -379,7 +383,7 @@ export const DISCADOR_APP_JS = `(function(){
   // Handoff do app mobile (quick-260815-r3): o token e o taskId chegam no
   // FRAGMENTO (#token=...&task=...) — fragmento nao vai ao servidor (nao aparece
   // em log/Referer). Le so 'token' e 'task'; ignora o resto.
-  function lerParamsDoHash(){var h=(location.hash||'').replace(/^#/,'');var out={};if(!h){return out;}var ps=h.split('&');for(var i=0;i<ps.length;i++){var kv=ps[i].split('=');var k=kv[0];var v=kv.length>1?decodeURIComponent(kv[1]):'';if(k==='token'){out.token=v;}else if(k==='task'){out.task=v;}}return out;}
+  function lerParamsDoHash(){var h=(location.hash||'').replace(/^#/,'');var out={};if(!h){return out;}var ps=h.split('&');for(var i=0;i<ps.length;i++){var kv=ps[i].split('=');var k=kv[0];var v=kv.length>1?decodeURIComponent(kv[1]):'';if(k==='token'){out.token=v;}else if(k==='task'){out.task=v;}else if(k==='auto'){out.auto=v;}}return out;}
   function show(v){$('login-view').style.display=(v==='login')?'flex':'none';$('fila-view').style.display=(v==='fila')?'block':'none';}
   function api(path){
     var opts={headers:{}};var t=getToken();if(t){opts.headers['Authorization']='Bearer '+t;}
@@ -510,7 +514,7 @@ export const DISCADOR_APP_JS = `(function(){
   // Deep-link &task (quick-260815-r3): abre o preview da Ligacao exata pelo
   // taskId vindo do handoff. Ownership validado no backend (GET /ligacao/:taskId,
   // CR-01) — status !=200 (ex. 404 de outro operador) so nao abre, sem erro.
-  function abrirLigacaoPorTask(taskId){api('/api/discador/ligacao/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,data:d};});}).then(function(r){if(r.status===200&&r.data.ligacao){abrirPreview({taskId:taskId,nome:r.data.ligacao.nome,telefone:r.data.ligacao.telefone});}}).catch(function(){});}
+  function abrirLigacaoPorTask(taskId){api('/api/discador/ligacao/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,data:d};});}).then(function(r){if(r.status===200&&r.data.ligacao){abrirPreview({taskId:taskId,nome:r.data.ligacao.nome,telefone:r.data.ligacao.telefone});if(autoLigar){autoLigar=false;var it=previewAtualItem;if(it&&!emChamada){fecharPreview();iniciarLigacao(it);}}}}).catch(function(){});}
   function carregarContextoDoPreview(taskId){
     var el=$('preview-contexto');if(!el){return;}
     api('/api/discador/contexto/'+encodeURIComponent(taskId)).then(function(res){
@@ -826,7 +830,7 @@ export const DISCADOR_APP_JS = `(function(){
     // Porta unica (u5/u8): com &task e o usuario indo LIGAR (handoff de chamada)
     // — NUNCA redireciona, abre a Ligacao aqui. Sem &task, manda TODO MUNDO pro
     // painel; o painel roteia por papel (gestor -> painel, atendente -> /fila).
-    if(getToken()){if(hp.task){api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.panelUrl){retornoPainel=me.panelUrl.replace(/[/]+$/,'')+'/fila';}}).catch(function(){});startFila();abrirLigacaoPorTask(hp.task);}else{api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&irParaPainel(getToken(),me.panelUrl)){return;}startFila();}).catch(function(){startFila();});}}else{show('login');}
+    if(getToken()){if(hp.task){autoLigar=(hp.auto==='1');api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&me.panelUrl){retornoPainel=me.panelUrl.replace(/[/]+$/,'')+'/fila';}}).catch(function(){});startFila();abrirLigacaoPorTask(hp.task);}else{api('/api/discador/me').then(function(res){return res.json();}).then(function(me){if(me&&irParaPainel(getToken(),me.panelUrl)){return;}startFila();}).catch(function(){startFila();});}}else{show('login');}
     if('serviceWorker' in navigator){navigator.serviceWorker.register('/discador/sw.js').catch(function(){});}
   });
 })();`;
