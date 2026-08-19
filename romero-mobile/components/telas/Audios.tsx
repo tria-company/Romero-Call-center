@@ -1,13 +1,17 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Search, Send, X } from "lucide-react";
+import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Search, Send, SkipForward, X } from "lucide-react";
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { iniciarLigacaoReal } from "@/lib/leads-real";
-import { buscarConversaLead, buscarMidiaMensagem, enviarAudioParaLead, enviarTextoParaLead, useAudiosReais } from "@/lib/audios-real";
+import { buscarConversaLead, buscarMidiaMensagem, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
 import { Autobox, Vhead } from "./blocos";
+// 2026-08-19: tocar no NOME da conversa abre a ficha (dossiê + histórico) como
+// overlay — mesma PerfilLead da Base, em modo embutido (sem navegar, o chat
+// continua aberto por trás).
+import { PerfilLead } from "./PerfilLead";
 
 /* TELA · ÁUDIOS — estilo WhatsApp, CONVERSA por lead. Toca no lead → abre a
    conversa dele; grava (segurar o microfone) e o áudio vira uma mensagem de voz
@@ -84,8 +88,19 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
      (ignora +, espaços, parênteses). Compõe com o filtro de selo. */
   const [busca, setBusca] = React.useState("");
 
+  /* Pular contato (2026-08-19): quando o funil marca "Não ligar", o Romero
+     tira a Ligação da fila explicando o MOTIVO (vira comentário na task e a
+     Ligação FECHA no ClickUp). `pulados` esconde a linha na hora (otimista);
+     o auto-refresh de 30s reconcilia com o backend. */
+  const [pularAlvo, setPularAlvo] = React.useState<LeadAudioReal | null>(null);
+  const [pularMotivo, setPularMotivo] = React.useState("");
+  const [pulando, setPulando] = React.useState(false);
+  const [pularErro, setPularErro] = React.useState(false);
+  const [pulados, setPulados] = React.useState<Set<string>>(() => new Set());
+
   const leadsFiltrados = React.useMemo(() => {
-    const porSelo = filtroSelo === "todos" ? leads : leads.filter((l) => (l.conversa?.status ?? "enviar_audio") === filtroSelo);
+    const vivos = pulados.size === 0 ? leads : leads.filter((l) => !(l.ligacaoTaskId && pulados.has(l.ligacaoTaskId)));
+    const porSelo = filtroSelo === "todos" ? vivos : vivos.filter((l) => (l.conversa?.status ?? "enviar_audio") === filtroSelo);
     const q = busca.trim().toLowerCase();
     if (!q) return porSelo;
     const qDigitos = q.replace(/\D/g, "");
@@ -94,7 +109,31 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
       const telBate = qDigitos.length > 0 && l.telefone.replace(/\D/g, "").includes(qDigitos);
       return nomeBate || telBate;
     });
-  }, [leads, filtroSelo, busca]);
+  }, [leads, filtroSelo, busca, pulados]);
+
+  /* Confirma o pular: fecha a Ligação no backend com o motivo; sucesso tira a
+     linha da lista na hora. Falha mantém o modal aberto com o aviso. */
+  async function confirmarPular() {
+    if (!pularAlvo?.ligacaoTaskId || pulando) return;
+    const motivo = pularMotivo.trim();
+    if (!motivo) return;
+    setPulando(true);
+    setPularErro(false);
+    const ok = await pularContato(pularAlvo.ligacaoTaskId, motivo);
+    setPulando(false);
+    if (!ok) {
+      setPularErro(true);
+      return;
+    }
+    const id = pularAlvo.ligacaoTaskId;
+    setPulados((p) => {
+      const n = new Set(p);
+      n.add(id);
+      return n;
+    });
+    setPularAlvo(null);
+    setPularMotivo("");
+  }
 
   // "Apareça 10 e vá carregando" — por ROLAGEM (2026-08-19): o sentinela no fim
   // da lista (`au-more`) revela +10 ao entrar na viewport, no lugar do timer de
@@ -319,6 +358,12 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
 
   /* ── Conversa por lead + dropdown ─────────────────────────────────────── */
   const [leadAberto, setLeadAberto] = React.useState<LeadAudioReal | null>(null);
+  /* Ficha (dossiê + histórico) como overlay da conversa (2026-08-19) — abre no
+     toque do NOME, fecha no voltar; trocar/fechar a conversa fecha junto. */
+  const [fichaAberta, setFichaAberta] = React.useState(false);
+  React.useEffect(() => {
+    setFichaAberta(false);
+  }, [leadAberto]);
   const [bolhasPorLead, setBolhasPorLead] = React.useState<Record<string, Bolha[]>>({});
   /* Qual ÁUDIO (identidade = prefixo do base64) já foi enviado pra cada lead
      NESTA sessão — decide a barra da conversa: o MESMO áudio não se reenvia
@@ -514,12 +559,21 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           <button type="button" className="au-back" onClick={() => setLeadAberto(null)} aria-label="Voltar">
             <ArrowLeft size={24} />
           </button>
-          <span className="au-av sm" style={{ background: corAvatar(leadAberto.nome) }}>
+          {/* nome/avatar TOCÁVEIS (2026-08-19, estilo WhatsApp): abrem a ficha
+              do lead (dossiê + histórico) por cima da conversa. */}
+          <span className="au-av sm" style={{ background: corAvatar(leadAberto.nome) }} onClick={() => setFichaAberta(true)}>
             {iniciais(leadAberto.nome)}
           </span>
-          <div className="au-ct">
+          <div
+            className="au-ct au-ct-btn"
+            role="button"
+            tabIndex={0}
+            onClick={() => setFichaAberta(true)}
+            onKeyDown={(e) => (e.key === "Enter" ? setFichaAberta(true) : null)}
+            aria-label={`Ver dossiê e histórico de ${leadAberto.nome}`}
+          >
             <div className="au-cnm">{leadAberto.nome}</div>
-            <div className="au-cst">{fmtTelefone(leadAberto.telefone)}</div>
+            <div className="au-cst">{fmtTelefone(leadAberto.telefone)} · toque p/ ficha</div>
           </div>
           <button
             type="button"
@@ -744,6 +798,28 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             </>
           )}
         </div>
+
+        {/* ── FICHA do lead (2026-08-19): dossiê + histórico como OVERLAY —
+              a conversa fica viva por trás; voltar fecha só a ficha. ── */}
+        {fichaAberta && (
+          <div className="au-ficha">
+            <div className="au-chead">
+              <button type="button" className="au-back" onClick={() => setFichaAberta(false)} aria-label="Voltar pra conversa">
+                <ArrowLeft size={24} />
+              </button>
+              <div className="au-ct">
+                <div className="au-cnm">{leadAberto.nome}</div>
+                <div className="au-cst">dossiê e histórico</div>
+              </div>
+            </div>
+            <div className="au-fbody">
+              {/* Suspense: PerfilLead usa useSearchParams (exigência do Next). */}
+              <React.Suspense fallback={null}>
+                <PerfilLead id={leadAberto.leadTaskId} embutido />
+              </React.Suspense>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -875,6 +951,25 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                   <span className="au-lado">
                     <span className={"au-selo " + SELO_UI[selo.status].cls}>{SELO_UI[selo.status].rotulo}</span>
                     {selo.motivo && <span className="au-balao">{selo.motivo}</span>}
+                    {/* PULAR (2026-08-19): só quando o funil diz que NÃO deu
+                        certo e a linha tem Ligação pra fechar — abre o modal
+                        de motivo (stopPropagation: não abre a conversa). */}
+                    {selo.status === "nao_ligar" && lead.ligacaoTaskId && (
+                      <button
+                        type="button"
+                        className="au-pular"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          vibrar();
+                          setPularAlvo(lead);
+                          setPularMotivo("");
+                          setPularErro(false);
+                        }}
+                        aria-label={`Pular ${lead.nome}`}
+                      >
+                        <SkipForward size={12} /> Pular
+                      </button>
+                    )}
                   </span>
                 )}
               </div>
@@ -885,6 +980,46 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
               <span className="au-spin" /> carregando mais…
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── modal do PULAR (2026-08-19): motivo OBRIGATÓRIO — vira comentário
+            na Ligação (⏭️ Contato pulado) e a task fecha, saindo da fila. ── */}
+      {pularAlvo && (
+        <div
+          className="au-pmodal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Pular contato"
+          onClick={() => {
+            if (!pulando) setPularAlvo(null);
+          }}
+        >
+          <div className="au-pcard" onClick={(e) => e.stopPropagation()}>
+            <div className="au-ptit">
+              <SkipForward size={17} /> Pular contato
+            </div>
+            <div className="au-pnome">{pularAlvo.nome}</div>
+            <div className="au-phint">A Ligação sai da sua fila e o motivo fica registrado na task do ClickUp.</div>
+            <textarea
+              className="au-ptxt"
+              value={pularMotivo}
+              onChange={(e) => setPularMotivo(e.target.value)}
+              placeholder="Explique o motivo (obrigatório)…"
+              rows={3}
+              maxLength={500}
+              autoFocus
+            />
+            {pularErro && <div className="au-perro">Não deu para pular — tente de novo.</div>}
+            <div className="au-pacts">
+              <button type="button" className="seg" onClick={() => setPularAlvo(null)} disabled={pulando}>
+                Cancelar
+              </button>
+              <button type="button" className="au-pgo" onClick={() => void confirmarPular()} disabled={pulando || !pularMotivo.trim()}>
+                {pulando ? <span className="au-spin" /> : <SkipForward size={15} />} Pular contato
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </>
@@ -948,6 +1083,20 @@ const AU_CSS = `
 /* motivo INTEIRO, sem cortar (pedido do gestor): o balão cresce em altura,
    quebra linha e a linha da lista acompanha — legibilidade > compacidade. */
 .au-balao{ max-width:100%; font-size:10.5px; line-height:1.4; color:var(--dim); background:var(--card-2); border-radius:10px 10px 3px 10px; padding:5px 9px; white-space:normal; overflow-wrap:break-word; text-align:right; }
+/* pular contato (2026-08-19): chip na linha + modal de motivo */
+.au-pular{ display:inline-flex; align-items:center; gap:4px; font-size:10px; font-weight:800; letter-spacing:.03em; text-transform:uppercase; padding:4px 9px; border-radius:999px; border:1px solid color-mix(in srgb, var(--alert) 45%, transparent); background:transparent; color:var(--alert); cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-pular:active{ background:color-mix(in srgb, var(--alert) 14%, transparent); }
+.au-pmodal{ position:fixed; inset:0; z-index:300; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; justify-content:center; padding:0 12px calc(24px + var(--safe-b)); }
+.au-pcard{ width:min(520px, 100%); background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:16px; display:flex; flex-direction:column; gap:10px; animation:auB .18s ease both; }
+.au-ptit{ display:flex; align-items:center; gap:8px; font-size:15px; font-weight:800; color:var(--alert); }
+.au-pnome{ font-size:14px; font-weight:700; color:var(--ink); }
+.au-phint{ font-size:12.5px; color:var(--dim); line-height:1.5; }
+.au-ptxt{ width:100%; box-sizing:border-box; resize:none; background:var(--bg-2); border:1px solid var(--line); border-radius:12px; padding:10px 12px; color:var(--ink); font-size:14px; line-height:1.5; outline:none; font-family:inherit; }
+.au-ptxt:focus{ border-color:var(--alert); }
+.au-perro{ font-size:12.5px; color:var(--alert); font-weight:700; }
+.au-pacts{ display:flex; gap:8px; justify-content:flex-end; align-items:center; }
+.au-pgo{ display:inline-flex; align-items:center; gap:6px; border:none; border-radius:12px; padding:10px 14px; background:var(--alert); color:#fff; font-weight:800; font-size:13px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-pgo:disabled{ opacity:.55; cursor:default; }
 .au-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--go); animation:auSpin .7s linear infinite; }
 .au-spin.lg{ width:20px; height:20px; border-color:rgba(6,32,21,.35); border-top-color:#062015; }
 @keyframes auSpin{ to{ transform:rotate(360deg); } }
@@ -964,6 +1113,12 @@ const AU_CSS = `
 .au-ct{ min-width:0; }
 .au-cnm{ font-size:16px; font-weight:700; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .au-cst{ font-size:12px; color:var(--dim); }
+/* nome tocável → ficha (2026-08-19) */
+.au-ct-btn{ flex:1; cursor:pointer; border-radius:10px; padding:3px 8px; margin:-3px 0 -3px -4px; -webkit-tap-highlight-color:transparent; }
+.au-ct-btn:active{ background:var(--card-2); }
+.au-ficha{ position:fixed; inset:0; z-index:240; background:var(--bg-0); display:flex; flex-direction:column; }
+.au-fbody{ flex:1; overflow-y:auto; padding:4px 14px calc(24px + var(--safe-b)); }
+.au-fbody .view{ min-height:0; }
 .au-thread{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:8px; }
 .au-day{ align-self:center; background:var(--card-2); color:var(--dim); font-size:11px; padding:5px 12px; border-radius:8px; margin-bottom:4px; }
 .au-hintbig{ align-self:center; color:var(--dim); font-size:13.5px; text-align:center; margin:auto 24px; line-height:1.7; }

@@ -66,3 +66,22 @@ export function useFilaReal(): EstadoFilaReal {
 
   return { itens, carregando, erro, semMapeamento, recarregar: carregar };
 }
+
+/**
+ * PULA o contato da fila (2026-08-19 — todos os operadores): fecha a Ligação
+ * no ClickUp com o motivo do operador (`POST /api/mobile/fila/pular`; o
+ * backend valida que a Ligação é DELE). true = recarregar a fila. Nunca
+ * lança. LGPD: nada logado.
+ */
+export async function pularLigacao(taskId: string, motivo: string): Promise<boolean> {
+  try {
+    const r = await fetch("/api/mobile/fila/pular", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ taskId, motivo }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}

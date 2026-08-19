@@ -33,6 +33,13 @@ services:
       ## instância Evolution (…/api/evolution/webhook?token=<valor>). Sem ele o
       ## receptor fica desabilitado (403) e as respostas dos leads não entram.
       - EVOLUTION_WEBHOOK_TOKEN=${EVOLUTION_WEBHOOK_TOKEN}
+      ## 2026-08-19: alerta de QUEDA DO CHIP no grupo de operação, enviado pela
+      ## instância 'avisos-romero' (default no código — declarar aqui só pra
+      ## trocar o nome ou desligar com valor vazio). A apikey de alerta é
+      ## OPCIONAL: só quando a global não autenticar a instância nova.
+      # - EVOLUTION_INSTANCE_ALERTA=${EVOLUTION_INSTANCE_ALERTA}
+      # - EVOLUTION_API_KEY_ALERTA=${EVOLUTION_API_KEY_ALERTA}
+      # - EVOLUTION_GRUPO_ALERTA=${EVOLUTION_GRUPO_ALERTA}
 
       ## 🔐 Login do discador (closers)
       ## DISCADOR_USERS: "user:sha256hex,..."  |  DISCADOR_SESSION_SECRET: segredo HMAC

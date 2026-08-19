@@ -256,7 +256,15 @@ function nomeDoStatus(status: TaskClickUp['status']): string {
  */
 export async function listarTasks(
   listId: string,
-  opts: { page?: number; includeClosed?: boolean; assignees?: string[] } = {},
+  opts: {
+    page?: number;
+    includeClosed?: boolean;
+    assignees?: string[];
+    /** Filtro de custom fields NO SERVIDOR (2026-08-19) — ex. timeline por
+     *  LEAD_REL: 1 request em vez de paginar a lista inteira. Shape da API v2:
+     *  [{ field_id, operator, value }]. */
+    customFields?: Array<{ field_id: string; operator: string; value: unknown }>;
+  } = {},
 ): Promise<{ tasks: TaskClickUp[]; lastPage: boolean }> {
   // Token ausente e falha de infra/HTTP LANCAM (WR-03): o caller decide
   // retry/abort. Retorno vazio fica reservado a respostas 2xx genuinamente
@@ -274,6 +282,9 @@ export async function listarTasks(
   // e o formato que a API REST v2 do ClickUp espera para multiplos valores.
   for (const assigneeId of opts.assignees ?? []) {
     if (assigneeId) params.append('assignees[]', assigneeId);
+  }
+  if (opts.customFields?.length) {
+    params.set('custom_fields', JSON.stringify(opts.customFields));
   }
   let res: Response;
   try {
@@ -1706,22 +1717,45 @@ export async function buscarLigacoesDoLead(
 ): Promise<ItemTimeline[]> {
   const CAP = 10;
 
-  // Pagina a Lista 02 inteira COM as fechadas (mesmo shape de lerTodasAsTasks)
-  // — a menos que o caller já tenha buscado a lista inteira uma vez (backfill
-  // em lote) e queira reusá-la aqui, evitando repaginar por lead.
+  // 2026-08-19: filtro SERVER-SIDE no lugar da varredura sequencial da Lista
+  // 02 inteira (12+ páginas ≈ 50s com o limiter manso — estourava o timeout da
+  // ponte e a ficha nem carregava). Duas queries paralelas: por LEAD_REL (o
+  // lote e as avulsas criadas pelo app gravam o vínculo) e por TELEFONE exato
+  // (manuais sem vínculo), merge por id — ~2-3s no total. Trade-off aceito:
+  // Ligação SEM rel e com telefone digitado em formato divergente escapa do
+  // "=" do servidor; o scan antigo "pegava", mas nunca chegava ao usuário
+  // (timeout) — completude efetiva era zero. O caminho `ligacoesPreBuscadas`
+  // (backfill em lote, que já tem a lista inteira em mãos) segue igual.
   let todas: TaskClickUp[];
   if (opts?.ligacoesPreBuscadas) {
     todas = opts.ligacoesPreBuscadas;
   } else {
-    todas = [];
-    let page = 0;
-    let lastPage = false;
-    while (!lastPage) {
-      const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
-      todas.push(...resultado.tasks);
-      lastPage = resultado.lastPage;
-      page += 1;
-    }
+    const [porRel, porTelefone] = await Promise.all([
+      // Query principal (estrita, WR-03: erro de infra PROPAGA — não vira []).
+      listarTasks(CLICKUP_LIST_LIGACOES, {
+        includeClosed: true,
+        customFields: [{ field_id: CAMPOS_LIGACOES.LEAD_REL, operator: 'ANY', value: [leadTaskId] }],
+      }).then((r) => r.tasks),
+      // Complemento best-effort: falha aqui só reduz o alcance do fallback
+      // por telefone, nunca derruba a ficha inteira.
+      telefone
+        ? listarTasks(CLICKUP_LIST_LIGACOES, {
+            includeClosed: true,
+            customFields: [{ field_id: CAMPOS_LIGACOES.TELEFONE, operator: '=', value: telefone }],
+          })
+            .then((r) => r.tasks)
+            .catch((e) => {
+              console.warn('[clickup] timeline: query por telefone falhou (segue só com o vínculo):', e instanceof Error ? e.message : String(e));
+              return [] as TaskClickUp[];
+            })
+        : Promise.resolve([] as TaskClickUp[]),
+    ]);
+    const vistos = new Set<string>();
+    todas = [...porRel, ...porTelefone].filter((t) => {
+      if (vistos.has(t.id)) return false;
+      vistos.add(t.id);
+      return true;
+    });
   }
 
   const campo = (task: TaskClickUp, id: string): unknown =>

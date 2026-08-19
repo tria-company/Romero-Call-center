@@ -242,6 +242,24 @@ export async function enviarTextoParaLead(leadId: string, texto: string): Promis
   }
 }
 
+/**
+ * PULA o contato (2026-08-19): fecha a Ligação da fila no ClickUp com o
+ * motivo explicado pelo Romero (`POST /api/mobile/audios/pular`). true = a
+ * linha pode sair da lista. Nunca lança. LGPD: nada logado.
+ */
+export async function pularContato(ligacaoTaskId: string, motivo: string): Promise<boolean> {
+  try {
+    const r = await fetch("/api/mobile/audios/pular", {
+      method: "POST",
+      headers: CABECALHO_JSON,
+      body: JSON.stringify({ taskId: ligacaoTaskId, motivo }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Uma mensagem da conversa REAL de WhatsApp com o lead (Fase 13, fatia 1). */
 export type MensagemConversa = {
   id: string;

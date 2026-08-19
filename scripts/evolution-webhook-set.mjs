@@ -1,7 +1,8 @@
 // Configura o WEBHOOK da instância Evolution → o receptor do backend (Fase 13):
 // POST /webhook/set/<instância> com MESSAGES_UPSERT + base64 (o áudio do lead já
-// chega no evento). Uso único por ambiente — a instância tem UM webhook: apontar
-// pra produção desliga o recebimento no local (e vice-versa).
+// chega no evento) e CONNECTION_UPDATE (2026-08-19 — alerta de queda do chip no
+// grupo de operação). Uso único por ambiente — a instância tem UM webhook:
+// apontar pra produção desliga o recebimento no local (e vice-versa).
 //
 // Uso: node --env-file=.env scripts/evolution-webhook-set.mjs https://<host-do-backend>
 //   ex. produção: node --env-file=.env scripts/evolution-webhook-set.mjs https://discador.<ip>.sslip.io
@@ -24,9 +25,10 @@ const H = { apikey: K, 'Content-Type': 'application/json' };
 const urlWebhook = `${BASE}/api/evolution/webhook?token=${TOKEN}`;
 
 // v2 usa o shape aninhado; algumas versões aceitam só o plano — tenta os dois.
+const EVENTOS = ['MESSAGES_UPSERT', 'CONNECTION_UPDATE'];
 const shapes = [
-  { nome: 'aninhado', body: { webhook: { enabled: true, url: urlWebhook, byEvents: false, base64: true, events: ['MESSAGES_UPSERT'] } } },
-  { nome: 'plano', body: { enabled: true, url: urlWebhook, webhook_by_events: false, webhook_base64: true, events: ['MESSAGES_UPSERT'] } },
+  { nome: 'aninhado', body: { webhook: { enabled: true, url: urlWebhook, byEvents: false, base64: true, events: EVENTOS } } },
+  { nome: 'plano', body: { enabled: true, url: urlWebhook, webhook_by_events: false, webhook_base64: true, events: EVENTOS } },
 ];
 let ok = false;
 for (const s of shapes) {

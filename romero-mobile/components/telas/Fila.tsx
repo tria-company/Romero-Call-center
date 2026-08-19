@@ -1,10 +1,11 @@
 "use client";
 
 import * as React from "react";
+import { SkipForward } from "lucide-react";
 // Helper PURO de iniciais — fora de qualquer store/localStorage.
 import { iniciais } from "@/lib/leads-util";
 import type { ItemFilaReal } from "@/lib/discador-servidor";
-import { useFilaReal } from "@/lib/fila-real";
+import { pularLigacao, useFilaReal } from "@/lib/fila-real";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { Autobox, Esqueleto, Vhead } from "./blocos";
 import { Audios } from "./Audios";
@@ -65,6 +66,75 @@ export function Fila({
     window.location.href = urlCallCenter(tokenCC, item.taskId);
   }
 
+  /* Pular contato (2026-08-19 — TODOS os operadores): tira a Ligação da fila
+     explicando o motivo (vira comentário na task e ela FECHA no ClickUp). O
+     backend valida que a Ligação é do PRÓPRIO operador; sucesso → recarrega e
+     o próximo lead vira o topo. */
+  const [pularAlvo, setPularAlvo] = React.useState<ItemFilaReal | null>(null);
+  const [pularMotivo, setPularMotivo] = React.useState("");
+  const [pulando, setPulando] = React.useState(false);
+  const [pularErro, setPularErro] = React.useState(false);
+  function abrirPular(item: ItemFilaReal) {
+    vibrar();
+    setPularAlvo(item);
+    setPularMotivo("");
+    setPularErro(false);
+  }
+  async function confirmarPular() {
+    if (!pularAlvo || pulando) return;
+    const motivo = pularMotivo.trim();
+    if (!motivo) return;
+    setPulando(true);
+    setPularErro(false);
+    const ok = await pularLigacao(pularAlvo.taskId, motivo);
+    setPulando(false);
+    if (!ok) {
+      setPularErro(true);
+      return;
+    }
+    setPularAlvo(null);
+    setPularMotivo("");
+    recarregar();
+  }
+
+  const modalPular = pularAlvo && (
+    <div
+      className="fp-pmodal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Pular contato"
+      onClick={() => {
+        if (!pulando) setPularAlvo(null);
+      }}
+    >
+      <div className="fp-pcard" onClick={(e) => e.stopPropagation()}>
+        <div className="fp-ptit">
+          <SkipForward size={17} /> Pular contato
+        </div>
+        <div className="fp-pnome">{pularAlvo.nome}</div>
+        <div className="fp-phint">A Ligação sai da sua fila e o motivo fica registrado na task do ClickUp.</div>
+        <textarea
+          className="fp-ptxt"
+          value={pularMotivo}
+          onChange={(e) => setPularMotivo(e.target.value)}
+          placeholder="Explique o motivo (obrigatório)…"
+          rows={3}
+          maxLength={500}
+          autoFocus
+        />
+        {pularErro && <div className="fp-perro">Não deu para pular — tente de novo.</div>}
+        <div className="fp-pacts">
+          <button type="button" className="seg" onClick={() => setPularAlvo(null)} disabled={pulando}>
+            Cancelar
+          </button>
+          <button type="button" className="fp-pgo" onClick={() => void confirmarPular()} disabled={pulando || !pularMotivo.trim()}>
+            {pulando ? <span className="fp-spin" /> : <SkipForward size={15} />} Pular contato
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   /* Conteúdo da vista LIGAR (atendentes) — estados inline. */
   const secaoLigar = carregando ? (
     <Esqueleto alturas={[64, 86]} />
@@ -102,7 +172,7 @@ export function Fila({
       ) : (
         /* u14: mostra só o PRÓXIMO lead (o backend já ordena por prioridade).
            Ao ligar e voltar pra cá, a fila recarrega e o próximo vira o topo. */
-        <CardFila key={itens[0].taskId} item={itens[0]} indice={0} onLigar={ligar} />
+        <CardFila key={itens[0].taskId} item={itens[0]} indice={0} onLigar={ligar} onPular={abrirPular} />
       )}
     </>
   );
@@ -111,8 +181,10 @@ export function Fila({
   if (!podeAudios) {
     return (
       <div className="view">
+        <style>{FP_CSS}</style>
         <Vhead titulo={papel === "gestor" ? "Ações de hoje" : "Fila de hoje"} sub="ordenada pelo sistema" live="ao vivo" />
         {secaoLigar}
+        {modalPular}
       </div>
     );
   }
@@ -132,14 +204,18 @@ function CardFila({
   item,
   indice,
   onLigar,
+  onPular,
 }: {
   item: ItemFilaReal;
   indice: number;
   onLigar: (item: ItemFilaReal) => void;
+  onPular: (item: ItemFilaReal) => void;
 }) {
   // u14: o CARD INTEIRO liga. Tocar em qualquer lugar do card dispara `onLigar`
   // (mesma ação do botão). O botão "Ligar" fica como affordance explícita e
   // dá stopPropagation pra não disparar duas vezes. A ficha saiu da Fila.
+  // 2026-08-19: "Pular" embaixo do Ligar — tira o contato da fila COM motivo
+  // (modal), sem discar; também stopPropagation (senão o card ligaria junto).
   return (
     <div
       className="task"
@@ -157,17 +233,52 @@ function CardFila({
         <div className="tm trunc">{fmtTelefone(item.telefone)}</div>
       </div>
 
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onLigar(item);
-        }}
-        className="go"
-        aria-label="Ligar"
-      >
-        Ligar
-      </button>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch" }}>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onLigar(item);
+          }}
+          className="go"
+          aria-label="Ligar"
+        >
+          Ligar
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onPular(item);
+          }}
+          className="fp-pular"
+          aria-label={`Pular ${item.nome}`}
+        >
+          <SkipForward size={12} /> Pular
+        </button>
+      </div>
     </div>
   );
 }
+
+/* CSS do PULAR na fila clássica (2026-08-19) — o modal/chip do Audios (AU_CSS)
+   não monta nesta vista, então os estilos vivem aqui com prefixo fp-. */
+const FP_CSS = `
+.fp-pular{ display:inline-flex; align-items:center; justify-content:center; gap:4px; font-size:10px; font-weight:800; letter-spacing:.03em; text-transform:uppercase; padding:5px 10px; border-radius:999px; border:1px solid color-mix(in srgb, var(--alert) 45%, transparent); background:transparent; color:var(--alert); cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-pular:active{ background:color-mix(in srgb, var(--alert) 14%, transparent); }
+.fp-pmodal{ position:fixed; inset:0; z-index:300; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; justify-content:center; padding:0 12px calc(24px + var(--safe-b)); }
+.fp-pcard{ width:min(520px, 100%); background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:16px; display:flex; flex-direction:column; gap:10px; animation:fpUp .18s ease both; }
+@keyframes fpUp{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:none; } }
+.fp-ptit{ display:flex; align-items:center; gap:8px; font-size:15px; font-weight:800; color:var(--alert); }
+.fp-pnome{ font-size:14px; font-weight:700; color:var(--ink); }
+.fp-phint{ font-size:12.5px; color:var(--dim); line-height:1.5; }
+.fp-ptxt{ width:100%; box-sizing:border-box; resize:none; background:var(--bg-2); border:1px solid var(--line); border-radius:12px; padding:10px 12px; color:var(--ink); font-size:14px; line-height:1.5; outline:none; font-family:inherit; }
+.fp-ptxt:focus{ border-color:var(--alert); }
+.fp-perro{ font-size:12.5px; color:var(--alert); font-weight:700; }
+.fp-pacts{ display:flex; gap:8px; justify-content:flex-end; align-items:center; }
+.fp-pgo{ display:inline-flex; align-items:center; gap:6px; border:none; border-radius:12px; padding:10px 14px; background:var(--alert); color:#fff; font-weight:800; font-size:13px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-pgo:disabled{ opacity:.55; cursor:default; }
+.fp-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:fpSpin .7s linear infinite; }
+@keyframes fpSpin{ to{ transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce){ .fp-spin,.fp-pcard{ animation:none!important; } }
+`;
