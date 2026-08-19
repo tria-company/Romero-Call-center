@@ -24,9 +24,9 @@
 //                     de detecção "já tem dossiê").
 //
 // Default (sem --forcar): só processa leads cuja descrição AINDA NÃO contém
-// o marcador do dossiê (título da seção 1 do modelo do Miro, "Perfil e
-// classificação" — emitido por `montarPromptDossie` e gravado na description
-// por este runner/gerar-lote.mjs).
+// o marcador do dossiê (título da 3ª seção da cola em markdown, "Gancho para
+// o áudio" — emitido por `montarPromptDossie` e gravado na description por
+// este runner/gerar-lote.mjs).
 //
 // LGPD (T-DA-01): logs só imprimem contagens/ids/nome — telefone SEMPRE
 // mascarado (mascararTelefone), CPF NUNCA aparece em log (nem mascarado), o
@@ -48,8 +48,8 @@ import { mascararTelefone } from '../src/mastra/mascarar.ts';
 const DRY_RUN = process.argv.includes('--dry-run');
 const FORCAR = process.argv.includes('--forcar');
 
-/** Marcador de "já tem dossiê" — título da seção 1 emitido por `montarPromptDossie`. */
-const MARCADOR_DOSSIE = 'Perfil e classificação';
+/** Marcador de "já tem dossiê" — título da 3ª seção da cola emitido por `montarPromptDossie`. */
+const MARCADOR_DOSSIE = 'Gancho para o áudio';
 
 function lerTamanhoArgv() {
   const idx = process.argv.indexOf('--tamanho');
