@@ -1,8 +1,9 @@
 name: Deploy na VPS (Docker Swarm)
 
-# ATENÇÃO: neste BRANCH (ops/diagnostico-vps) o conteúdo é DIAGNÓSTICO
-# somente-leitura — o deploy real vive na main. Dispatch:
+# ATENÇÃO: neste BRANCH (ops/diagnostico-vps) o conteúdo é DIAGNÓSTICO +
+# RECUPERAÇÃO DO REDIS — o deploy real vive na main. Dispatch:
 #   gh workflow run docker-build.yml --ref ops/diagnostico-vps
+# Segurança: nunca imprime REDIS_URL completo (pode conter senha) — só host/porta.
 
 on:
   workflow_dispatch:
@@ -11,24 +12,38 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Diagnostico conectividade ClickUp (somente leitura)
+      - name: Diagnostico e recuperacao do Redis
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 8m
           script: |
-            echo "=== 1) ClickUp do HOST (401 rapido = rede ok) ==="
-            curl -s -o /dev/null -w 'host->clickup: HTTP %{http_code} em %{time_total}s\n' -m 12 https://api.clickup.com/api/v2/user || echo "host->clickup: FALHOU/TIMEOUT"
-            echo "=== 2) ClickUp de DENTRO do container ==="
-            CID=$(docker ps -q -f name=discador_discador | head -1)
-            echo "container: $CID"
-            docker exec $CID sh -c "time wget -T 10 -q -O /dev/null https://api.clickup.com/api/v2/user 2>&1; echo exit=\$?" || echo "wget dentro do container FALHOU"
-            echo "=== 3) DNS dentro do container ==="
-            docker exec $CID sh -c "nslookup api.clickup.com 2>&1 | tail -6" || true
-            echo "=== 4) primeiro erro 'aborted' nos logs (com timestamp) ==="
-            docker service logs -t --since 14h discador_discador 2>&1 | grep -i "operation was aborted" | head -2
-            echo "=== 5) ultimo log SEM erro antes do primeiro aborted ==="
-            docker service logs -t --since 14h discador_discador 2>&1 | grep -iv "aborted" | grep -i "clickup\|fila\|painel" | head -4
-            echo "=== 6) Evolution de dentro do container (controle) ==="
-            docker exec $CID sh -c "time wget -T 10 -q -O /dev/null https://apievo.gst.dev.br/ 2>&1; echo exit=\$?" || true
+            set -x
+            echo "=== containers/servicos redis ==="
+            docker service ls | grep -i redis || echo "(nenhum service redis)"
+            docker ps -a --format 'table {{.Names}}\t{{.Status}}' | grep -i redis || echo "(nenhum container redis)"
+            echo "=== REDIS_URL do discador (host:porta apenas) ==="
+            RURL=$(docker service inspect discador_discador --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep '^REDIS_URL=' | head -1 | cut -d= -f2-)
+            if [ -z "$RURL" ]; then echo "REDIS_URL: (ausente no service)"; else echo "REDIS_URL host: $(echo "$RURL" | sed -E 's#^[a-z]+://([^@]*@)?##' )"; fi
+            echo "=== tenta reviver redis ==="
+            RSVC=$(docker service ls --format '{{.Name}}' | grep -i redis | head -1)
+            RCTN=$(docker ps -a --format '{{.Names}}' | grep -i redis | head -1)
+            if [ -n "$RSVC" ]; then
+              docker service update --force "$RSVC" || true
+            elif [ -n "$RCTN" ]; then
+              docker restart "$RCTN" || true
+            else
+              echo "nenhum redis local pra reiniciar"
+            fi
+            sleep 8
+            echo "=== reseta o discador (limpa clients redis/limiter presos) ==="
+            docker service update --force --image discador-wavoip:latest discador_discador || true
+            sleep 25
+            docker service ps discador_discador --format 'table {{.Name}}\t{{.CurrentState}}' | head -4
+            echo "=== prova: health + leitura ClickUp via backend ==="
+            curl -s -o /dev/null -w 'health: %{http_code}\n' -m 8 http://localhost:4111/api/discador/health || true
+            sleep 20
+            curl -s -m 60 http://localhost:4111/api/discador/health >/dev/null 2>&1 || true
+            echo "(fim — endpoints autenticados serao testados de fora)"
