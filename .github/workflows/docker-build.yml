@@ -50,9 +50,12 @@ jobs:
               # (o service update sozinho nao adiciona env). Fase 13: token do
               # receptor do webhook da Evolution + token do ClickUp (rotacionado
               # 2026-08-19), ambos de secrets do Actions — cada deploy reafirma.
+              # 2026-08-19 (alerta de queda do chip): apikey da instância
+              # 'avisos-romero' — a global NÃO autentica ela (401 testado).
               docker service update --force --image discador-wavoip:latest \
                 --env-add "EVOLUTION_WEBHOOK_TOKEN=${{ secrets.EVOLUTION_WEBHOOK_TOKEN }}" \
                 --env-add "CLICKUP_API_TOKEN=${{ secrets.CLICKUP_API_TOKEN }}" \
+                --env-add "EVOLUTION_API_KEY_ALERTA=${{ secrets.EVOLUTION_API_KEY_ALERTA }}" \
                 discador_discador || rc=$?
             else
               docker stack deploy --resolve-image=never -c ~/discador.yaml discador || rc=$?
