@@ -236,7 +236,11 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         </button>
       </div>
       {/* eslint-disable-next-line react/iframe-missing-sandbox */}
-      <iframe src={chamadaUrl} className="au-call-frame" allow="microphone; autoplay" title="Discador" />
+      {/* screen-wake-lock: sem essa permissão o navegador NEGA o wake lock que o
+          discador pede dentro do iframe → a tela do celular bloqueia no meio da
+          chamada → a página é suspensa → Wavoip derruba com client:ping-timeout
+          (as 2 quedas do Tercio em 19/08). */}
+      <iframe src={chamadaUrl} className="au-call-frame" allow="microphone; autoplay; screen-wake-lock" title="Discador" />
     </div>
   );
 

@@ -122,9 +122,33 @@ function lerTaskAtivaMem(telefone: string, deviceId?: string): string | null {
   return taskAtivaMem.get(chaveTelefone(telefone))?.taskId ?? null;
 }
 
-function limparTaskAtivaMem(telefone: string, deviceId?: string): void {
-  if (deviceId) taskAtivaMem.delete(chaveTaskAtiva(telefone, deviceId));
-  taskAtivaMem.delete(chaveTelefone(telefone));
+/**
+ * Janela de "rediscagem em andamento": um mapeamento (re)gravado ha menos que
+ * isto NAO e apagado pelo cleanup de um job (com taskIdEsperado) — o /ligando
+ * de uma rediscagem rapida pode ter re-gravado o vinculo (pra MESMA task ou
+ * outra) enquanto o job da chamada anterior ainda processava. Caso real
+ * (Tercio, 2026-08-19): cleanup da 1a chamada apagou o vinculo da 2a e o
+ * record dela virou Ligacao avulsa duplicada. Manter o vinculo alem do fim e
+ * inofensivo: todo dial re-grava via /ligando, e os writers do processador
+ * tratam task ja concluida (falha terminal ignora; record anexa).
+ */
+const FRESCOR_REDISCAGEM_MS = 10 * 60_000;
+
+function limparTaskAtivaMem(telefone: string, deviceId?: string, taskIdEsperado?: string): void {
+  // Compare-and-delete + frescor (so quando o caller informa taskIdEsperado;
+  // sem ele, comportamento antigo — apaga incondicional):
+  // 1) o vinculo aponta pra OUTRA task -> uma chamada mais nova assumiu, mantem;
+  // 2) o vinculo foi (re)gravado ha pouco -> rediscagem em andamento, mantem.
+  const apagar = (chave: string): void => {
+    if (taskIdEsperado) {
+      const atual = taskAtivaMem.get(chave);
+      if (atual && atual.taskId !== taskIdEsperado) return;
+      if (atual && Date.now() - atual.ts < FRESCOR_REDISCAGEM_MS) return;
+    }
+    taskAtivaMem.delete(chave);
+  };
+  if (deviceId) apagar(chaveTaskAtiva(telefone, deviceId));
+  apagar(chaveTelefone(telefone));
 }
 
 function marcarRecordProcessadoMem(callId: string): boolean {
@@ -246,10 +270,26 @@ async function lerTaskAtivaRedis(telefone: string, deviceId?: string): Promise<s
   }
 }
 
-async function limparTaskAtivaRedis(telefone: string, deviceId?: string): Promise<void> {
+async function limparTaskAtivaRedis(telefone: string, deviceId?: string, taskIdEsperado?: string): Promise<void> {
   try {
-    if (deviceId) await garantirCliente().del(PREFIXO_TASK + chaveTaskAtiva(telefone, deviceId));
-    await garantirCliente().del(PREFIXO_TASK + chaveTelefone(telefone));
+    // Compare-and-delete + frescor (mesmo racional da variante mem). A idade
+    // do vinculo sai do PTTL (guardar sempre SETa com PX=CORRELACAO_TTL_MS,
+    // entao idade = TTL - restante) — sem mudar o formato do valor. GET+DEL
+    // nao e atomico, mas o pior caso degrada pro comportamento antigo
+    // (apagar) — aceitavel pra um guard best-effort.
+    const apagar = async (chave: string): Promise<void> => {
+      if (taskIdEsperado) {
+        const atual = await garantirCliente().get(chave);
+        if (atual && atual !== taskIdEsperado) return;
+        if (atual) {
+          const restanteMs = await garantirCliente().pttl(chave);
+          if (restanteMs > 0 && CORRELACAO_TTL_MS - restanteMs < FRESCOR_REDISCAGEM_MS) return;
+        }
+      }
+      await garantirCliente().del(chave);
+    };
+    if (deviceId) await apagar(PREFIXO_TASK + chaveTaskAtiva(telefone, deviceId));
+    await apagar(PREFIXO_TASK + chaveTelefone(telefone));
   } catch (e) {
     console.error('[estado-webhook] falha ao limpar task ativa (degradando p/ no-op):', e instanceof Error ? e.message : String(e));
   }
@@ -346,8 +386,15 @@ export async function lerTaskAtiva(telefone: string, deviceId?: string): Promise
   return MODO === 'redis' ? lerTaskAtivaRedis(telefone, deviceId) : lerTaskAtivaMem(telefone, deviceId);
 }
 
-export async function limparTaskAtiva(telefone: string, deviceId?: string): Promise<void> {
-  return MODO === 'redis' ? limparTaskAtivaRedis(telefone, deviceId) : limparTaskAtivaMem(telefone, deviceId);
+/**
+ * `taskIdEsperado` (opcional): compare-and-delete — so apaga se o mapeamento
+ * ainda apontar pra essa task. Protege a rediscagem rapida: o cleanup do job
+ * da chamada anterior nao engole o vinculo recem-gravado pela proxima.
+ */
+export async function limparTaskAtiva(telefone: string, deviceId?: string, taskIdEsperado?: string): Promise<void> {
+  return MODO === 'redis'
+    ? limparTaskAtivaRedis(telefone, deviceId, taskIdEsperado)
+    : limparTaskAtivaMem(telefone, deviceId, taskIdEsperado);
 }
 
 export async function marcarRecordProcessado(callId: string): Promise<boolean> {

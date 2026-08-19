@@ -55,6 +55,7 @@ import {
   resolverVotoAtualLead,
   definirVotoLeadCampo,
   fecharLigacao,
+  tarefaConcluida,
   type EscolhaVoto,
 } from './clickup.ts';
 
@@ -364,6 +365,29 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
     return;
   }
 
+  // Registro NAO-REGRESSIVO: com o frescor de limparTaskAtiva, o vinculo
+  // telefone->task pode legitimamente apontar pra uma Ligacao JA CONCLUIDA
+  // (processada por uma chamada anterior na janela de rediscagem). Uma falha
+  // terminal posterior (rediscagem cancelada/nao atendida) NUNCA rebaixa esse
+  // registro (ATENDEU=Nao por cima de chamada atendida+transcrita). Leitura
+  // best-effort: se o ClickUp falhar aqui, segue o fluxo normal (a task
+  // resolvida por buscarLigacaoAbertaPorTelefone e aberta por definicao).
+  try {
+    const task = await lerTask(taskId);
+    if (task && tarefaConcluida(task)) {
+      console.log(`[processador] falha terminal ignorada — Ligacao ${taskId} ja concluida (rediscagem posterior)`);
+      try {
+        await marcarEventoWebhook(dados.eventoDuravelId, 'processado');
+      } catch (e) {
+        console.error('[processador] falha ao marcar evento falha-terminal processado:', e);
+      }
+      await marcarCallFalhaProcessada(dados.whatsappCallId);
+      return;
+    }
+  } catch (e) {
+    console.warn('[processador] checagem de Ligacao concluida falhou (segue o fluxo normal):', e instanceof Error ? e.message : String(e));
+  }
+
   try {
     await gravarMetadadosLigacao(taskId, {
       atendeu: false,
@@ -395,7 +419,9 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
   // (`lerTaskAtiva(dados.telefone, dados.deviceId)`) — limpa tambem a chave
   // COMPOSTA (deviceId|telefone) escrita por `guardarTaskAtiva`, senao ela
   // vazava ate o TTL de 6h. Sem deviceId o comportamento e identico ao de antes.
-  await limparTaskAtiva(dados.telefone, dados.deviceId);
+  // Compare-and-delete (taskId): rediscagem rapida no mesmo telefone ja pode
+  // ter re-gravado o vinculo pra MESMA task — so apaga se ainda for esta.
+  await limparTaskAtiva(dados.telefone, dados.deviceId, taskId);
 
   // Fecha o desfecho durave do evento cru (Fase 2 — durabilidade).
   try {
@@ -585,7 +611,11 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // isso a composta sobrevivia ate o TTL de 6h e um RECORD futuro do mesmo
   // (device, telefone) re-consolidava sobre esta Ligacao ja fechada. Sem
   // deviceId (modo telefone-so) o comportamento e identico ao de antes.
-  await limparTaskAtiva(telefone, dados.deviceId);
+  // Compare-and-delete (taskId): o /ligando de uma REDISCAGEM pode ter
+  // re-apontado o vinculo pra proxima chamada enquanto este job rodava —
+  // apagar sem comparar deixava o record seguinte sem correlacao (virava
+  // Ligacao avulsa duplicada; caso real Tercio 2026-08-19).
+  await limparTaskAtiva(telefone, dados.deviceId, taskId);
 
   // Fecha o desfecho duravel do evento cru (Fase 2 — durabilidade).
   try {

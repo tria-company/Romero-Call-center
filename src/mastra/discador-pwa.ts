@@ -518,7 +518,9 @@ export const DISCADOR_APP_JS = `(function(){
   // Deep-link &task (quick-260815-r3): abre o preview da Ligacao exata pelo
   // taskId vindo do handoff. Ownership validado no backend (GET /ligacao/:taskId,
   // CR-01) — status !=200 (ex. 404 de outro operador) so nao abre, sem erro.
-  function abrirLigacaoPorTask(taskId){api('/api/discador/ligacao/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,data:d};});}).then(function(r){if(r.status===200&&r.data.ligacao){abrirPreview({taskId:taskId,nome:r.data.ligacao.nome,telefone:r.data.ligacao.telefone});if(autoLigar){autoLigar=false;var it=previewAtualItem;if(it&&!emChamada){fecharPreview();iniciarLigacao(it);}}}}).catch(function(){});}
+  // 409 = Ligação já concluída (deep-link auto=1 velho/reaberto): NÃO disca,
+  // avisa e devolve pro app quando embutido — mata a discagem-fantasma.
+  function abrirLigacaoPorTask(taskId){api('/api/discador/ligacao/'+encodeURIComponent(taskId)).then(function(res){return res.json().catch(function(){return {};}).then(function(d){return {status:res.status,data:d};});}).then(function(r){if(r.status===200&&r.data.ligacao){abrirPreview({taskId:taskId,nome:r.data.ligacao.nome,telefone:r.data.ligacao.telefone});if(autoLigar){autoLigar=false;var it=previewAtualItem;if(it&&!emChamada){fecharPreview();iniciarLigacao(it);}}}else if(r.status===409){autoLigar=false;try{alert('Essa ligação já foi concluída — não vou discar de novo.');}catch(e){}avisarPaiEmbutido();}}).catch(function(){});}
   function carregarContextoDoPreview(taskId){
     var el=$('preview-contexto');if(!el){return;}
     api('/api/discador/contexto/'+encodeURIComponent(taskId)).then(function(res){

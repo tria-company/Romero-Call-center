@@ -890,6 +890,11 @@ export const mastra = new Mastra({
             // 404 identico (nao revela se a task existe, so que "nao e
             // sua"). Erro de infra/rede do ClickUp continua 502.
             const msg = e instanceof Error ? e.message : String(e);
+            // Concluida e um caso distinto (a task E do operador): o cliente
+            // mostra o aviso e NAO auto-disca (deep-link auto=1 velho).
+            if (msg.includes('ja foi concluida')) {
+              return c.json({ erro: 'Ligação já concluída', concluida: true }, 409);
+            }
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
@@ -948,6 +953,10 @@ export const mastra = new Mastra({
             // Lista 02/de outro operador -> 404 identico (nao revela nada);
             // erro de infra do ClickUp -> 502.
             const msg = e instanceof Error ? e.message : String(e);
+            // Concluida: nao recarimba INICIO nem conta como tentativa.
+            if (msg.includes('ja foi concluida')) {
+              return c.json({ erro: 'Ligação já concluída', concluida: true }, 409);
+            }
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
@@ -2793,7 +2802,7 @@ export const mastra = new Mastra({
 
             // Log do shape (sem telefone). Pula DEVICE (heartbeat frequente).
             if (evento !== 'DEVICE') {
-              console.log(`[wavoip] evento type=${evento} status=${payload.status || ''} dir=${payload.direction || ''} dur=${payload.duration ?? ''} record_status=${payload.record_status || ''} keys=[${Object.keys(payload).join(',')}]`);
+              console.log(`[wavoip] evento type=${evento} status=${payload.status || ''} dir=${payload.direction || ''} dur=${payload.duration ?? ''} reason=${payload.reason || ''} record_status=${payload.record_status || ''} keys=[${Object.keys(payload).join(',')}]`);
             }
 
             // Durabilidade (Fase 2): persiste o evento CRU antes de qualquer

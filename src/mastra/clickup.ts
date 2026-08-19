@@ -215,7 +215,7 @@ export interface CustomFieldClickUp {
 export interface TaskClickUp {
   id: string;
   name: string;
-  status?: { status: string } | string;
+  status?: { status: string; type?: string } | string;
   custom_fields?: CustomFieldClickUp[];
   // Nativos usados pela fila do discador (LOTE-04/05, Fase 02 Plano 03): o
   // script da Ligação é a DESCRIÇÃO da task (D-06 revisado), não custom
@@ -636,6 +636,18 @@ export async function buscarFilaLigacoes(
  * operador é servido do cache. No miss, monta `DetalheLigacao` normalmente e
  * só então aquece o cache (`guardarLigacaoCache`, no-op sem Redis).
  */
+/**
+ * Uma Ligação concluída (status de tipo closed/done) não pode ser reaberta
+ * pelo discador: o deep-link com `auto=1` guardado num overlay antigo
+ * rediscava task já processada (discagem-fantasma real em 2026-08-19 17:43,
+ * 0,4s de CALLING→CANCELLED). `type` ausente (payload antigo) degrada pra
+ * false — comportamento de hoje.
+ */
+export function tarefaConcluida(task: TaskClickUp): boolean {
+  const st = typeof task.status === 'string' ? undefined : task.status;
+  return st?.type === 'closed' || st?.type === 'done';
+}
+
 export async function lerLigacao(taskId: string, assigneeIdEsperado: string): Promise<DetalheLigacao> {
   const cached = await obterLigacaoCache(assigneeIdEsperado, taskId);
   if (cached) return cached;
@@ -652,6 +664,9 @@ export async function lerLigacao(taskId: string, assigneeIdEsperado: string): Pr
   // a propria Ligacao (T-02-03-E), igual ao filtro server-side de /fila.
   if (!task.assignees?.some((a) => String(a.id) === assigneeIdEsperado)) {
     throw new Error(`[clickup] lerLigacao: task ${taskId} nao pertence ao operador`);
+  }
+  if (tarefaConcluida(task)) {
+    throw new Error(`[clickup] lerLigacao: task ${taskId} ja foi concluida`);
   }
   const [item] = mapearFilaLigacao([task], CAMPOS_LIGACOES);
   const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
@@ -703,6 +718,11 @@ export async function iniciarLigacao(
   }
   if (!task.assignees?.some((a) => String(a.id) === assigneeIdEsperado)) {
     throw new Error(`[clickup] iniciarLigacao: task ${taskId} nao pertence ao operador`);
+  }
+  // Guard ANTES do carimbo: rediscagem numa Ligação já concluída não pode
+  // recarimbar INICIO (gera INICIO>FIM em task processada) nem discar de novo.
+  if (tarefaConcluida(task)) {
+    throw new Error(`[clickup] iniciarLigacao: task ${taskId} ja foi concluida`);
   }
   // D-P3-02: grava INICIO + OPERADOR imediatamente (custom fields, D-07 — por
   // field_id). Falha de infra LANÇA (WR-03) — o caller decide o 502. A task
