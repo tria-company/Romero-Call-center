@@ -28,9 +28,21 @@ const CHIPS: { valor: VotoReal; rotulo: string }[] = [
   { valor: "naoDeclarou", rotulo: "Não declarou" },
 ];
 
-export function PerfilLead({ id }: { id: string; de?: string }) {
+export function PerfilLead({
+  id,
+  embutido = false,
+}: {
+  id: string;
+  de?: string;
+  /** 2026-08-19: ficha EMBUTIDA (overlay da conversa de áudios) — sem Voltar
+   *  de página (o overlay tem o próprio), sem rodapé WhatsApp/Ligar (a conversa
+   *  já tem o 📞 com a Ligação certa — o daqui criaria avulsa duplicada) e o
+   *  histórico expande INLINE em vez de navegar (a timeline já vem na ficha). */
+  embutido?: boolean;
+}) {
   const de = useSearchParams().get("de");
   const { ficha, carregando, erro, semAcesso, recarregar } = useLeadReal(id);
+  const [historicoAberto, setHistoricoAberto] = React.useState(false);
 
   /* Token do call center, buscado ao MONTAR e não ao tocar em "Ligar": o
      bloqueador de pop-ups só deixa `window.open` passar dentro do gesto, e um
@@ -128,7 +140,7 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
   if (semAcesso) {
     return (
       <div className="view">
-        <Voltar href={voltarPara}>{de === "fila" ? "Fila de hoje" : "Base"}</Voltar>
+        {!embutido && <Voltar href={voltarPara}>{de === "fila" ? "Fila de hoje" : "Base"}</Voltar>}
         <Autobox tom="warn" titulo="Ficha não liberada">
           Acesso à base não habilitado no discador.
         </Autobox>
@@ -139,7 +151,7 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
   if (erro || !ficha) {
     return (
       <div className="view">
-        <Voltar href={voltarPara}>{de === "fila" ? "Fila de hoje" : "Base"}</Voltar>
+        {!embutido && <Voltar href={voltarPara}>{de === "fila" ? "Fila de hoje" : "Base"}</Voltar>}
         <div className="empty">
           <b>Não deu para carregar</b>
           <button type="button" className="seg" style={{ marginTop: 10 }} onClick={recarregar}>
@@ -158,7 +170,7 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
 
   return (
     <div className="view">
-      <Voltar href={voltarPara}>{de === "fila" ? "Fila de hoje" : "Base"}</Voltar>
+      {!embutido && <Voltar href={voltarPara}>{de === "fila" ? "Fila de hoje" : "Base"}</Voltar>}
 
       <div className="prof">
         <div className="pav">{iniciais(lead.nome)}</div>
@@ -214,22 +226,82 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
         </BlocoLista>
       )}
 
-      <Link
-        href={`/base/${id}/linha-do-tempo`}
-        className="lblk"
-        style={{ display: "flex", alignItems: "center", gap: 10 }}
-      >
-        <span style={{ flex: 1, minWidth: 0 }}>
-          <span className="lttl" style={{ marginBottom: 3 }}>
-            <span>Últimas ligações</span>
+      {embutido ? (
+        /* Embutido (overlay da conversa): o HISTÓRICO expande AQUI — navegar
+           pra outra página perderia a conversa aberta. A timeline já veio na
+           ficha (useLeadReal), então o toggle não custa outro fetch. */
+        <div className="lblk">
+          <button
+            type="button"
+            onClick={() => setHistoricoAberto((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              width: "100%",
+              background: "none",
+              border: "none",
+              padding: 0,
+              color: "inherit",
+              font: "inherit",
+              textAlign: "left",
+              cursor: "pointer",
+            }}
+            aria-expanded={historicoAberto}
+          >
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span className="lttl" style={{ marginBottom: 3 }}>
+                <span>Histórico de ligações</span>
+              </span>
+              <span className="dim" style={{ fontSize: 11.5 }}>
+                {timeline.length} {timeline.length === 1 ? "ligação" : "ligações"}
+                {primeiraLigacao ? ` · ${primeiraLigacao}` : ""}
+              </span>
+            </span>
+            <span className="go">{historicoAberto ? "˅" : "›"}</span>
+          </button>
+          {historicoAberto &&
+            (timeline.length === 0 ? (
+              <div className="dim2" style={{ fontSize: 11.5, marginTop: 10 }}>
+                Nenhuma ligação registrada ainda.
+              </div>
+            ) : (
+              <div className="tl" style={{ marginTop: 12 }}>
+                {timeline.map((item, k) => (
+                  <div key={k} className="tli">
+                    <div className="tld">{item.data}</div>
+                    <div className="tlt">{item.atendeu ? "Atendeu" : "Não atendeu"}</div>
+                    {item.duracao && (
+                      <div className="tls">
+                        {item.atendeu ? "Conversa" : "Tentativa"}: {item.duracao}
+                      </div>
+                    )}
+                    {item.aderencia && <div className="tls">Aderência: {item.aderencia}</div>}
+                    {item.motivoFalha && <div className="tls">{item.motivoFalha}</div>}
+                    {item.resumoAnalise && <div className="tls">{item.resumoAnalise}</div>}
+                  </div>
+                ))}
+              </div>
+            ))}
+        </div>
+      ) : (
+        <Link
+          href={`/base/${id}/linha-do-tempo`}
+          className="lblk"
+          style={{ display: "flex", alignItems: "center", gap: 10 }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span className="lttl" style={{ marginBottom: 3 }}>
+              <span>Últimas ligações</span>
+            </span>
+            <span className="dim" style={{ fontSize: 11.5 }}>
+              {timeline.length} {timeline.length === 1 ? "ligação" : "ligações"}
+              {primeiraLigacao ? ` · ${primeiraLigacao}` : ""}
+            </span>
           </span>
-          <span className="dim" style={{ fontSize: 11.5 }}>
-            {timeline.length} {timeline.length === 1 ? "ligação" : "ligações"}
-            {primeiraLigacao ? ` · ${primeiraLigacao}` : ""}
-          </span>
-        </span>
-        <span className="go">›</span>
-      </Link>
+          <span className="go">›</span>
+        </Link>
+      )}
 
       <BlocoLista titulo="Adicionar anotação">
         <textarea
@@ -259,23 +331,29 @@ export function PerfilLead({ id }: { id: string; de?: string }) {
         </div>
       </BlocoLista>
 
-      <div className="grow" />
+      {!embutido && (
+        <>
+          <div className="grow" />
 
-      {/* Canais lado a lado, como no mockup original: WhatsApp (áudio do número
-          do próprio operador) + Ligar (circuito gravado do call center). */}
-      <div className="acts">
-        <button
-          type="button"
-          className="act wa"
-          onClick={abrirWhatsapp}
-          disabled={!urlWhatsApp(lead.telefone)}
-        >
-          <span className="ai">💬</span>WhatsApp
-        </button>
-        <button type="button" className="act cl" onClick={ligar}>
-          <span className="ai">📞</span>Ligar
-        </button>
-      </div>
+          {/* Canais lado a lado, como no mockup original: WhatsApp (áudio do
+              número do próprio operador) + Ligar (circuito gravado do call
+              center). No modo embutido ficam de fora: a conversa por trás já
+              tem o 📞 com a Ligação certa — o daqui criaria avulsa duplicada. */}
+          <div className="acts">
+            <button
+              type="button"
+              className="act wa"
+              onClick={abrirWhatsapp}
+              disabled={!urlWhatsApp(lead.telefone)}
+            >
+              <span className="ai">💬</span>WhatsApp
+            </button>
+            <button type="button" className="act cl" onClick={ligar}>
+              <span className="ai">📞</span>Ligar
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

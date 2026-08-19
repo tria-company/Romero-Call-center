@@ -545,6 +545,31 @@ if (!EVOLUTION_WEBHOOK_TOKEN) {
   );
 }
 
+// ===== Alerta de queda do chip (2026-08-19) =====
+//
+// Quando a instância PRINCIPAL (EVOLUTION_INSTANCE) cai (connection.update →
+// state 'close' no webhook), o backend avisa o time num GRUPO de WhatsApp —
+// enviado por uma SEGUNDA instância (EVOLUTION_INSTANCE_ALERTA), porque o
+// chip caído não consegue anunciar a própria queda. Default 'avisos-romero'
+// (instância criada 2026-08-19 pra isso): o alerta já nasce ARMADO — basta a
+// instância existir/conectar na Evolution. `EVOLUTION_INSTANCE_ALERTA=` vazia
+// no .env desliga explicitamente.
+export const EVOLUTION_INSTANCE_ALERTA =
+  process.env.EVOLUTION_INSTANCE_ALERTA !== undefined ? process.env.EVOLUTION_INSTANCE_ALERTA : 'avisos-romero';
+
+// Apikey da instância de ALERTA — só quando a apikey GLOBAL (EVOLUTION_API_KEY)
+// não autenticar a instância nova; vazio = usa a global. Segredo SÓ no .env.
+export const EVOLUTION_API_KEY_ALERTA = process.env.EVOLUTION_API_KEY_ALERTA || '';
+
+// Nome EXATO (subject) do grupo que recebe o alerta — a instância de ALERTA
+// precisa ser MEMBRO do grupo. O JID é resolvido por nome na primeira
+// necessidade e fica em cache (evolution.ts).
+export const EVOLUTION_GRUPO_ALERTA = process.env.EVOLUTION_GRUPO_ALERTA || 'WHATSAPP TELEMARKETING - CALL CENTER';
+
+// Cooldown do alerta de queda — a Evolution emite vários connection.update
+// em sequência num flap de reconexão; no máximo 1 alerta de queda por janela.
+export const ALERTA_QUEDA_COOLDOWN_MS = Number(process.env.ALERTA_QUEDA_COOLDOWN_MS) || 15 * 60_000;
+
 // Teto de envios/minuto — alvo ~10-20/min por pesquisa (Pitfall 1, risco de
 // banimento do número). Default conservador dentro dessa faixa.
 export const EVOLUTION_MAX_POR_MINUTO = Number(process.env.EVOLUTION_MAX_POR_MINUTO) || 15;

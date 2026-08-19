@@ -23,7 +23,10 @@ import Redis from 'ioredis';
 import {
   EVOLUTION_API_URL,
   EVOLUTION_API_KEY,
+  EVOLUTION_API_KEY_ALERTA,
+  EVOLUTION_GRUPO_ALERTA,
   EVOLUTION_INSTANCE,
+  EVOLUTION_INSTANCE_ALERTA,
   EVOLUTION_MAX_POR_MINUTO,
   RL_EVOLUTION_WAIT_MAX_MS,
   REDIS_URL,
@@ -465,6 +468,102 @@ export async function listarMensagensDaConversa(telefoneE164: string): Promise<M
   }
   mensagens.sort((a, b2) => a.ts - b2.ts);
   return mensagens;
+}
+
+// ===== Alerta no grupo de operação (2026-08-19) =====
+//
+// Aviso de QUEDA DO CHIP no grupo "WHATSAPP TELEMARKETING - CALL CENTER",
+// enviado pela instância de ALERTA (EVOLUTION_INSTANCE_ALERTA, 'avisos-romero')
+// — o chip principal caído não consegue anunciar a própria queda.
+//
+// DIVERGÊNCIA DELIBERADA do choke-point `fetchEvolution`: este caminho NÃO
+// passa pelo rate limiter nem compartilha nada com o envio do chip principal.
+// O limiter existe pra proteger o chip PRINCIPAL de banimento por volume; o
+// alerta sai por OUTRO chip, é raro (cooldown no caller) e — crítico — não
+// pode ser abortado por um limiter emperrado justamente na hora em que a
+// infra degradou (incidente Redis 2026-08-18: limiter preso abortava tudo).
+// Apikey: a da instância de alerta quando configurada, senão a global.
+// LGPD/segredo: nunca logar apikey/JID — só classe/status do erro.
+
+/** Cache do JID do grupo de alerta — resolvido por NOME (subject) uma vez. */
+let jidGrupoAlertaCache: { jid: string; em: number } | null = null;
+const TTL_JID_GRUPO_MS = 6 * 60 * 60_000;
+
+function headersAlerta(): Record<string, string> {
+  return { apikey: EVOLUTION_API_KEY_ALERTA || EVOLUTION_API_KEY, 'Content-Type': 'application/json' };
+}
+
+/** true quando o recurso está configurado (instância de alerta + grupo). */
+export function alertaGrupoConfigurado(): boolean {
+  return !!(EVOLUTION_API_URL && EVOLUTION_INSTANCE_ALERTA && EVOLUTION_GRUPO_ALERTA);
+}
+
+/**
+ * Resolve o JID do grupo de alerta pelo NOME (subject, case-insensitive) via
+ * GET /group/fetchAllGroups da instância de ALERTA. null quando a instância
+ * não enxerga o grupo (não conectada / não é membro) — nunca lança.
+ */
+async function resolverJidGrupoAlerta(): Promise<string | null> {
+  if (jidGrupoAlertaCache && Date.now() - jidGrupoAlertaCache.em < TTL_JID_GRUPO_MS) {
+    return jidGrupoAlertaCache.jid;
+  }
+  try {
+    const res = await fetchTimeout(
+      `${EVOLUTION_API_URL}/group/fetchAllGroups/${EVOLUTION_INSTANCE_ALERTA}?getParticipants=false`,
+      { method: 'GET', headers: headersAlerta() },
+      30_000,
+    );
+    if (!res.ok) {
+      console.warn(`[evolution] alerta: listagem de grupos da instância de alerta falhou (${res.status})`);
+      return null;
+    }
+    const j = (await res.json().catch(() => null)) as Array<{ id?: string; subject?: string }> | null;
+    const alvo = EVOLUTION_GRUPO_ALERTA.trim().toLowerCase();
+    const grupo = Array.isArray(j) ? j.find((g) => String(g.subject ?? '').trim().toLowerCase() === alvo) : null;
+    if (!grupo?.id) {
+      console.warn(`[evolution] alerta: grupo "${EVOLUTION_GRUPO_ALERTA}" não encontrado na instância de alerta (${Array.isArray(j) ? j.length : 0} grupos visíveis)`);
+      return null;
+    }
+    jidGrupoAlertaCache = { jid: grupo.id, em: Date.now() };
+    return grupo.id;
+  } catch (e) {
+    console.warn('[evolution] alerta: falha de rede ao listar grupos:', e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
+
+/**
+ * Posta `texto` no grupo de operação via a instância de ALERTA. Best-effort
+ * por design: NUNCA lança (o caller é o webhook — um alerta que falha não
+ * pode derrubar o recebimento de mensagens); retorna false e loga o porquê.
+ * Sem EVOLUTION_INSTANCE_ALERTA configurada é um no-op anunciado no log.
+ */
+export async function enviarAlertaGrupo(texto: string): Promise<boolean> {
+  if (!alertaGrupoConfigurado()) {
+    console.warn('[evolution] alerta de grupo DESLIGADO (EVOLUTION_INSTANCE_ALERTA/URL ausentes) — aviso não enviado');
+    return false;
+  }
+  const jid = await resolverJidGrupoAlerta();
+  if (!jid) return false;
+  try {
+    const res = await fetchTimeout(
+      `${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE_ALERTA}`,
+      { method: 'POST', headers: headersAlerta(), body: JSON.stringify({ number: jid, text: texto }) },
+      20_000,
+    );
+    if (!res.ok) {
+      // JID em cache pode ter apodrecido (saiu do grupo/recriaram) — derruba
+      // o cache pra próxima tentativa re-resolver do zero.
+      jidGrupoAlertaCache = null;
+      console.warn(`[evolution] alerta de grupo falhou (${res.status})`);
+      return false;
+    }
+    console.log('[evolution] alerta postado no grupo de operação');
+    return true;
+  } catch (e) {
+    console.warn('[evolution] alerta de grupo: falha de rede:', e instanceof Error ? e.message : String(e));
+    return false;
+  }
 }
 
 /**

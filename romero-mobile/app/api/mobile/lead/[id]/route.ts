@@ -19,9 +19,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (!gate.ok) return gate.resposta;
 
   const { id } = await params;
+  // 30s: a timeline agora é filtrada no servidor do ClickUp (~2-3s típicos),
+  // mas o limiter manso pode espaçar as queries — 8s default ficava no limite.
   const r = await chamarDiscador(
     `/api/discador/lead/${encodeURIComponent(id)}`,
     gate.sessao.dToken,
+    { timeoutMs: 30_000 },
   );
 
   return NextResponse.json(r.dados ?? { erro: "Sem resposta." }, {

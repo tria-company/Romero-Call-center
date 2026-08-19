@@ -8,6 +8,10 @@ import { PinoLogger } from '@mastra/loggers';
 import {
   WAVOIP_WEBHOOK_TOKEN,
   DISCADOR_PANEL_URL,
+  // Alerta de queda do chip (2026-08-19): nome da instância PRINCIPAL (filtra
+  // o connection.update dela) + cooldown anti-flap do aviso no grupo.
+  EVOLUTION_INSTANCE,
+  ALERTA_QUEDA_COOLDOWN_MS,
 } from './config';
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
@@ -67,6 +71,10 @@ import {
   lerTimelineDaLigacao,
   definirVotoLeadCampo,
   comentarTask,
+  // Pular contato (2026-08-19): fecha a Ligação com motivo do Romero — mesmos
+  // primitivos do desfecho (metadados + comentário + fechar), semântica própria.
+  gravarMetadadosLigacao,
+  fecharLigacao,
   // quick-260815-r3: "Ligar" na ficha cria uma Ligação avulsa ATRIBUÍDA ao
   // operador (deep-link do discador). valorCampoLead/CAMPOS_LEADS leem o
   // telefone do lead pra criar a avulsa (choke point de leitura de campo).
@@ -111,6 +119,9 @@ import {
   baixarAudioMensagem,
   // Fase 13 (fatia 2): chat de texto.
   enviarTexto,
+  // Alerta de queda do chip (2026-08-19): posta no grupo de operação via a
+  // instância de ALERTA — caminho independente do chip principal.
+  enviarAlertaGrupo,
 } from './evolution.ts';
 // Fase 13: transcrição das mensagens de voz (mesmo Deepgram das calls, D-07).
 import { transcreverBuffer } from './deepgram.ts';
@@ -153,6 +164,12 @@ type MensagemRecebidaWebhook = {
 const recebidasWebhook: MensagemRecebidaWebhook[] = [];
 /** Últimos eventos BRUTOS (ring de 5) — inspeção de formato via rota token-gated. */
 const ultimosEventosWebhook: unknown[] = [];
+/** Alerta de queda do chip (2026-08-19): carimbo do último aviso (cooldown
+ *  anti-flap) + se a queda em aberto já foi anunciada — o 'open' seguinte
+ *  posta a volta UMA vez. Estado por processo (perde no restart, aceitável:
+ *  no pior caso re-avisa uma queda antiga respeitando o cooldown). */
+let ultimoAlertaQuedaTs = 0;
+let quedaAlertada = false;
 /** telefone canônico (dígitos sem nono) → leadTaskId — populado pelos handlers
  *  de lista/conversa; permite ao WEBHOOK achar o lead pra avaliar. */
 const leadPorTelefone = new Map<string, string>();
@@ -887,6 +904,57 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao registrar desfecho' }, 502);
+          }
+        },
+      },
+      {
+        // PULAR CONTATO (pedido 2026-08-19; aberto a TODOS os operadores
+        // 2026-08-19 à noite — "vai ser usado para todos"): tira a Ligação da
+        // fila explicando o MOTIVO, sem precisar discar. Mesmos primitivos do
+        // desfecho (validar → metadados → comentário → fechar) com semântica
+        // própria: MOTIVO_FALHA='Pulado' (contável em relatório) e comentário
+        // "⏭️ Contato pulado" com a frase do operador. Gate: QUALQUER operador
+        // logado — o anti-IDOR é o validarLigacaoDoOperador (CR-01, mesma
+        // régua de /desfecho): cada um só pula a PRÓPRIA Ligação. Chamada pela
+        // lista de áudios do Romero E pela fila clássica dos atendentes.
+        path: '/api/discador/audios/pular',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          registrarPresenca(sess.usuario);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const taskId = String(body.taskId || '');
+          const motivo = String(body.motivo || '').trim().slice(0, 500);
+          if (!taskId) return c.json({ erro: 'taskId obrigatório' }, 400);
+          if (!motivo) return c.json({ erro: 'motivo obrigatório' }, 400);
+          try {
+            await validarLigacaoDoOperador(taskId, assignee);
+            await gravarMetadadosLigacao(taskId, { atendeu: false, motivoFalha: 'Pulado' });
+            // LGPD: só a frase do operador + login — nunca telefone/CPF.
+            try {
+              await comentarTask(taskId, `⏭️ Contato pulado\n📝 ${motivo}\n👤 ${sess.usuario}`);
+            } catch (e) {
+              console.warn('[discador] pular: comentário falhou (segue fechando):', e instanceof Error ? e.message : String(e));
+            }
+            await fecharLigacao(taskId);
+            // mesma eviction do desfecho (D-04/D-03): a linha some da fila no
+            // próximo fetch, sem esperar TTL. No-op sem Redis, nunca lança.
+            await removerDaFilaCache(assignee, taskId);
+            await invalidarFilaCache(assignee);
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            console.error('[discador] erro ao pular contato:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao pular o contato' }, 502);
           }
         },
       },
@@ -2006,6 +2074,45 @@ export const mastra = new Mastra({
           // ring de inspeção (formato real dos eventos; leitura token-gated)
           ultimosEventosWebhook.push(body);
           while (ultimosEventosWebhook.length > 5) ultimosEventosWebhook.shift();
+          // ── QUEDA/VOLTA DO CHIP (2026-08-19): connection.update da instância
+          // PRINCIPAL → aviso no grupo de operação via a instância de ALERTA
+          // (evolution.ts) — o chip caído não anuncia a própria queda. Filtro
+          // por instância: se um dia a instância de alerta apontar o webhook
+          // pra cá, a queda DELA não dispara aviso (senão o aviso da queda do
+          // avisador viraria loop de ruído). Fire-and-forget: o webhook nunca
+          // espera nem falha por causa do alerta. ──
+          if (evento.includes('connection.update')) {
+            const bodyInst = (body as { instance?: unknown } | null)?.instance;
+            const dadosConn = (Array.isArray(body?.data) ? body?.data[0] : body?.data) as
+              | { instance?: unknown; state?: unknown }
+              | undefined;
+            const instancia = String(bodyInst ?? dadosConn?.instance ?? '');
+            const state = String(dadosConn?.state ?? '');
+            if (instancia && EVOLUTION_INSTANCE && instancia !== EVOLUTION_INSTANCE) return c.json({ ok: true });
+            console.log(`[webhook] connection.update: ${state || '(sem state)'}`);
+            const agora = Date.now();
+            const hora = new Date(agora).toLocaleTimeString('pt-BR', {
+              hour: '2-digit',
+              minute: '2-digit',
+              timeZone: 'America/Recife',
+            });
+            if (state === 'close' && !quedaAlertada && agora - ultimoAlertaQuedaTs >= ALERTA_QUEDA_COOLDOWN_MS) {
+              // no máx. 1 aviso de queda por janela de cooldown; enquanto a
+              // queda está em aberto (quedaAlertada) não re-avisa.
+              ultimoAlertaQuedaTs = agora;
+              quedaAlertada = true;
+              void enviarAlertaGrupo(
+                `🔴 *ALERTA — chip do call center caiu* (${hora})\n\n` +
+                  `A instância *${EVOLUTION_INSTANCE}* desconectou do WhatsApp. ` +
+                  `Envio de áudio/mensagem e recebimento de respostas estão PARADOS.\n\n` +
+                  `➡️ Reconectar: Evolution → instância ${EVOLUTION_INSTANCE} → ler o QR code de novo.`,
+              );
+            } else if (state === 'open' && quedaAlertada) {
+              quedaAlertada = false;
+              void enviarAlertaGrupo(`🟢 Chip do call center reconectado (${hora}) — instância *${EVOLUTION_INSTANCE}* de volta. Envios normalizados.`);
+            }
+            return c.json({ ok: true });
+          }
           if (!evento.includes('messages.upsert')) return c.json({ ok: true });
           const dados = Array.isArray(body?.data) ? body?.data : [body?.data].filter(Boolean);
           for (const dBruto of dados as Array<Record<string, unknown>>) {
