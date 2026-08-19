@@ -268,6 +268,31 @@ export async function enviarAudio(telefoneE164: string, audioBase64: string, mim
   }
 }
 
+/**
+ * Envia uma mensagem de TEXTO (Fase 13 fatia 2 — o painel vira chat de
+ * verdade). Mesmo choke-point/throttle/semântica de erro do enviarAudio:
+ * LANÇA em falha de rede/HTTP, preserva EvolutionThrottleError (IN-03).
+ * LGPD: nunca loga telefone nem o corpo do texto.
+ */
+export async function enviarTexto(telefoneE164: string, texto: string): Promise<void> {
+  if (!EVOLUTION_INSTANCE) {
+    throw new Error('[evolution] EVOLUTION_INSTANCE ausente — sem instância dedicada configurada');
+  }
+  let res: Response;
+  try {
+    res = await fetchEvolution(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+      method: 'POST',
+      body: JSON.stringify({ number: telefoneE164, text: texto }),
+    });
+  } catch (e) {
+    if (e instanceof EvolutionThrottleError) throw e;
+    throw new Error(`[evolution] falha de rede ao enviar texto: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[evolution] envio de texto falhou (${res.status})`);
+  }
+}
+
 // ===== Status da instância =====
 
 /** Estado normalizado da instância Evolution — { conectado: boolean } (D-08). */
@@ -341,4 +366,131 @@ export async function numeroExisteNoWhatsapp(telefoneE164: string): Promise<bool
   const entrada = j.find((x) => x.number === telefoneE164) ?? j[0];
   if (entrada?.exists === false) return false;
   return true;
+}
+
+// ===== Conversa (Fase 13 — leitura por POLLING, sem webhook) =====
+
+/** Uma mensagem da conversa de WhatsApp com o lead, já normalizada pro painel. */
+export interface MensagemWhatsapp {
+  /** id da mensagem na Evolution (chave pra baixar mídia). */
+  id: string;
+  /** true = mensagem NOSSA (fromMe); false = resposta do LEAD. */
+  deNos: boolean;
+  /** timestamp em ms. */
+  ts: number;
+  tipo: 'texto' | 'audio' | 'outro';
+  /** corpo do texto (ou caption), quando houver. */
+  texto: string | null;
+}
+
+/**
+ * Lê as mensagens da conversa com `telefoneE164` DIRETO da instância dedicada
+ * (POST /chat/findMessages) — é assim que a resposta do lead chega ao painel
+ * sem depender de webhook (funciona no local e na produção; o webhook da Fase
+ * 13 vira upgrade, não pré-requisito). Read-only: isento do throttle de envio
+ * (skipThrottle, mesmo racional do statusInstancia/WR-02). LANÇA em falha de
+ * rede/HTTP. LGPD: nunca loga telefone/jid/corpo.
+ */
+export async function listarMensagensDaConversa(telefoneE164: string): Promise<MensagemWhatsapp[]> {
+  if (!EVOLUTION_INSTANCE) {
+    throw new Error('[evolution] EVOLUTION_INSTANCE ausente — sem instância dedicada configurada');
+  }
+  // O jid CANÔNICO vem do whatsappNumbers — número BR costuma ter jid SEM o
+  // nono dígito (55119XXXX → 5511XXXX@s.whatsapp.net); montar o jid na mão a
+  // partir do E.164 achava conversa NENHUMA. Fallback: dígitos crus.
+  let jid = `${telefoneE164.replace(/\D/g, '')}@s.whatsapp.net`;
+  try {
+    const resJid = await fetchEvolution(
+      `/chat/whatsappNumbers/${EVOLUTION_INSTANCE}`,
+      { method: 'POST', body: JSON.stringify({ numbers: [telefoneE164] }) },
+      15_000,
+      true,
+    );
+    if (resJid.ok) {
+      const lista = (await resJid.json().catch(() => [])) as Array<{ jid?: string; number?: string }>;
+      const entrada = Array.isArray(lista) ? (lista.find((x) => x.number === telefoneE164) ?? lista[0]) : null;
+      if (entrada?.jid) jid = entrada.jid;
+    }
+  } catch {
+    /* resolução do jid é best-effort: cai no fallback dos dígitos crus */
+  }
+  let res: Response;
+  try {
+    res = await fetchEvolution(
+      `/chat/findMessages/${EVOLUTION_INSTANCE}`,
+      { method: 'POST', body: JSON.stringify({ where: { key: { remoteJid: jid } } }) },
+      20_000,
+      true,
+    );
+  } catch (e) {
+    throw new Error(`[evolution] falha de rede ao ler a conversa: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[evolution] leitura da conversa falhou (${res.status})`);
+  }
+  const j = (await res.json().catch(() => null)) as
+    | { messages?: { records?: unknown[] } | unknown[] }
+    | unknown[]
+    | null;
+  const brutas: unknown[] = Array.isArray(j)
+    ? j
+    : Array.isArray((j as { messages?: unknown[] })?.messages)
+      ? ((j as { messages: unknown[] }).messages)
+      : ((j as { messages?: { records?: unknown[] } })?.messages?.records ?? []);
+  const mensagens: MensagemWhatsapp[] = [];
+  for (const b of brutas) {
+    const m = b as {
+      key?: { id?: string; fromMe?: boolean };
+      message?: {
+        conversation?: string;
+        extendedTextMessage?: { text?: string };
+        audioMessage?: unknown;
+      };
+      messageType?: string;
+      messageTimestamp?: number | string;
+    };
+    const id = m?.key?.id;
+    if (!id) continue;
+    const tsBruto = Number(m?.messageTimestamp ?? 0);
+    const ts = tsBruto > 1e12 ? tsBruto : tsBruto * 1000; // segundos → ms quando preciso
+    const temAudio = !!m?.message?.audioMessage || m?.messageType === 'audioMessage';
+    const texto = m?.message?.conversation ?? m?.message?.extendedTextMessage?.text ?? null;
+    mensagens.push({
+      id,
+      deNos: m?.key?.fromMe === true,
+      ts,
+      tipo: temAudio ? 'audio' : texto !== null ? 'texto' : 'outro',
+      texto,
+    });
+  }
+  mensagens.sort((a, b2) => a.ts - b2.ts);
+  return mensagens;
+}
+
+/**
+ * Baixa a mídia (base64) de uma mensagem de ÁUDIO da conversa — alimenta o ▶
+ * das bolhas do lead e a transcrição (Deepgram). Read-only (skipThrottle).
+ * Retorna null quando a Evolution não devolve base64 (mídia expirada etc.).
+ */
+export async function baixarAudioMensagem(mensagemId: string): Promise<{ base64: string; mimetype: string } | null> {
+  if (!EVOLUTION_INSTANCE) {
+    throw new Error('[evolution] EVOLUTION_INSTANCE ausente — sem instância dedicada configurada');
+  }
+  let res: Response;
+  try {
+    res = await fetchEvolution(
+      `/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE}`,
+      { method: 'POST', body: JSON.stringify({ message: { key: { id: mensagemId } }, convertToMp4: false }) },
+      30_000,
+      true,
+    );
+  } catch (e) {
+    throw new Error(`[evolution] falha de rede ao baixar mídia: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[evolution] download de mídia falhou (${res.status})`);
+  }
+  const j = (await res.json().catch(() => null)) as { base64?: string; mimetype?: string } | null;
+  if (!j?.base64) return null;
+  return { base64: j.base64, mimetype: j.mimetype || 'audio/ogg' };
 }

@@ -1101,31 +1101,53 @@ export interface LeadNuncaLigado {
  * (D-04/D-05); a UI soma "Todos" por cima.
  *
  * Erro de infra/HTTP em qualquer uma das duas listas PROPAGA (`listarTasks`,
- * WR-03) — nunca retorna lista vazia pra mascarar falha. Nota de escala
- * (v3.0, single-user): pagina as duas listas inteiras em memória; otimização
- * pra 100k+ leads fica fora de escopo desta fase (reusa a infra de paginação
- * existente, sem novo mecanismo). LGPD: sem log nesta função (nenhum
- * telefone/CPF impresso).
+ * WR-03) — nunca retorna lista vazia pra mascarar falha. ESCALA (fix quick
+ * 260818): a Lista 01 tem 100k+ leads — varrê-la inteira estourava o tempo
+ * (~11min → timeout). Agora devolve um LOTE limitado: as Ligações (Lista 02,
+ * minúscula) continuam paginadas por inteiro pra exclusão exata, mas os leads
+ * são varridos só até juntar o lote (ou teto de páginas). O CRITÉRIO de
+ * exclusão é IDÊNTICO ao de antes (lead com Ligação sai) — só o RESULTADO é
+ * limitado; a "fonte da verdade do filtro" acima segue valendo. LGPD: sem log
+ * nesta função (nenhum telefone/CPF impresso).
  */
 export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigado[]; origens: string[] }> {
-  const leadsTasks: TaskClickUp[] = [];
-  let pageLeads = 0;
-  let lastPageLeads = false;
-  while (!lastPageLeads) {
-    const resultado = await listarTasks(CLICKUP_LIST_LEADS, { page: pageLeads });
-    leadsTasks.push(...resultado.tasks);
-    lastPageLeads = resultado.lastPage;
-    pageLeads += 1;
-  }
+  // LOTE LIMITADO (fix quick 260818, base 100k+): varrer a Lista 01 inteira a
+  // cada carregamento estourava o tempo (~1001 páginas ≈ 11min → timeout). A
+  // Lista 02 é minúscula e o operador envia EM LOTE (throttle Evolution ~15/min),
+  // então basta um lote pronto: paginamos os leads até juntar LIMITE_LOTE
+  // nunca-ligados, ou acabar a base, ou bater o teto de segurança de páginas.
+  // Pool do lote — a tela revela +10 por rolagem (scroll infinito, 2026-08-19).
+  // 200 custa o MESMO wall-time que 50: a janela paralela de 5 páginas já varre
+  // ~500 leads de uma vez, e com ~1,1k Ligações pra 100k leads quase todo lead
+  // é nunca-ligado (o lote enche na 1ª janela).
+  const LIMITE_LOTE = 200;
+  const MAX_PAGINAS_SCAN = 20; // teto de segurança — nunca varre mais que isso
+  // Janela de paginação PARALELA (fix quick 260818-perf): página a página o
+  // ClickUp cobra ~2-3s CADA — as Ligações (includeClosed = histórico todo,
+  // ~12 páginas) sozinhas custavam ~27s. A janela busca 5 de uma vez e
+  // PROCESSA EM ORDEM — dados e ordem idênticos ao sequencial; páginas além
+  // do fim voltam vazias com last_page e são descartadas (custo desprezível).
+  const JANELA_PAGINAS = 5;
 
+  // Ligações (Lista 02) COMPLETAS — a exclusão precisa de TODAS (erro de
+  // infra PROPAGA — WR-03), então pagina até o fim, em janelas paralelas.
   const ligacoesTasks: TaskClickUp[] = [];
   let pageLig = 0;
   let lastPageLig = false;
   while (!lastPageLig) {
-    const resultado = await listarTasks(CLICKUP_LIST_LIGACOES, { page: pageLig, includeClosed: true });
-    ligacoesTasks.push(...resultado.tasks);
-    lastPageLig = resultado.lastPage;
-    pageLig += 1;
+    const paginas: number[] = [];
+    for (let i = 0; i < JANELA_PAGINAS; i += 1) paginas.push(pageLig + i);
+    const resultados = await Promise.all(
+      paginas.map((p) => listarTasks(CLICKUP_LIST_LIGACOES, { page: p, includeClosed: true })),
+    );
+    for (const resultado of resultados) {
+      ligacoesTasks.push(...resultado.tasks);
+      if (resultado.lastPage) {
+        lastPageLig = true;
+        break; // páginas seguintes da janela estão além do fim — descarta
+      }
+    }
+    pageLig += paginas.length;
   }
 
   // Set de ID_LEAD (GHL ou taskId bruto — mesmo fallback de criarLigacaoAvulsa)
@@ -1141,27 +1163,86 @@ export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigad
     if (tel !== undefined && tel !== null && tel !== '') telefonesComLigacao.push(String(tel));
   }
 
+  // Leads (Lista 01) PAGINADOS sob demanda — filtro inline (MESMO critério de
+  // antes: lead com Ligação por id OU telefone sai), parando quando o lote
+  // enche, a base acaba, ou o teto de páginas é atingido. Janela paralela +
+  // processamento em ordem de página = mesmo resultado do sequencial.
   const nuncaLigados: LeadNuncaLigado[] = [];
   const origensVistas = new Set<string>();
-  for (const task of leadsTasks) {
-    // Mesmo parser usado por gerar-lote/fila (nome/telefone/idLead — DRY, D-07).
-    const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
-    const temPorId =
-      (parsed.idLead !== '' && idsComLigacao.has(parsed.idLead)) || idsComLigacao.has(task.id);
-    const temPorTelefone =
-      parsed.telefone !== '' && telefonesComLigacao.some((tl) => telefonesIguais(tl, parsed.telefone));
-    if (temPorId || temPorTelefone) continue;
-    const origem = valorCampoLead(task, CAMPOS_LEADS.ORIGEM);
-    if (origem) origensVistas.add(origem);
-    nuncaLigados.push({
-      leadTaskId: task.id,
-      nome: parsed.nome,
-      telefone: parsed.telefone,
-      origem,
-    });
+  let pageLeads = 0;
+  let lastPageLeads = false;
+  while (!lastPageLeads && nuncaLigados.length < LIMITE_LOTE && pageLeads < MAX_PAGINAS_SCAN) {
+    const paginas: number[] = [];
+    for (let i = 0; i < JANELA_PAGINAS && pageLeads + i < MAX_PAGINAS_SCAN; i += 1) paginas.push(pageLeads + i);
+    const resultados = await Promise.all(paginas.map((p) => listarTasks(CLICKUP_LIST_LEADS, { page: p })));
+    for (const resultado of resultados) {
+      for (const task of resultado.tasks) {
+        // Mesmo parser usado por gerar-lote/fila (nome/telefone/idLead — DRY, D-07).
+        const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
+        const temPorId =
+          (parsed.idLead !== '' && idsComLigacao.has(parsed.idLead)) || idsComLigacao.has(task.id);
+        const temPorTelefone =
+          parsed.telefone !== '' && telefonesComLigacao.some((tl) => telefonesIguais(tl, parsed.telefone));
+        if (temPorId || temPorTelefone) continue;
+        const origem = valorCampoLead(task, CAMPOS_LEADS.ORIGEM);
+        if (origem) origensVistas.add(origem);
+        nuncaLigados.push({
+          leadTaskId: task.id,
+          nome: parsed.nome,
+          telefone: parsed.telefone,
+          origem,
+        });
+        if (nuncaLigados.length >= LIMITE_LOTE) break;
+      }
+      if (resultado.lastPage) lastPageLeads = true;
+      if (lastPageLeads || nuncaLigados.length >= LIMITE_LOTE) break;
+    }
+    pageLeads += paginas.length;
   }
 
   return { leads: nuncaLigados, origens: [...origensVistas] };
+}
+
+/* ── Cache do lote nunca-ligados (memória, 1 instância) ─────────────────────
+   A varredura custa ~8-30s (ClickUp) e o painel consulta a cada 30s (poll do
+   hook) — sem cache, CADA poll re-varria o ClickUp inteiro. TTL curto +
+   stale-while-revalidate: fresco responde na hora; velho responde na hora E
+   dispara a atualização em fundo; vazio (boot) espera a varredura. Um envio /
+   sem-whatsapp continua tirando o lead da lista pela MESMA regra de sempre
+   (Ligação criada), só que o sumiço aparece no refresh seguinte (≤ TTL + poll
+   — antes já dependia do próximo GET, então a semântica operacional se mantém).
+   Falha do refresh em fundo NUNCA derruba a resposta (WR-03: quem tem dado
+   serve dado; erro só propaga quando não há nada pra servir). */
+const TTL_LOTE_AUDIOS_MS = 60_000;
+let cacheLoteAudios: { dados: { leads: LeadNuncaLigado[]; origens: string[] }; em: number } | null = null;
+let refreshLoteAudiosEmVoo: Promise<{ leads: LeadNuncaLigado[]; origens: string[] }> | null = null;
+
+function dispararRefreshLoteAudios(): Promise<{ leads: LeadNuncaLigado[]; origens: string[] }> {
+  if (!refreshLoteAudiosEmVoo) {
+    refreshLoteAudiosEmVoo = buscarLeadsNuncaLigados()
+      .then((dados) => {
+        cacheLoteAudios = { dados, em: Date.now() };
+        return dados;
+      })
+      .finally(() => {
+        refreshLoteAudiosEmVoo = null;
+      });
+  }
+  return refreshLoteAudiosEmVoo;
+}
+
+/** Versão cacheada de `buscarLeadsNuncaLigados` — a rota GET /audios usa esta. */
+export async function buscarLeadsNuncaLigadosCacheado(): Promise<{ leads: LeadNuncaLigado[]; origens: string[] }> {
+  if (cacheLoteAudios && Date.now() - cacheLoteAudios.em < TTL_LOTE_AUDIOS_MS) return cacheLoteAudios.dados;
+  const refresh = dispararRefreshLoteAudios();
+  if (cacheLoteAudios) {
+    // stale: serve o que tem AGORA; o refresh segue em fundo (erro só avisa).
+    refresh.catch((e) =>
+      console.warn('[audios] refresh do lote falhou; servindo cache anterior:', e instanceof Error ? e.message : String(e)),
+    );
+    return cacheLoteAudios.dados;
+  }
+  return refresh; // frio (boot): espera a varredura; erro PROPAGA (WR-03)
 }
 
 /**
@@ -1183,12 +1264,20 @@ export async function registrarEnvioAudio(args: {
   enviadoPor: string;
   audioRef: string;
   leadTaskId?: string;
+  /** Base64 do áudio enviado (sem prefixo data:) — vira ANEXO na task (o campo
+   *  "Áudio" da Lista 03 é type=attachment). Opcional: sem ele o registro é
+   *  criado sem anexo (metadados continuam valendo). */
+  audioBase64?: string;
+  mimetype?: string;
 }): Promise<{ id: string } | null> {
   const e164 = normalizarTelefoneE164(args.telefone);
+  // O campo AUDIO NÃO entra aqui: ele é type=attachment no ClickUp — string em
+  // custom_fields devolvia 400 e DERRUBAVA o registro inteiro (bug pego por
+  // probe A/B em 2026-08-18; era por isso que a Lista 03 ficava vazia). O
+  // áudio em si sobe como ANEXO depois da criação (abaixo, best-effort).
   const custom_fields: Array<{ id: string; value: unknown }> = [
     { id: CAMPOS_AUDIOS.DATA_DO_ENVIO, value: Date.now() },
     { id: CAMPOS_AUDIOS.ENVIADO_POR, value: args.enviadoPor },
-    { id: CAMPOS_AUDIOS.AUDIO, value: args.audioRef },
   ];
   if (e164 !== null) {
     custom_fields.push({ id: CAMPOS_AUDIOS.TELEFONE, value: e164 });
@@ -1216,6 +1305,29 @@ export async function registrarEnvioAudio(args: {
         );
       }
     }
+    if (args.audioBase64) {
+      // Anexa o ÁUDIO REAL na task (campo "Áudio" da Lista 03 é attachment;
+      // o anexo fica no corpo da task e vira insumo da transcrição na Fase 13).
+      // Best-effort: falha aqui não derruba o registro já criado. Multipart:
+      // SEM Content-Type manual (o fetch põe o boundary sozinho).
+      try {
+        const buf = Buffer.from(args.audioBase64, 'base64');
+        const form = new FormData();
+        form.append('attachment', new Blob([buf], { type: args.mimetype || 'audio/webm' }), args.audioRef);
+        const resAnexo = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${novaTask.id}/attachment`, {
+          method: 'POST',
+          headers: { Authorization: CLICKUP_API_TOKEN },
+          body: form,
+        });
+        if (!resAnexo.ok) {
+          console.warn(`[clickup] registrarEnvioAudio (${novaTask.id}): anexo do áudio falhou (${resAnexo.status})`);
+        }
+      } catch (e) {
+        console.warn(
+          `[clickup] registrarEnvioAudio (${novaTask.id}): anexo do áudio falhou: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
     return { id: novaTask.id };
   } catch (e) {
     // WR-03: o envio (efeito primário, evolution.ts) já aconteceu — uma falha
@@ -1226,6 +1338,168 @@ export async function registrarEnvioAudio(args: {
     );
     return null;
   }
+}
+
+/** Um envio (áudio OU texto) já registrado na Lista 03, na visão da conversa. */
+export interface EnvioAudioHistorico {
+  /** id da task de registro na Lista 03 (alvo das escritas de resposta/análise). */
+  taskId: string;
+  /** DATA_DO_ENVIO em ms (0 quando o registro antigo não tem a data). */
+  em: number;
+  /** ENVIADO_POR (usuário do token que enviou). */
+  por: string;
+  /** 'texto' quando o registro é de mensagem de texto (Fase 13 fatia 2). */
+  tipo: 'audio' | 'texto';
+  /** corpo da mensagem de texto (description da task) — null pra áudio. */
+  texto: string | null;
+  /** URL assinada do ANEXO de áudio na task (null se o registro não tem anexo). */
+  audioUrl: string | null;
+  /** TRANSCRICAO_AUDIO (Deepgram no envio, Fase 13) — null se ainda não transcrito. */
+  transcricao: string | null;
+}
+
+/**
+ * Histórico de envios de áudio de UM lead (Lista 03) — alimenta as bolhas da
+ * conversa no painel (persistência entre sessões). A Lista 03 é pequena (um
+ * registro por envio), então a paginação completa é barata; só as tasks que
+ * batem no lead pagam o GET individual (necessário: a listagem não devolve
+ * `attachments`). Erro de infra PROPAGA (WR-03) — a rota decide o 502.
+ * LGPD: nenhum telefone logado aqui.
+ */
+export async function listarEnviosAudioDoLead(leadTaskId: string): Promise<EnvioAudioHistorico[]> {
+  const tasks: TaskClickUp[] = [];
+  let page = 0;
+  let last = false;
+  while (!last) {
+    const r = await listarTasks(CLICKUP_LIST_AUDIOS, { page, includeClosed: true });
+    tasks.push(...r.tasks);
+    last = r.lastPage;
+    page += 1;
+  }
+  const envios: EnvioAudioHistorico[] = [];
+  for (const t of tasks) {
+    const rel = t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.LEAD)?.value;
+    const ids = Array.isArray(rel) ? rel.map((v) => String((v as { id?: unknown })?.id ?? v)) : [];
+    if (!ids.includes(leadTaskId)) continue;
+    const em = Number(t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.DATA_DO_ENVIO)?.value ?? NaN);
+    const por = String(t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.ENVIADO_POR)?.value ?? '');
+    const transBruta = t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.TRANSCRICAO_AUDIO)?.value;
+    const transcricao = transBruta !== undefined && transBruta !== null && String(transBruta) !== '' ? String(transBruta) : null;
+    // Tipo pelo TÍTULO do registro (contrato de escrita deste módulo):
+    // "Mensagem enviada — ..." = texto; "Áudio enviado — ..." = áudio.
+    const ehTexto = String(t.name ?? '').startsWith('Mensagem enviada');
+    let audioUrl: string | null = null;
+    let texto: string | null = null;
+    try {
+      // GET individual: anexo (áudio) ou corpo do texto (description).
+      const det = (await lerTask(t.id)) as (TaskClickUp & { attachments?: Array<{ url?: string }> }) | null;
+      if (ehTexto) texto = det?.text_content ?? det?.description ?? null;
+      else audioUrl = det?.attachments?.[0]?.url ?? null;
+    } catch {
+      /* sem detalhe legível: a bolha aparece sem player/corpo (best-effort) */
+    }
+    envios.push({ taskId: t.id, em: Number.isFinite(em) ? em : 0, por, tipo: ehTexto ? 'texto' : 'audio', texto, audioUrl, transcricao });
+  }
+  envios.sort((a, b) => a.em - b.em);
+  return envios;
+}
+
+/**
+ * Registra uma mensagem de TEXTO enviada (Fase 13 fatia 2 — chat de verdade).
+ * Mesmo molde best-effort do `registrarEnvioAudio` (WR-03: o envio primário já
+ * aconteceu; falha aqui só avisa). O corpo do texto vai na DESCRIPTION da task
+ * (é o "banco" da mensagem); título com telefone MASCARADO (IN-01/LGPD) e o
+ * prefixo "Mensagem enviada" é o CONTRATO que `listarEnviosAudioDoLead` usa
+ * pra distinguir texto de áudio.
+ */
+export async function registrarMensagemTexto(args: {
+  telefone: string;
+  enviadoPor: string;
+  texto: string;
+  leadTaskId?: string;
+}): Promise<{ id: string } | null> {
+  const e164 = normalizarTelefoneE164(args.telefone);
+  const custom_fields: Array<{ id: string; value: unknown }> = [
+    { id: CAMPOS_AUDIOS.DATA_DO_ENVIO, value: Date.now() },
+    { id: CAMPOS_AUDIOS.ENVIADO_POR, value: args.enviadoPor },
+  ];
+  if (e164 !== null) {
+    custom_fields.push({ id: CAMPOS_AUDIOS.TELEFONE, value: e164 });
+  }
+  try {
+    const novaTask = await criarTask(CLICKUP_LIST_AUDIOS, {
+      name: `Mensagem enviada — ${mascararTelefone(args.telefone)}`,
+      description: args.texto,
+      custom_fields,
+    });
+    if (!novaTask?.id) {
+      console.warn('[clickup] registrarMensagemTexto: criarTask retornou sem id — envio já feito, registro NÃO persistido');
+      return null;
+    }
+    if (args.leadTaskId) {
+      try {
+        await setCustomField(novaTask.id, CAMPOS_AUDIOS.LEAD, { add: [args.leadTaskId] });
+      } catch (e) {
+        console.warn(
+          `[clickup] registrarMensagemTexto (${novaTask.id}): vínculo ao lead falhou: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+    return { id: novaTask.id };
+  } catch (e) {
+    const mascarado = mascararTelefone(args.telefone);
+    console.warn(
+      `[clickup] registrarMensagemTexto: envio já foi feito mas o registro falhou (tel ${mascarado}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return null;
+  }
+}
+
+/** Resumo da conversa de UM lead, agregado da Lista 03 (pro selo da lista). */
+export interface ResumoConversaLead {
+  envios: number;
+  temResposta: boolean;
+  /** TRANSCRICAO_RESPOSTA do registro mais recente com resposta (null sem). */
+  respostaTexto: string | null;
+  /** ANALISE_IA persistida ("LIGAR — ..." / "NÃO LIGAR — ...") — null sem análise. */
+  analise: string | null;
+}
+
+/**
+ * UMA passada na Lista 03 → resumo de conversa POR lead (Fase 13 fatia 2):
+ * alimenta o selo "Ligar / Não ligar / Sem conversa" da lista. Erro PROPAGA
+ * (WR-03) — o handler decide cache/fallback.
+ */
+export async function mapaConversaPorLead(): Promise<Map<string, ResumoConversaLead>> {
+  const tasks: TaskClickUp[] = [];
+  let page = 0;
+  let last = false;
+  while (!last) {
+    const r = await listarTasks(CLICKUP_LIST_AUDIOS, { page, includeClosed: true });
+    tasks.push(...r.tasks);
+    last = r.lastPage;
+    page += 1;
+  }
+  const mapa = new Map<string, ResumoConversaLead>();
+  for (const t of tasks) {
+    const rel = t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.LEAD)?.value;
+    const ids = Array.isArray(rel) ? rel.map((v) => String((v as { id?: unknown })?.id ?? v)) : [];
+    if (ids.length === 0) continue;
+    const dataResposta = Number(t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.DATA_DA_RESPOSTA)?.value ?? NaN);
+    const respBruta = t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.TRANSCRICAO_RESPOSTA)?.value;
+    const respostaTexto = respBruta !== undefined && respBruta !== null && String(respBruta) !== '' ? String(respBruta) : null;
+    const analiseBruta = t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.ANALISE_IA)?.value;
+    const analise = analiseBruta !== undefined && analiseBruta !== null && String(analiseBruta) !== '' ? String(analiseBruta) : null;
+    for (const leadId of ids) {
+      const atual = mapa.get(leadId) ?? { envios: 0, temResposta: false, respostaTexto: null, analise: null };
+      atual.envios += 1;
+      if (Number.isFinite(dataResposta) && dataResposta > 0) atual.temResposta = true;
+      if (respostaTexto) atual.respostaTexto = respostaTexto;
+      if (analise) atual.analise = analise;
+      mapa.set(leadId, atual);
+    }
+  }
+  return mapa;
 }
 
 /**

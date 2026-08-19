@@ -57,7 +57,7 @@ export type RespostaDiscador = { ok: boolean; status: number; dados: unknown };
 export async function chamarDiscador(
   caminho: string,
   dToken: string,
-  init?: { method?: string; body?: unknown },
+  init?: { method?: string; body?: unknown; timeoutMs?: number },
 ): Promise<RespostaDiscador> {
   if (!dToken) {
     return { ok: false, status: 502, dados: { erro: "Call center inacessível." } };
@@ -74,7 +74,10 @@ export async function chamarDiscador(
       headers,
       body: temCorpo ? JSON.stringify(init!.body) : undefined,
       cache: "no-store",
-      signal: AbortSignal.timeout(8000),
+      // 8s cobre as rotas rápidas; chamadas sabidamente lentas (a lista de
+      // áudios varre o ClickUp por ~15s) passam um teto maior — senão a ponte
+      // aborta ANTES do backend responder e a UI vê 502 eterno.
+      signal: AbortSignal.timeout(init?.timeoutMs ?? 8000),
     });
     const dados = await r.json().catch(() => null);
     return { ok: r.ok, status: r.status, dados };

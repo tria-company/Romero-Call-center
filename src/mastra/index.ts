@@ -74,21 +74,256 @@ import {
   valorCampoLead,
   CAMPOS_LEADS,
   // Canal de envio Evolution API + Lista de Áudios (Fase 12 Plano 03,
-  // ENVIO-01/02/03/06): buscarLeadsNuncaLigados/registrarEnvioAudio vêm do
-  // Plano 02; normalizarTelefoneE164 resolve o E.164 do lead antes de
-  // chamar evolution.enviarAudio.
-  buscarLeadsNuncaLigados,
+  // ENVIO-01/02/03/06): a rota GET usa a versão CACHEADA (quick 260818-perf:
+  // varredura ~8-30s + poll de 30s do painel = cache stale-while-revalidate);
+  // registrarEnvioAudio vem do Plano 02; normalizarTelefoneE164 resolve o
+  // E.164 do lead antes de chamar evolution.enviarAudio.
+  buscarLeadsNuncaLigadosCacheado,
   registrarEnvioAudio,
   normalizarTelefoneE164,
   // quick 260818-mv2: pré-check de WhatsApp ANTES do envio de áudio — marca
   // o lead "Sem WhatsApp" (comenta + Ligação fechada) sem tocar em
   // buscarLeadsNuncaLigados.
   marcarLeadSemWhatsapp,
+  // Histórico de envios por lead (Lista 03) — bolhas persistentes da conversa.
+  listarEnviosAudioDoLead,
+  // Fase 13 (fatia 1): escrita da transcrição/resposta na Lista 03 + leitura
+  // do anexo de áudio do registro (mídia do fallback da conversa).
+  setCustomField,
+  CAMPOS_AUDIOS,
+  lerTask,
+  // Fase 13 (fatia 2): chat de texto + selo Ligar/Não ligar/Sem conversa.
+  registrarMensagemTexto,
+  mapaConversaPorLead,
+  type ResumoConversaLead,
 } from './clickup';
 // Client Evolution API (Fase 12 Plano 01, D-06/D-08): choke-point único de
 // envio/status — enviarAudio LANÇA em falha (nunca 200 silencioso).
 // numeroExisteNoWhatsapp (quick 260818-mv2): pré-check ANTES de enviarAudio.
-import { enviarAudio, statusInstancia, numeroExisteNoWhatsapp, EvolutionThrottleError } from './evolution.ts';
+import {
+  enviarAudio,
+  statusInstancia,
+  numeroExisteNoWhatsapp,
+  EvolutionThrottleError,
+  // Fase 13 (fatia 1, quick 260818): conversa por POLLING direto da instância
+  // (sem webhook) + download de mídia pras bolhas/transcrição.
+  listarMensagensDaConversa,
+  baixarAudioMensagem,
+  // Fase 13 (fatia 2): chat de texto.
+  enviarTexto,
+} from './evolution.ts';
+// Fase 13: transcrição das mensagens de voz (mesmo Deepgram das calls, D-07).
+import { transcreverBuffer } from './deepgram.ts';
+// Fase 13 (fatia 2): avaliação "ligar ou não ligar" da resposta do lead —
+// mesmo LLM Azure dos 3 agentes do projeto.
+import { chamarLLM } from './llm.ts';
+
+/* Fase 13 (fatia 1) — caches em memória do processo (1 instância, mesmo
+   racional do cache do lote): transcrição por MENSAGEM (id estável na
+   Evolution; nunca re-transcreve o mesmo áudio) e contagem de resposta já
+   persistida por LEAD (evita reescrever a Lista 03 a cada poll da conversa). */
+const transcricaoPorMensagem = new Map<string, string | null>();
+const respostaPersistidaPorLead = new Map<string, number>();
+/* Telefone já VALIDADO por lead (cache 5 min): o guard anti-IDOR
+   (validarLeadDaLista01) custa um GET no ClickUp e a conversa é POLLADA a cada
+   10s — valida na 1ª abertura e reusa o resultado nos polls seguintes. A
+   propriedade de segurança se mantém: só entra no cache o que JÁ passou pelo
+   guard; a membresia na Lista 01 não muda no meio de uma conversa aberta. */
+const telefonePorLeadCache = new Map<string, { e164: string; em: number }>();
+const TTL_TELEFONE_LEAD_MS = 300_000;
+
+/* Fase 13 (fatia 3, LOCAL-FIRST): recepção por WEBHOOK — a Evolution posta
+   cada mensagem recebida aqui (no local via túnel cloudflared; na produção,
+   direto na URL do VPS). Supre o cofre mudo do servidor Evolution: as
+   mensagens do LEAD ficam em memória (últimas 500) e alimentam a conversa, a
+   transcrição, a avaliação (debounce 60s) e o selo. Áudio chega base64
+   (webhook configurado com base64:true) e é transcrito na chegada. */
+type MensagemRecebidaWebhook = {
+  id: string;
+  ts: number;
+  tipo: 'texto' | 'audio' | 'outro';
+  texto: string | null;
+  transcricao: string | null;
+  /** dígitos dos jids candidatos (remoteJid/senderPn/participantPn) — casados
+   *  contra o telefone do lead com tolerância ao nono dígito. */
+  digitos: string[];
+  midiaBase64: string | null;
+  midiaMime: string | null;
+};
+const recebidasWebhook: MensagemRecebidaWebhook[] = [];
+/** Últimos eventos BRUTOS (ring de 5) — inspeção de formato via rota token-gated. */
+const ultimosEventosWebhook: unknown[] = [];
+/** telefone canônico (dígitos sem nono) → leadTaskId — populado pelos handlers
+ *  de lista/conversa; permite ao WEBHOOK achar o lead pra avaliar. */
+const leadPorTelefone = new Map<string, string>();
+function telefoneCanonico(x: string): string {
+  const d = x.replace(/\D/g, '');
+  return d.length === 13 && d[4] === '9' ? d.slice(0, 4) + d.slice(5) : d;
+}
+/** timers de avaliação por telefone: cada mensagem nova REARMA o timer pra
+ *  60s após a ÚLTIMA mensagem (pedido do gestor: esperar o lead terminar). */
+const timerAvaliacaoPorTelefone = new Map<string, ReturnType<typeof setTimeout>>();
+function agendarAvaliacaoPorTelefone(digitos: string[], tsMensagem: number): void {
+  for (const dg of digitos) {
+    const canon = telefoneCanonico(dg);
+    if (!canon) continue;
+    const anterior = timerAvaliacaoPorTelefone.get(canon);
+    if (anterior) clearTimeout(anterior);
+    // se o evento já chegou velho (ts antigo), avalia quase na hora
+    const atraso = Math.max(1_000, AVALIACAO_DEBOUNCE_MS + 1_000 - (Date.now() - tsMensagem));
+    timerAvaliacaoPorTelefone.set(
+      canon,
+      setTimeout(() => {
+        timerAvaliacaoPorTelefone.delete(canon);
+        void (async () => {
+          // lead: índice em memória primeiro; depois o DB (mensagens já
+          // vinculadas sobrevivem a restart — o índice em memória zera).
+          let leadId = leadPorTelefone.get(canon) ?? null;
+          if (!leadId) leadId = await buscarLeadPorTelefoneWhatsapp(canon);
+          if (!leadId) return; // lead nunca visto — a próxima lista/conversa resolve
+          leadPorTelefone.set(canon, leadId);
+          // mensagens do lead: DB (completo, sobrevive a restart) com fallback
+          // no ring em memória (Supabase fora/no-op).
+          let doLead: Array<{ ts: number; texto: string | null; transcricao: string | null }> = [];
+          try {
+            const rows = await listarMensagensWhatsapp({ leadTaskId: leadId, telefoneCanonico: canon });
+            if (rows) {
+              doLead = rows
+                .filter((r) => !r.de_nos && r.tipo !== 'outro')
+                .map((r) => ({ ts: Date.parse(r.ts) || 0, texto: r.texto ?? null, transcricao: r.transcricao ?? null }));
+            }
+          } catch (e) {
+            console.warn('[webhook] leitura das mensagens pra avaliação falhou:', e instanceof Error ? e.message : String(e));
+          }
+          if (doLead.length === 0) {
+            doLead = recebidasWebhook
+              .filter((m) => m.digitos.some((x) => telefoneCanonico(x) === canon))
+              .map((m) => ({ ts: m.ts, texto: m.texto, transcricao: m.transcricao }));
+          }
+          void avaliarConversaComDebounce(leadId, doLead);
+        })();
+      }, atraso),
+    );
+  }
+}
+
+/** Remove rótulos "Falante N:" das transcrições (pedido do gestor 2026-08-19)
+ *  — o fluxo de áudios do WhatsApp não tem papéis pra rotular; transcrições
+ *  antigas gravadas com o rótulo saem limpas na leitura. */
+function limparRotuloFalante(t: string | null): string | null {
+  if (!t) return t;
+  const limpo = t.replace(/Falante \d+:\s*/g, '').trim();
+  return limpo || null;
+}
+
+/** Comparação de telefones com tolerância ao nono dígito BR (mesma régua do
+ *  telefonesIguais do clickup.ts, replicada aqui só sobre dígitos). */
+function mesmoTelefoneDigitos(a: string, b: string): boolean {
+  const dig = (x: string) => x.replace(/\D/g, '');
+  const semNono = (d: string) => (d.length === 13 && d[4] === '9' ? d.slice(0, 4) + d.slice(5) : d);
+  const A = dig(a);
+  const B = dig(b);
+  return !!A && !!B && (A === B || semNono(A) === semNono(B));
+}
+
+/* Selo "Ligar / Não ligar / Sem conversa" da lista (Fase 13 fatia 2).
+   Heurística EXPLÍCITA (MVP): recusa por palavras-chave na resposta; a análise
+   IA (Azure) da Fase 13 completa substitui esta régua sem mudar o contrato
+   {status, motivo}. Cache 60s da passada na Lista 03 (mesmo racional do lote). */
+const RECUSA_RE =
+  /\b(n[aã]o\s+(quero|liga|ligue|me\s+ligue|tenho\s+interesse|perturb)|pare|para\s+de|remov[ae]|descadastr|sai\s+fora|nunca\s+mais|bloquea|denunci)\b/i;
+type StatusConversaLead = { status: 'ligar' | 'nao_ligar' | 'sem_conversa'; motivo: string };
+
+/* Avaliação da conversa (pedido do gestor 2026-08-19): TODA mensagem nova do
+   lead reavalia o selo, mas com DEBOUNCE de 60s desde a ÚLTIMA mensagem — dá
+   tempo do lead terminar de mandar tudo antes da avaliação completa. LLM
+   (Azure, `chamarLLM`) decide ligar/não-ligar + motivo; a heurística RECUSA_RE
+   é o fallback quando o LLM falha. Resultado fica em memória (fresco) E
+   persistido em ANALISE_IA no registro mais recente da Lista 03 (sobrevive a
+   restart — `mapaConversaPorLead` lê de volta). */
+const AVALIACAO_DEBOUNCE_MS = 60_000;
+const avaliacaoPorLead = new Map<string, { paraContagem: number; status: 'ligar' | 'nao_ligar'; motivo: string }>();
+const avaliacaoEmVooPorLead = new Set<string>();
+
+async function avaliarConversaComDebounce(
+  leadId: string,
+  doLead: Array<{ ts: number; texto: string | null; transcricao: string | null }>,
+): Promise<void> {
+  if (doLead.length === 0) return;
+  const ultimaTs = doLead[doLead.length - 1].ts;
+  if (Date.now() - ultimaTs < AVALIACAO_DEBOUNCE_MS) return; // lead ainda pode estar digitando
+  const atual = avaliacaoPorLead.get(leadId);
+  if (atual && atual.paraContagem === doLead.length) return; // este lote já foi avaliado
+  if (avaliacaoEmVooPorLead.has(leadId)) return;
+  avaliacaoEmVooPorLead.add(leadId);
+  try {
+    const corpo = doLead
+      .map((m) => (limparRotuloFalante(m.transcricao) ?? m.texto ?? '').trim())
+      .filter(Boolean)
+      .join('\n');
+    let status: 'ligar' | 'nao_ligar' = corpo && RECUSA_RE.test(corpo) ? 'nao_ligar' : 'ligar';
+    let motivo = corpo ? `"${corpo.slice(0, 90)}"` : 'Respondeu — pode ligar';
+    try {
+      const bruto = await chamarLLM(
+        `Mensagens do lead:\n"""\n${corpo.slice(0, 1500)}\n"""`,
+        'Você avalia a resposta de um lead numa campanha de contato por WhatsApp. Responda APENAS um JSON {"ligar": boolean, "motivo": string}: "ligar"=true quando vale a pena ligar pra essa pessoa agora; "motivo" = frase curta (máx. 80 caracteres, português) explicando a decisão pro operador.',
+      );
+      const m = bruto.match(/\{[\s\S]*\}/);
+      const j = m ? (JSON.parse(m[0]) as { ligar?: boolean; motivo?: string }) : null;
+      if (j && typeof j.ligar === 'boolean') {
+        status = j.ligar ? 'ligar' : 'nao_ligar';
+        if (j.motivo) motivo = String(j.motivo).slice(0, 120);
+      }
+    } catch (e) {
+      console.warn('[discador] avaliação LLM falhou (mantendo heurística):', e instanceof Error ? e.message : String(e));
+    }
+    avaliacaoPorLead.set(leadId, { paraContagem: doLead.length, status, motivo });
+    try {
+      const envios = await listarEnviosAudioDoLead(leadId);
+      const ultimo = envios[envios.length - 1];
+      if (ultimo?.taskId) {
+        await setCustomField(
+          ultimo.taskId,
+          CAMPOS_AUDIOS.ANALISE_IA,
+          `${status === 'ligar' ? 'LIGAR' : 'NÃO LIGAR'} — ${motivo}`,
+        );
+      }
+    } catch (e) {
+      console.warn('[discador] persistência da análise falhou:', e instanceof Error ? e.message : String(e));
+    }
+  } finally {
+    avaliacaoEmVooPorLead.delete(leadId);
+  }
+}
+
+function statusConversaDe(leadId: string, resumo?: ResumoConversaLead): StatusConversaLead {
+  // 1º a avaliação fresca em memória; 2º a persistida (ANALISE_IA); 3º regras.
+  const aval = avaliacaoPorLead.get(leadId);
+  if (aval) return { status: aval.status, motivo: aval.motivo };
+  if (resumo?.analise) {
+    const naoLigar = resumo.analise.startsWith('NÃO LIGAR');
+    const motivo = resumo.analise.replace(/^(NÃO LIGAR|LIGAR)\s*—\s*/, '');
+    return { status: naoLigar ? 'nao_ligar' : 'ligar', motivo };
+  }
+  if (!resumo || resumo.envios === 0) return { status: 'sem_conversa', motivo: 'Nenhum contato ainda' };
+  if (!resumo.temResposta) return { status: 'sem_conversa', motivo: 'Mensagem enviada — sem resposta ainda' };
+  if (resumo.respostaTexto && RECUSA_RE.test(resumo.respostaTexto)) {
+    return { status: 'nao_ligar', motivo: `"${resumo.respostaTexto.slice(0, 90)}"` };
+  }
+  return { status: 'ligar', motivo: resumo.respostaTexto ? `"${resumo.respostaTexto.slice(0, 90)}"` : 'Respondeu — pode ligar' };
+}
+let cacheStatusConversa: { mapa: Map<string, ResumoConversaLead>; em: number } | null = null;
+async function mapaConversaCacheado(): Promise<Map<string, ResumoConversaLead> | null> {
+  if (cacheStatusConversa && Date.now() - cacheStatusConversa.em < 60_000) return cacheStatusConversa.mapa;
+  try {
+    const mapa = await mapaConversaPorLead();
+    cacheStatusConversa = { mapa, em: Date.now() };
+    return mapa;
+  } catch (e) {
+    console.warn('[discador] mapa de conversa falhou (selo fica neutro):', e instanceof Error ? e.message : String(e));
+    return cacheStatusConversa?.mapa ?? null; // fail-open: lista sai sem selo
+  }
+}
 
 // Cache-aside da fila (Fase 08 Plano 02/04, CACHE-04): /ligando invalida/
 // remove a task recem-iniciada do cache POR OPERADOR (D-04) — iniciarLigacao
@@ -138,6 +373,15 @@ import {
   listarLeadsEspelho,
   atualizarVotoEspelho,
   type RecorteEspelho,
+  // Fase 13: conversa WhatsApp persistida (read-model + durabilidade do webhook Evolution)
+  salvarMensagemWhatsapp,
+  atualizarMensagemWhatsapp,
+  listarMensagensWhatsapp,
+  buscarMidiaMensagemWhatsapp,
+  vincularLeadMensagensWhatsapp,
+  buscarLeadPorTelefoneWhatsapp,
+  ultimasMensagensWhatsapp,
+  marcarMensagensLidas,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -1210,8 +1454,31 @@ export const mastra = new Mastra({
           const gate = await sessaoRomero(c);
           if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
           try {
-            const { leads, origens } = await buscarLeadsNuncaLigados();
-            return c.json({ leads, origens });
+            const { leads, origens } = await buscarLeadsNuncaLigadosCacheado();
+            // Selo por lead (Fase 13 fatia 2): agrega a Lista 03 (cache 60s);
+            // falha do mapa NÃO derruba a lista (selo sai neutro).
+            const mapa = await mapaConversaCacheado();
+            // Última mensagem por lead (2026-08-19): ordena como WhatsApp (quem
+            // falou por último no topo) + bolinha de "esperando resposta".
+            // Falha aqui só tira a ordenação — nunca derruba a lista.
+            const ultimas = await ultimasMensagensWhatsapp().catch((e) => {
+              console.warn('[discador] últimas mensagens indisponíveis:', e instanceof Error ? e.message : String(e));
+              return null;
+            });
+            // índice telefone→lead pro webhook conseguir avaliar sem conversa aberta
+            for (const l of leads) leadPorTelefone.set(telefoneCanonico(l.telefone), l.leadTaskId);
+            const leadsComStatus = leads.map((l) => ({
+              ...l,
+              conversa: statusConversaDe(l.leadTaskId, mapa?.get(l.leadTaskId)),
+              ultima:
+                ultimas?.porLead.get(l.leadTaskId) ??
+                ultimas?.porTelefone.get(telefoneCanonico(l.telefone)) ??
+                null,
+            }));
+            // sort estável do V8: quem tem conversa sobe (mais recente primeiro);
+            // quem não tem mantém a ordem da varredura.
+            leadsComStatus.sort((a, b) => (b.ultima?.ts ?? 0) - (a.ultima?.ts ?? 0));
+            return c.json({ leads: leadsComStatus, origens });
           } catch (e) {
             console.error('[discador] erro ao buscar leads nunca-ligados:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao carregar os leads' }, 502);
@@ -1317,7 +1584,7 @@ export const mastra = new Mastra({
           // Registro best-effort na Lista Audios (WR-03) — o envio (efeito
           // primário) já aconteceu; uma falha aqui nunca desfaz/mascara o envio.
           // enviadoPor vem do TOKEN (gate.usuario), nunca do body do cliente.
-          await registrarEnvioAudio({
+          const registro = await registrarEnvioAudio({
             telefone: telefoneE164,
             enviadoPor: gate.usuario,
             // WR-03/IN-03: extensão saneada — o recorder produz
@@ -1325,8 +1592,476 @@ export const mastra = new Mastra({
             // pra não gravar `audio-<ts>.webm;codecs=opus` (extensão malformada).
             audioRef: `audio-${Date.now()}${mimetype ? `.${(mimetype.split('/')[1] || '').split(';')[0] || 'bin'}` : ''}`,
             leadTaskId: leadId,
+            // O áudio REAL vira anexo na task da Lista 03 (campo "Áudio" é
+            // attachment) — insumo da transcrição/análise (Fase 13).
+            audioBase64,
+            mimetype,
           });
+          if (registro?.id) {
+            const idRegistro = registro.id;
+            // Conversa persistida (sql/escala/03): o envio entra no read-model na
+            // hora, COM a mídia — a conversa e o ▶ ficam instantâneos e sobrevivem
+            // a restart. id `registro-<taskId>` casa com a rota de mídia.
+            void salvarMensagemWhatsapp({
+              id: `registro-${idRegistro}`,
+              lead_task_id: leadId,
+              telefone_canonico: telefoneCanonico(telefoneE164),
+              de_nos: true,
+              ts: new Date().toISOString(),
+              tipo: 'audio',
+              midia_base64: audioBase64,
+              midia_mime: mimetype ?? 'audio/webm',
+            }).catch((e) =>
+              console.warn('[discador] persistência do envio falhou:', e instanceof Error ? e.message : String(e)),
+            );
+            // Fase 13 (fatia 1): transcreve o áudio ENVIADO em FUNDO e grava
+            // TRANSCRICAO_AUDIO na task do registro — fire-and-forget: não
+            // atrasa a resposta do envio; falha só avisa (best-effort).
+            void (async () => {
+              try {
+                const texto = await transcreverBuffer(Buffer.from(audioBase64, 'base64'), mimetype);
+                if (texto) {
+                  await Promise.allSettled([
+                    setCustomField(idRegistro, CAMPOS_AUDIOS.TRANSCRICAO_AUDIO, texto),
+                    atualizarMensagemWhatsapp(`registro-${idRegistro}`, { transcricao: texto }),
+                  ]);
+                }
+              } catch (e) {
+                console.warn('[discador] transcrição do áudio enviado falhou:', e instanceof Error ? e.message : String(e));
+              }
+            })();
+          }
           return c.json({ status: 'ok' });
+        },
+      },
+      {
+        // Fase 13 (fatia 2): envia uma mensagem de TEXTO pro lead — o painel
+        // vira chat de verdade. Mesmo esqueleto do envio de áudio: gate romero,
+        // guard anti-IDOR, pré-check de WhatsApp, throttle, registro na Lista
+        // 03 (best-effort) — o texto fica salvo na description do registro.
+        path: '/api/discador/audios/:leadId/mensagem',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const leadId = c.req.param('leadId');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const texto = String(body.texto ?? '').trim();
+          if (!texto) return c.json({ erro: 'texto obrigatório' }, 400);
+          if (texto.length > 4096) return c.json({ erro: 'texto longo demais' }, 400);
+          let telefoneE164: string;
+          let idLeadGhl = '';
+          try {
+            const task = await validarLeadDaLista01(leadId);
+            const telefoneRaw = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
+            const e164 = telefoneRaw ? normalizarTelefoneE164(telefoneRaw) : null;
+            if (!e164) return c.json({ erro: 'Lead sem telefone válido' }, 422);
+            telefoneE164 = e164;
+            idLeadGhl = valorCampoLead(task, CAMPOS_LEADS.ID_LEAD_GHL);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('[discador] erro ao resolver lead pro envio de texto:', msg);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado
+              ? c.json({ erro: 'Lead não encontrado' }, 404)
+              : c.json({ erro: 'Erro ao carregar o lead' }, 502);
+          }
+          try {
+            const existe = await numeroExisteNoWhatsapp(telefoneE164);
+            if (!existe) {
+              await marcarLeadSemWhatsapp({ leadTaskId: leadId, idLeadGhl, telefone: telefoneE164, usuario: gate.usuario });
+              return c.json({ status: 'sem_whatsapp' });
+            }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('[discador] falha no pré-check de WhatsApp (texto):', msg);
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
+          }
+          try {
+            await enviarTexto(telefoneE164, texto);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('[discador] falha ao enviar texto via Evolution:', msg);
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
+          }
+          const registroTxt = await registrarMensagemTexto({ telefone: telefoneE164, enviadoPor: gate.usuario, texto, leadTaskId: leadId });
+          // Conversa persistida (sql/escala/03) — mesma lógica do envio de áudio.
+          void salvarMensagemWhatsapp({
+            id: registroTxt?.id ? `registro-${registroTxt.id}` : `envio-txt-${leadId}-${Date.now()}`,
+            lead_task_id: leadId,
+            telefone_canonico: telefoneCanonico(telefoneE164),
+            de_nos: true,
+            ts: new Date().toISOString(),
+            tipo: 'texto',
+            texto,
+          }).catch((e) =>
+            console.warn('[discador] persistência do texto falhou:', e instanceof Error ? e.message : String(e)),
+          );
+          return c.json({ status: 'ok' });
+        },
+      },
+      {
+        // Histórico de envios de áudio do lead (Lista 03) — as bolhas
+        // persistentes da conversa no painel. Mesmo gate romero das demais.
+        path: '/api/discador/audios/:leadId/historico',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const leadId = c.req.param('leadId');
+          try {
+            const envios = await listarEnviosAudioDoLead(leadId);
+            return c.json({ envios });
+          } catch (e) {
+            console.error('[discador] erro no histórico de áudios:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar o histórico' }, 502);
+          }
+        },
+      },
+      {
+        // Fase 13 (fatia 1): a CONVERSA real do WhatsApp com o lead, lida por
+        // POLLING da instância dedicada (findMessages — sem depender de
+        // webhook; funciona no local e na produção). Mensagens de ÁUDIO (dos
+        // DOIS lados) ganham transcrição via Deepgram, com cache por mensagem
+        // (id estável) pra nunca re-transcrever no poll. A resposta do lead é
+        // PERSISTIDA na Lista 03 (registro mais recente do lead: DATA_DA_
+        // RESPOSTA / MENSAGENS_NA_RESPOSTA / TRANSCRICAO_RESPOSTA) em fundo,
+        // best-effort, apenas quando a contagem muda (WR-03).
+        path: '/api/discador/audios/:leadId/conversa',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const leadId = c.req.param('leadId');
+          let telefoneE164: string;
+          const cacheTel = telefonePorLeadCache.get(leadId);
+          if (cacheTel && Date.now() - cacheTel.em < TTL_TELEFONE_LEAD_MS) {
+            telefoneE164 = cacheTel.e164; // já passou pelo guard nesta janela
+          } else {
+            try {
+              // Mesmo guard anti-IDOR do envio: só Leads da Lista 01.
+              const task = await validarLeadDaLista01(leadId);
+              const telefoneRaw = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
+              const e164 = telefoneRaw ? normalizarTelefoneE164(telefoneRaw) : null;
+              if (!e164) return c.json({ erro: 'Lead sem telefone válido' }, 422);
+              telefoneE164 = e164;
+              telefonePorLeadCache.set(leadId, { e164, em: Date.now() });
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              console.error('[discador] erro ao resolver lead pra conversa:', msg);
+              const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+              return naoEncontrado
+                ? c.json({ erro: 'Lead não encontrado' }, 404)
+                : c.json({ erro: 'Erro ao carregar o lead' }, 502);
+            }
+          }
+          const canonConversa = telefoneCanonico(telefoneE164);
+          leadPorTelefone.set(canonConversa, leadId);
+          // Abrir/olhar a conversa = LER (pedido 2026-08-19): marca as mensagens
+          // do lead como lidas — a bolinha da lista apaga no próximo refresh.
+          // Best-effort: falha nunca atrapalha a leitura da conversa.
+          void marcarMensagensLidas(leadId, canonConversa).catch(() => {});
+          try {
+            const saida: Array<{
+              id: string;
+              deNos: boolean;
+              ts: number;
+              tipo: string;
+              texto: string | null;
+              transcricao: string | null;
+            }> = [];
+            // CAMINHO RÁPIDO (sql/escala/03): a conversa persistida no Supabase —
+            // envios nossos + mensagens do webhook — abre em ms e sobrevive a
+            // restart (o "sumiu as conversas" de 2026-08-19). Falha de leitura
+            // degrada pro caminho lento de hoje (WR-03: nunca mascara como vazio).
+            let rowsDb: Awaited<ReturnType<typeof listarMensagensWhatsapp>> = null;
+            try {
+              rowsDb = await listarMensagensWhatsapp({ leadTaskId: leadId, telefoneCanonico: canonConversa });
+            } catch (e) {
+              console.warn('[discador] leitura da conversa no Supabase falhou (indo pro caminho lento):', e instanceof Error ? e.message : String(e));
+            }
+            if (rowsDb) {
+              for (const r of rowsDb) {
+                saida.push({
+                  id: r.id,
+                  deNos: r.de_nos,
+                  ts: Date.parse(r.ts) || 0,
+                  tipo: r.tipo,
+                  texto: r.texto ?? null,
+                  transcricao: limparRotuloFalante(r.transcricao ?? null),
+                });
+              }
+              // Envios PRÉ-DB (o histórico antigo vive só na Lista 03): enquanto
+              // não houver NENHUM envio nosso persistido — DB vazio OU só com
+              // mensagens do webhook — busca os registros uma vez e backfilla;
+              // desta abertura em diante a conversa inteira vem do DB (ms).
+              if (!rowsDb.some((r) => r.de_nos)) {
+                const envios = await listarEnviosAudioDoLead(leadId);
+                const vistosDb = new Set(saida.map((m) => m.id));
+                for (const e2 of envios) {
+                  const idReg = `registro-${e2.taskId}`;
+                  if (vistosDb.has(idReg)) continue;
+                  saida.push({
+                    id: idReg,
+                    deNos: true,
+                    ts: e2.em,
+                    tipo: e2.tipo,
+                    texto: e2.texto,
+                    transcricao: limparRotuloFalante(e2.transcricao),
+                  });
+                  void salvarMensagemWhatsapp({
+                    id: idReg,
+                    lead_task_id: leadId,
+                    telefone_canonico: canonConversa,
+                    de_nos: true,
+                    ts: new Date(e2.em).toISOString(),
+                    tipo: e2.tipo === 'texto' ? 'texto' : 'audio',
+                    texto: e2.texto,
+                    transcricao: limparRotuloFalante(e2.transcricao),
+                  }).catch(() => {});
+                }
+              }
+              // vincula ao lead as linhas do webhook que chegaram antes do vínculo
+              void vincularLeadMensagensWhatsapp(canonConversa, leadId).catch(() => {});
+            } else {
+              // Supabase FORA (não configurado): caminho de hoje por inteiro —
+              // store da Evolution → fallback registros da Lista 03.
+              const mensagens = await listarMensagensDaConversa(telefoneE164);
+              for (const m of mensagens) {
+                let transcricao: string | null = null;
+                if (m.tipo === 'audio') {
+                  if (transcricaoPorMensagem.has(m.id)) {
+                    transcricao = transcricaoPorMensagem.get(m.id) ?? null;
+                  } else {
+                    try {
+                      const midia = await baixarAudioMensagem(m.id);
+                      transcricao = midia
+                        ? await transcreverBuffer(Buffer.from(midia.base64, 'base64'), midia.mimetype)
+                        : null;
+                    } catch {
+                      transcricao = null; // sem transcrição ≠ sem conversa (fail-open)
+                    }
+                    transcricaoPorMensagem.set(m.id, transcricao);
+                  }
+                }
+                saida.push({ ...m, transcricao: limparRotuloFalante(transcricao) });
+              }
+              if (saida.length === 0) {
+                // FALLBACK (constatado em 2026-08-18): o servidor Evolution não
+                // guarda as conversas diretas (store só com grupos) — os NOSSOS
+                // envios entram direto da Lista 03 (registro + transcrição; a
+                // mídia sai do anexo via /mensagem/registro-<taskId>/midia).
+                const envios = await listarEnviosAudioDoLead(leadId);
+                for (const e2 of envios) {
+                  saida.push({
+                    id: `registro-${e2.taskId}`,
+                    deNos: true,
+                    ts: e2.em,
+                    tipo: e2.tipo,
+                    texto: e2.texto,
+                    transcricao: e2.transcricao,
+                  });
+                }
+              }
+            }
+            // Fatia 3: soma as mensagens RECEBIDAS pelo webhook (o lado do
+            // lead que o cofre da Evolution não guarda) — dedupe por id.
+            const vistos = new Set(saida.map((m) => m.id));
+            for (const rec of recebidasWebhook) {
+              if (vistos.has(rec.id)) continue;
+              if (!rec.digitos.some((dg) => mesmoTelefoneDigitos(dg, telefoneE164))) continue;
+              saida.push({ id: rec.id, deNos: false, ts: rec.ts, tipo: rec.tipo, texto: rec.texto, transcricao: rec.transcricao });
+            }
+            saida.sort((a, b) => a.ts - b.ts);
+            const doLead = saida.filter((m) => !m.deNos);
+            // Avaliação ligar/não-ligar com debounce de 60s (fire-and-forget).
+            void avaliarConversaComDebounce(
+              leadId,
+              doLead.map((m) => ({ ts: m.ts, texto: m.texto, transcricao: m.transcricao })),
+            );
+            if (doLead.length > 0 && respostaPersistidaPorLead.get(leadId) !== doLead.length) {
+              respostaPersistidaPorLead.set(leadId, doLead.length);
+              void (async () => {
+                try {
+                  const envios = await listarEnviosAudioDoLead(leadId);
+                  const ultimo = envios[envios.length - 1];
+                  if (!ultimo?.taskId) return;
+                  const ultimaDoLead = doLead[doLead.length - 1];
+                  await setCustomField(ultimo.taskId, CAMPOS_AUDIOS.DATA_DA_RESPOSTA, ultimaDoLead.ts);
+                  await setCustomField(ultimo.taskId, CAMPOS_AUDIOS.MENSAGENS_NA_RESPOSTA, doLead.length);
+                  const textoResp = ultimaDoLead.transcricao ?? ultimaDoLead.texto;
+                  if (textoResp) await setCustomField(ultimo.taskId, CAMPOS_AUDIOS.TRANSCRICAO_RESPOSTA, textoResp);
+                } catch (e) {
+                  console.warn('[discador] persistência da resposta falhou:', e instanceof Error ? e.message : String(e));
+                }
+              })();
+            }
+            return c.json({ mensagens: saida });
+          } catch (e) {
+            console.error('[discador] erro ao ler a conversa:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar a conversa' }, 502);
+          }
+        },
+      },
+      {
+        // Fase 13 (fatia 3): RECEPTOR do webhook da Evolution — cada mensagem
+        // que chega no número dedicado é postada aqui (túnel no local; URL do
+        // VPS na produção). Autentica por token (?token= ou x-webhook-token,
+        // comparado a EVOLUTION_WEBHOOK_TOKEN). Só consome messages.upsert de
+        // TERCEIROS (fromMe já vira registro no envio). LGPD: nunca loga
+        // telefone/corpo — só tipo/contagem.
+        path: '/api/evolution/webhook',
+        method: 'POST',
+        handler: async (c) => {
+          const esperado = process.env.EVOLUTION_WEBHOOK_TOKEN ?? '';
+          const token = c.req.query('token') ?? c.req.header('x-webhook-token') ?? '';
+          if (!esperado || token !== esperado) return c.json({ status: 'forbidden' }, 403);
+          const body = (await c.req.json().catch(() => null)) as
+            | { event?: string; data?: unknown }
+            | null;
+          const evento = String(body?.event ?? '').toLowerCase().replace(/_/g, '.');
+          // ring de inspeção (formato real dos eventos; leitura token-gated)
+          ultimosEventosWebhook.push(body);
+          while (ultimosEventosWebhook.length > 5) ultimosEventosWebhook.shift();
+          if (!evento.includes('messages.upsert')) return c.json({ ok: true });
+          const dados = Array.isArray(body?.data) ? body?.data : [body?.data].filter(Boolean);
+          for (const dBruto of dados as Array<Record<string, unknown>>) {
+            const d = dBruto as {
+              key?: { id?: string; fromMe?: boolean; remoteJid?: string; senderPn?: string; participantPn?: string };
+              message?: { conversation?: string; extendedTextMessage?: { text?: string }; audioMessage?: { mimetype?: string }; base64?: string };
+              messageType?: string;
+              messageTimestamp?: number | string;
+              base64?: string;
+              sender?: string;
+            };
+            const key = d?.key ?? {};
+            if (key.fromMe === true) continue; // nosso envio já vira registro
+            // Só conversa DIRETA interessa: o número dedicado participa de grupos/
+            // newsletters que despejam spam aqui (constatado no ring 2026-08-19 —
+            // eventos "outro" eram ofertas de grupo). Grupo NUNCA é resposta de lead.
+            const remoteJid = String(key.remoteJid ?? '');
+            if (/@(g\.us|newsletter|broadcast)$/.test(remoteJid)) continue;
+            const id = String(key.id ?? '');
+            if (!id || recebidasWebhook.some((m) => m.id === id)) continue;
+            const tsB = Number(d?.messageTimestamp ?? 0) || Math.floor(Date.now() / 1000);
+            const ts = tsB > 1e12 ? tsB : tsB * 1000;
+            const msg = d?.message ?? {};
+            const texto = msg.conversation ?? msg.extendedTextMessage?.text ?? null;
+            const temAudio = !!msg.audioMessage || String(d?.messageType ?? '') === 'audioMessage';
+            const midiaBase64 =
+              typeof msg.base64 === 'string' ? msg.base64 : typeof d?.base64 === 'string' ? d.base64 : null;
+            // 10-13 dígitos = telefone BR plausível; jids @lid carregam um ID
+            // interno de 14-15 dígitos que NÃO é telefone (senderPn traz o real).
+            const digitos = [key.remoteJid, key.senderPn, key.participantPn, d?.sender]
+              .map((x) => String(x ?? '').split('@')[0].replace(/\D/g, ''))
+              .filter((x) => x.length >= 10 && x.length <= 13);
+            const rec: MensagemRecebidaWebhook = {
+              id,
+              ts,
+              tipo: temAudio ? 'audio' : texto !== null && texto !== '' ? 'texto' : 'outro',
+              texto,
+              transcricao: null,
+              digitos: [...new Set(digitos)],
+              midiaBase64,
+              midiaMime: temAudio ? (msg.audioMessage?.mimetype ?? 'audio/ogg') : null,
+            };
+            recebidasWebhook.push(rec);
+            while (recebidasWebhook.length > 500) recebidasWebhook.shift();
+            // Durabilidade (sql/escala/03): a mensagem do lead sobrevive a restart
+            // — o ring acima é só a janela quente. Best-effort: falha loga-e-segue,
+            // o webhook nunca vira 500 por causa da persistência (WR-03).
+            const canonRec = telefoneCanonico(rec.digitos[0] ?? '');
+            void salvarMensagemWhatsapp({
+              id,
+              lead_task_id: leadPorTelefone.get(canonRec) ?? null,
+              telefone_canonico: canonRec,
+              de_nos: false,
+              ts: new Date(ts).toISOString(),
+              tipo: rec.tipo,
+              texto: rec.texto,
+              transcricao: null,
+              midia_base64: midiaBase64,
+              midia_mime: rec.midiaMime,
+              bruto: dBruto,
+            }).catch((e) =>
+              console.warn('[webhook] persistência da mensagem falhou:', e instanceof Error ? e.message : String(e)),
+            );
+            if (temAudio && midiaBase64) {
+              // transcreve a resposta de voz na chegada (best-effort, em fundo)
+              void transcreverBuffer(Buffer.from(midiaBase64, 'base64'), rec.midiaMime ?? undefined)
+                .then((t) => {
+                  rec.transcricao = t;
+                  if (t) {
+                    void atualizarMensagemWhatsapp(id, { transcricao: t }).catch(() => {});
+                  }
+                })
+                .catch(() => {});
+            }
+            // avaliação com debounce disparada PELO webhook (não depende da
+            // conversa estar aberta no painel) — pedido do gestor.
+            agendarAvaliacaoPorTelefone(rec.digitos, rec.ts);
+            console.log(`[webhook] mensagem recebida (${rec.tipo})`);
+          }
+          return c.json({ ok: true });
+        },
+      },
+      {
+        // Espião de formato (debug): últimos 5 eventos BRUTOS do webhook.
+        // Token-gated (mesmo token do webhook) — uso: diagnosticar o shape
+        // real dos eventos sem logar conteúdo no console (LGPD).
+        path: '/api/evolution/webhook/debug',
+        method: 'GET',
+        handler: async (c) => {
+          const esperado = process.env.EVOLUTION_WEBHOOK_TOKEN ?? '';
+          const token = c.req.query('token') ?? '';
+          if (!esperado || token !== esperado) return c.json({ status: 'forbidden' }, 403);
+          return c.json({ eventos: ultimosEventosWebhook });
+        },
+      },
+      {
+        // Fase 13: mídia (base64) de uma mensagem de ÁUDIO da conversa —
+        // alimenta o ▶ das bolhas dos dois lados. Read-only, gate romero.
+        // ids `registro-<taskId>` (fallback Lista 03) tocam o ANEXO da task.
+        path: '/api/discador/audios/mensagem/:mensagemId/midia',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const mensagemId = c.req.param('mensagemId');
+          try {
+            // mensagem recebida via WEBHOOK: a mídia já chegou base64 no evento
+            const rec = recebidasWebhook.find((m) => m.id === mensagemId);
+            if (rec?.midiaBase64) {
+              return c.json({ base64: rec.midiaBase64, mimetype: rec.midiaMime ?? 'audio/ogg' });
+            }
+            // conversa persistida (sql/escala/03): mídia gravada no envio/chegada
+            // — playback instantâneo mesmo depois de restart, sem baixar de fora
+            const midiaDb = await buscarMidiaMensagemWhatsapp(mensagemId).catch(() => null);
+            if (midiaDb) {
+              return c.json({ base64: midiaDb.base64, mimetype: midiaDb.mimetype });
+            }
+            if (mensagemId.startsWith('registro-')) {
+              const taskId = mensagemId.slice('registro-'.length);
+              const det = (await lerTask(taskId)) as
+                | { attachments?: Array<{ url?: string; extension?: string }> }
+                | null;
+              const anexo = det?.attachments?.[0];
+              if (!anexo?.url) return c.json({ erro: 'Mídia indisponível' }, 404);
+              const resArq = await fetch(anexo.url);
+              if (!resArq.ok) return c.json({ erro: 'Mídia indisponível' }, 404);
+              const buf = Buffer.from(await resArq.arrayBuffer());
+              // o ClickUp rotula .webm como video/* — é áudio de voz: normaliza
+              // pra audio/* (players de <audio> engasgam com data:video/...).
+              const mimetype = (resArq.headers.get('content-type') || (anexo.extension === 'ogg' ? 'audio/ogg' : 'audio/webm')).replace(/^video\//, 'audio/');
+              return c.json({ base64: buf.toString('base64'), mimetype });
+            }
+            const midia = await baixarAudioMensagem(mensagemId);
+            if (!midia) return c.json({ erro: 'Mídia indisponível' }, 404);
+            return c.json(midia);
+          } catch (e) {
+            console.error('[discador] erro ao baixar mídia da mensagem:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao baixar a mídia' }, 502);
+          }
         },
       },
 

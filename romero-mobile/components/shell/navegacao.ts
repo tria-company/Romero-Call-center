@@ -34,12 +34,23 @@ export const DESTINOS: readonly Destino[] = [
 ];
 
 /**
- * Abas que o usuário enxerga: atendente perde as marcadas `soGestor`; quem
- * não é o usuário `romero` perde as marcadas `soRomero` (ENVIO-07) — ausência
- * total da aba, não um estado desabilitado.
+ * Abas que o usuário enxerga.
+ *
+ * Gestor/admin (ENVIO-08): barra ENXUTA — Início · Ações · Perfil. A Fila
+ * absorve a lista de Áudios e passa a se chamar "Ações"; a aba Áudios e a aba
+ * Base saem do menu. A lista de áudios agora vive DENTRO de Ações (sem dropdown);
+ * `/base` continua existindo por rota direta, só não aparece no menu. A seção de
+ * áudios dentro de Ações segue romero-only — o gate real é o backend
+ * (`exigirRomero`), aqui é só apresentação.
+ *
+ * Atendente: inalterado — Fila e Perfil (nunca teve Base/Áudios).
  */
-export function destinosVisiveis(papel: "gestor" | "atendente", usuario?: string): Destino[] {
-  return DESTINOS.filter((d) => (papel === "gestor" || !d.soGestor) && (usuario === "romero" || !d.soRomero));
+export function destinosVisiveis(papel: "gestor" | "atendente", _usuario?: string): Destino[] {
+  const por = (href: string) => DESTINOS.find((d) => d.href === href)!;
+  if (papel === "gestor") {
+    return [por("/"), { ...por("/fila"), label: "Ações", labelLongo: "Ações de hoje" }, por("/perfil")];
+  }
+  return [por("/fila"), por("/perfil")];
 }
 
 export function rotaAtiva(pathname: string, d: Destino): boolean {
