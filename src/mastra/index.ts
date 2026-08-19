@@ -314,7 +314,9 @@ function statusConversaDe(leadId: string, resumo?: ResumoConversaLead): StatusCo
 }
 let cacheStatusConversa: { mapa: Map<string, ResumoConversaLead>; em: number } | null = null;
 async function mapaConversaCacheado(): Promise<Map<string, ResumoConversaLead> | null> {
-  if (cacheStatusConversa && Date.now() - cacheStatusConversa.em < 60_000) return cacheStatusConversa.mapa;
+  // 60s→5min (2026-08-19): mesmo racional do TTL do lote — menos varreduras da
+  // Lista 03 por hora; o selo fresco continua vindo do avaliacaoPorLead em memória.
+  if (cacheStatusConversa && Date.now() - cacheStatusConversa.em < 300_000) return cacheStatusConversa.mapa;
   try {
     const mapa = await mapaConversaPorLead();
     cacheStatusConversa = { mapa, em: Date.now() };

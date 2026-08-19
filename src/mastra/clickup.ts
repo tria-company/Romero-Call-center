@@ -1127,7 +1127,10 @@ export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigad
   // ~12 páginas) sozinhas custavam ~27s. A janela busca 5 de uma vez e
   // PROCESSA EM ORDEM — dados e ordem idênticos ao sequencial; páginas além
   // do fim voltam vazias com last_page e são descartadas (custo desprezível).
-  const JANELA_PAGINAS = 5;
+  // 5→3 (2026-08-19): rajadas de 5 conexões paralelas somadas aos pollers
+  // derrubaram a VPS no WAF do ClickUp em produção — 3 mantém o ganho de
+  // paralelismo com perfil de tráfego bem mais manso.
+  const JANELA_PAGINAS = 3;
 
   // Ligações (Lista 02) COMPLETAS — a exclusão precisa de TODAS (erro de
   // infra PROPAGA — WR-03), então pagina até o fim, em janelas paralelas.
@@ -1213,7 +1216,10 @@ export async function buscarLeadsNuncaLigados(): Promise<{ leads: LeadNuncaLigad
    — antes já dependia do próximo GET, então a semântica operacional se mantém).
    Falha do refresh em fundo NUNCA derruba a resposta (WR-03: quem tem dado
    serve dado; erro só propaga quando não há nada pra servir). */
-const TTL_LOTE_AUDIOS_MS = 60_000;
+// 60s→5min (2026-08-19): cada refresh é uma varredura FULL da Lista 02 (~13
+// páginas) — a cada minuto isso vira tráfego contínuo no ClickUp (produção
+// levou tarpit). O lote de nunca-ligados muda devagar; 5min de staleness é ok.
+const TTL_LOTE_AUDIOS_MS = 300_000;
 let cacheLoteAudios: { dados: { leads: LeadNuncaLigado[]; origens: string[] }; em: number } | null = null;
 let refreshLoteAudiosEmVoo: Promise<{ leads: LeadNuncaLigado[]; origens: string[] }> | null = null;
 
