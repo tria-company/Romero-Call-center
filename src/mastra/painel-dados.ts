@@ -407,8 +407,15 @@ export interface TelefonistaCampanha {
   lig: number;
   cont: number;
   conv: number;   // % de conversão = contatos / ligações
-  ader: number;   // aderência ao script (0 quando não avaliada)
-  tsec: number;   // tempo médio em segundos
+  /** Aderência ao script em PERCENTUAL (0–100), convertida da nota 0–10 do Agente de
+   *  Análise. Vale 0 tanto para "avaliada com nota 0" quanto para "nunca avaliada" —
+   *  quem separa os dois casos é `aderAmostra`, e a tela precisa olhar os dois. */
+  ader: number;
+  /** Quantas ligações do operador têm nota de aderência. 0 = nunca avaliada: a tela mostra
+   *  "—" em vez de 0%, senão quem nunca foi ouvido aparece como o pior da equipe. Medido
+   *  em 19/08: só 52 das 1.345 ligações tinham nota, e 15 dos 28 operadores tinham zero. */
+  aderAmostra: number;
+  tsec: number;   // tempo MEDIANO em segundos (mesma conta do card "tempo médio geral")
   votos: number;
   ligh: number;   // ligações por hora
 }
@@ -587,6 +594,35 @@ function mediana(ordenados: number[]): number {
 }
 
 /**
+ * Teto da nota de aderência ao script. NÃO é escolha deste módulo: é o contrato do Agente
+ * de Análise, que pede à IA "um numero de 0 a 10" (analise.ts) e trava o resultado nessa
+ * faixa antes de gravar no ClickUp. O dossiê imprime a mesma nota como "N/10".
+ */
+const NOTA_ADERENCIA_MAX = 10;
+
+/**
+ * Média das notas de aderência convertida em PERCENTUAL.
+ *
+ * O painel sempre desenhou este número com um `%` colado e o comparou contra 80/70 (verde/
+ * âmbar/vermelho) — mas o que chegava aqui era a nota 0–10 crua. O efeito, medido em
+ * 19/08 sobre as 52 notas existentes (min 0, max 8): uma ligação avaliada com 8 de 10
+ * aparecia como "8%" e levava a bolinha VERMELHA de "treino", e o limiar de 80% era
+ * inalcançável por construção — o teto da escala é 10.
+ *
+ * A conversão é feita aqui, e não na tela, porque `ader` é publicado como percentual no
+ * contrato da rota: quem consumir a API recebe a mesma unidade que o painel desenha.
+ *
+ * O `clamp` protege contra nota digitada à mão no ClickUp fora da escala do agente (um
+ * "85" viraria 850%). Sem amostra devolve 0, e `aderAmostra` é quem diz à tela que isso é
+ * ausência de avaliação, não desempenho ruim.
+ */
+function aderenciaEmPct(notas: number[]): number {
+  if (notas.length === 0) return 0;
+  const media = notas.reduce((s, n) => s + n, 0) / notas.length;
+  return Math.max(0, Math.min(100, Math.round((media / NOTA_ADERENCIA_MAX) * 100)));
+}
+
+/**
  * Agrega a Lista 02 por DIA e por OPERADOR. Uma varredura só alimenta os três cards —
  * produção diária, ranking de telefonistas e taxa de atendimento — e o cache absorve o
  * custo (~3,8s hoje, 167 ligações em 2 páginas).
@@ -638,38 +674,68 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     .map(([dia, v]) => ({ dia, ligacoes: v.ligacoes, contatos: v.contatos }));
 
   // --- ranking por telefonista ---
-  interface Acc { lig: number; cont: number; segs: number[]; aders: number[]; ini: number; fim: number }
+  //
+  // A chave do grupo é o login em MINÚSCULA, não o texto cru: medido em 19/08, o campo
+  // trazia `kalinebrito288` (67 ligações) e `Kalinebrito288` (8) — a MESMA pessoa em duas
+  // linhas do ranking, competindo consigo mesma com metade do volume cada. O rótulo
+  // exibido é a grafia mais frequente do próprio grupo (mesmo critério de `agruparMotivos`),
+  // então a tela mostra como a operação escreve, sem inventar caixa.
+  const SEM_OP = 'sem operador';
+  interface Acc {
+    lig: number;
+    cont: number;
+    segs: number[];
+    aders: number[];
+    /** grafias vistas deste mesmo login -> quantas vezes; a mais comum vira o rótulo */
+    variantes: Map<string, number>;
+    ini: number;
+    fim: number;
+  }
   const porOp = new Map<string, Acc>();
   for (const t of todas) {
-    const nome = String(valorCampo(t, CAMPOS_LIGACOES.OPERADOR) ?? '').trim() || 'sem operador';
-    const a = porOp.get(nome) ?? { lig: 0, cont: 0, segs: [], aders: [], ini: Infinity, fim: 0 };
+    const bruto = String(valorCampo(t, CAMPOS_LIGACOES.OPERADOR) ?? '').trim();
+    const chave = bruto.toLowerCase() || SEM_OP;
+    const a = porOp.get(chave) ?? { lig: 0, cont: 0, segs: [], aders: [], variantes: new Map<string, number>(), ini: Infinity, fim: 0 };
+    if (bruto) a.variantes.set(bruto, (a.variantes.get(bruto) ?? 0) + 1);
     a.lig += 1;
     if (contato(t)) a.cont += 1;
     const seg = duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO));
     if (seg) a.segs.push(seg);
-    const ader = Number(valorCampo(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT));
-    if (Number.isFinite(ader) && ader > 0) a.aders.push(ader);
+    // `preenchido` antes de `Number`: o campo AUSENTE vira NaN (filtrado pelo isFinite),
+    // mas o campo VAZIO ('') vira 0 — e um 0 falso baixaria a média de quem nunca foi
+    // avaliado. A nota 0 REAL entra: ela é a pior avaliação possível, não a ausência de
+    // avaliação, e o `> 0` de antes a descartava — medido em 19/08, 19 das 52 notas eram
+    // 0, todas jogadas fora, e a média saía só dos sobreviventes.
+    if (preenchido(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT)) {
+      const nota = Number(valorCampo(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT));
+      if (Number.isFinite(nota)) a.aders.push(nota);
+    }
     const ts = Number(t.date_created);
     if (ts) { a.ini = Math.min(a.ini, ts); a.fim = Math.max(a.fim, ts); }
-    porOp.set(nome, a);
+    porOp.set(chave, a);
   }
-  const media = (xs: number[]) => (xs.length ? Math.round(xs.reduce((s, x) => s + x, 0) / xs.length) : 0);
-  const SEM_OP = 'sem operador';
   const balde = porOp.get(SEM_OP);
   const semOperador = { lig: balde?.lig ?? 0, cont: balde?.cont ?? 0 };
   const telefonistas: TelefonistaCampanha[] = [...porOp.entries()]
-    .filter(([nome]) => nome !== SEM_OP)
-    .map(([nome, a], i) => {
+    .filter(([chave]) => chave !== SEM_OP)
+    .map(([chave, a], i) => {
       const horas = Math.max(1, (a.fim - a.ini) / 3600000);
+      const grafia = [...a.variantes.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? chave;
       return {
         id: i + 1,
-        nome: nomeDeOperador(nome),
+        nome: nomeDeOperador(grafia),
         turno: '',
         lig: a.lig,
         cont: a.cont,
         conv: a.lig ? Math.round((a.cont / a.lig) * 100) : 0,
-        ader: media(a.aders),
-        tsec: media(a.segs),
+        ader: aderenciaEmPct(a.aders),
+        aderAmostra: a.aders.length,
+        // MEDIANA, igual ao card "tempo médio geral" — e não a média, que era o que estava
+        // aqui. Os dois carregam o rótulo "médio" na tela e precisam ser a MESMA conta,
+        // senão não fecham: medido em 19/08, mediana=83s contra média=204s no mesmo
+        // conjunto. A média ainda leva o outlier de 12.217s (3h23, ligação que nunca gravou
+        // FIM) e publicava 47min de "tempo médio" para quem fez 9 ligações.
+        tsec: mediana([...a.segs].sort((x, y) => x - y)),
         votos: 0, // voto não é atribuível ao operador: o ClickUp não guarda quem o registrou
         ligh: Math.round((a.lig / horas) * 10) / 10,
       };

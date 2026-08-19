@@ -24,6 +24,9 @@ export interface ResumoLigacoes {
   hoje: number;
   atendidasHoje: number;
   naoAtendidasHoje: number;
+  /** Ligações de hoje sem desfecho gravado. `hoje - semDesfechoHoje` é o denominador da
+   *  taxa de atendimento — o mesmo que a Central de Campanha usa. */
+  semDesfechoHoje: number;
   atendidasTotal: number;
   comGravacao: number;
   comTranscricao: number;

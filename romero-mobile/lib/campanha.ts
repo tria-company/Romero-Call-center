@@ -45,7 +45,8 @@
 
 import { CONFIG_CAMPANHA } from "./campanha-config";
 
-export type TomCampanha = "accent" | "accent2" | "good" | "warn" | "crit";
+/** `faint` é o tom do "não medido" — cinza apagado, para o que não tem semáforo. */
+export type TomCampanha = "accent" | "accent2" | "good" | "warn" | "crit" | "faint";
 
 /** Uma urna no painel de metas: onde está, para onde vai, em que ritmo. */
 export type MetaVotos = {
@@ -104,9 +105,12 @@ export type Telefonista = {
   turno: string;
   lig: number;
   cont: number;
-  /** conversão, aderência e tempo médio (segundos) */
+  /** conversão e tempo mediano (segundos) */
   conv: number;
+  /** aderência em PERCENTUAL 0–100 (o backend converte a nota 0–10 do Agente de Análise) */
   ader: number;
+  /** quantas ligações têm nota de aderência; 0 = nunca avaliada, e a tela mostra "—" */
+  aderAmostra: number;
   tsec: number;
   votos: number;
   /** ligações por hora */
@@ -181,8 +185,17 @@ export function ordenarRanking(lista: readonly Telefonista[], por: MetricaRankin
   return [...lista].sort((a, b) => b[por] - a[por]);
 }
 
-/** Semáforo da linha: verde ≥80% de aderência, âmbar 70–79, vermelho abaixo. */
-export function tomAderencia(ader: number): "good" | "warn" | "crit" {
+/**
+ * Semáforo da linha: verde ≥80% de aderência, âmbar 70–79, vermelho abaixo — e CINZA
+ * quando não há o que semaforizar.
+ *
+ * `amostra` não é enfeite: `ader` vale 0 tanto para "avaliada com nota 0" quanto para
+ * "nunca avaliada", e só o tamanho da amostra separa os dois. Sem essa distinção, quem
+ * nunca teve uma ligação analisada saía pintado de vermelho com o rótulo "(treino)" —
+ * medido em 19/08, 15 dos 28 telefonistas, punidos na tela por ausência de medição.
+ */
+export function tomAderencia(ader: number, amostra: number): "good" | "warn" | "crit" | "faint" {
+  if (amostra <= 0) return "faint";
   return ader >= 80 ? "good" : ader >= 70 ? "warn" : "crit";
 }
 
@@ -199,6 +212,7 @@ export type CampanhaReal = {
     cont: number;
     conv: number;
     ader: number;
+    aderAmostra: number;
     tsec: number;
     votos: number;
     ligh: number;

@@ -33,7 +33,9 @@ function valorMetrica(o: Telefonista, k: MetricaRanking): string {
     case "lig":
       return fmtInt(o.lig);
     case "ader":
-      return `${o.ader}%`;
+      // "—" e não "0%": sem ligação analisada não há aderência a mostrar, e o zero era
+      // lido como desempenho péssimo por quem olha a tela.
+      return o.aderAmostra > 0 ? `${o.ader}%` : "—";
     case "tsec":
       return fmtMinSeg(o.tsec);
     case "ligh":
@@ -44,9 +46,12 @@ function valorMetrica(o: Telefonista, k: MetricaRanking): string {
 export function Ranking({
   telefonistas,
   equipeTotal,
+  semOperador,
 }: {
   telefonistas: readonly Telefonista[];
   equipeTotal: number;
+  /** Ligações sem OPERADOR gravado: ficam fora do ranking mas dentro dos totais. */
+  semOperador: { lig: number; cont: number };
 }) {
   const [por, setPor] = React.useState<MetricaRanking>("votos");
   const linhas = React.useMemo(() => ordenarRanking(telefonistas, por), [telefonistas, por]);
@@ -92,8 +97,21 @@ export function Ranking({
       </div>
 
       <div className="rk-sub legenda">
-        ● verde aderência ≥80% · ● âmbar 70–79% · ● vermelho &lt;70% (treino)
+        ● verde aderência ≥80% · ● âmbar 70–79% · ● vermelho &lt;70% (treino) · ● cinza sem
+        ligação analisada
       </div>
+
+      {/* Por que a soma das linhas NÃO bate com os totais do painel. Ligação sem OPERADOR
+          gravado não tem a quem ser atribuída e sai do ranking, mas continua nos totais —
+          e ela não é resíduo: medido em 19/08, eram 25 ligações carregando 22 dos 56
+          contatos da operação inteira. Sem esta linha, quem conferir a conta encontra 34
+          contatos no ranking contra 56 no painel e não tem como saber para onde foram. */}
+      {semOperador.lig > 0 && (
+        <div className="rk-sub legenda">
+          {fmtInt(semOperador.lig)} ligação(ões) sem operador gravado ({fmtInt(semOperador.cont)}{" "}
+          contato(s)) ficam fora do ranking, mas contam nos totais do painel.
+        </div>
+      )}
     </div>
   );
 }
@@ -123,7 +141,7 @@ function LinhaRanking({
       </div>
       <div className="rinfo">
         <div className="rn">
-          <span className="rstat" style={{ background: COR[tomAderencia(o.ader)] }} />
+          <span className="rstat" style={{ background: COR[tomAderencia(o.ader, o.aderAmostra)] }} />
           {o.nome}
         </div>
         <div className="rs">{o.turno || `${o.lig} lig. · ${o.cont} contatos`}</div>

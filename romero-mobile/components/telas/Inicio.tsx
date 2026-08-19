@@ -32,6 +32,8 @@ export function Inicio({ children }: { children?: React.ReactNode }) {
   const relogio = useRelogio();
   const fila = useFilaReal();
   const num = useNumerosCampanha();
+  /* Denominador honesto da taxa de atendimento — o mesmo que a Central de Campanha usa. */
+  const comDesfechoHoje = num.ligacoes ? num.ligacoes.hoje - num.ligacoes.semDesfechoHoje : 0;
 
   React.useEffect(() => setNome(operadorAtual()), []);
 
@@ -101,13 +103,22 @@ export function Inicio({ children }: { children?: React.ReactNode }) {
                   : undefined
               }
             />
+            {/* A taxa divide pelas ligações COM DESFECHO, não pelo total do dia — a mesma
+                conta que a Central de Campanha faz. Dividir pelo total media o REGISTRO,
+                não o atendimento: hoje a maioria das ligações não grava desfecho (o
+                contador só sobe quando o closer escolhe o motivo na tela), e medido em
+                19/08 as duas telas publicavam "taxa de atendimento" a 23x de distância —
+                1% aqui contra 23% na Central, para a mesma operação. O denominador vai no
+                rótulo para ninguém precisar adivinhar sobre o que é a porcentagem. */}
             <Metrica
               valor={<Contador valor={num.ligacoes.atendidasHoje} />}
               label="Atendidas hoje"
               delta={
-                num.ligacoes.hoje > 0
-                  ? `${Math.round((num.ligacoes.atendidasHoje / num.ligacoes.hoje) * 100)}% de atendimento`
-                  : undefined
+                comDesfechoHoje > 0
+                  ? `${Math.round((num.ligacoes.atendidasHoje / comDesfechoHoje) * 100)}% das ${comDesfechoHoje} com desfecho`
+                  : num.ligacoes.hoje > 0
+                    ? `nenhuma das ${num.ligacoes.hoje} de hoje tem desfecho gravado`
+                    : undefined
               }
             />
             <Metrica
