@@ -12,6 +12,8 @@ import {
   // o connection.update dela) + cooldown anti-flap do aviso no grupo.
   EVOLUTION_INSTANCE,
   ALERTA_QUEDA_COOLDOWN_MS,
+  // Inbound → fila (2026-08-19): dedupe por telefone direto na Lista 02.
+  CLICKUP_LIST_LIGACOES,
 } from './config';
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
@@ -76,8 +78,10 @@ import {
   gravarMetadadosLigacao,
   fecharLigacao,
   // Inbound → fila (2026-08-19): quem manda mensagem ganha Ligação; LEAD_REL
-  // da task recém-criada propaga o vínculo pro mapa/DB de mensagens.
+  // da task recém-criada propaga o vínculo pro mapa/DB de mensagens; o dedupe
+  // usa listarTasks com filtro server-side por TELEFONE.
   CAMPOS_LIGACOES,
+  listarTasks,
   // quick-260815-r3: "Ligar" na ficha cria uma Ligação avulsa ATRIBUÍDA ao
   // operador (deep-link do discador). valorCampoLead/CAMPOS_LEADS leem o
   // telefone do lead pra criar a avulsa (choke point de leitura de campo).
@@ -192,16 +196,37 @@ async function garantirLigacaoInbound(telefoneCanon: string, telefoneBruto: stri
   try {
     const assignee = assigneeDoOperador('romero');
     if (!assignee) return;
-    // dedupe: já existe Ligação ABERTA do Romero com esse telefone? (a fila é
-    // cache-aside — barato; a comparação canônica tolera o nono dígito)
-    const fila = await buscarFilaLigacoes(assignee);
-    if (fila.some((i) => telefoneCanonico(i.telefone) === telefoneCanon)) {
+    // dedupe: alguma Ligação ABERTA com esse telefone? Filtro SERVER-SIDE por
+    // TELEFONE (± nono dígito) — barato e independente do tamanho da fila.
+    // Falha do dedupe NÃO bloqueia a criação: melhor arriscar uma duplicata
+    // rara do que perder a pessoa (o abort de rede do ClickUp derrubava tudo).
+    let jaTem = false;
+    try {
+      const d = telefoneBruto.replace(/\D/g, '');
+      const comPais = d.length >= 12 ? d : `55${d}`;
+      const cands = new Set<string>([`+${comPais}`]);
+      if (comPais.length === 12) cands.add(`+${comPais.slice(0, 4)}9${comPais.slice(4)}`);
+      if (comPais.length === 13 && comPais[4] === '9') cands.add(`+${comPais.slice(0, 4)}${comPais.slice(5)}`);
+      const rs = await Promise.all(
+        [...cands].map((v) =>
+          listarTasks(CLICKUP_LIST_LIGACOES, {
+            includeClosed: false,
+            customFields: [{ field_id: CAMPOS_LIGACOES.TELEFONE, operator: '=', value: v }],
+          }).then((r) => r.tasks),
+        ),
+      );
+      jaTem = rs.flat().length > 0;
+    } catch (e) {
+      console.warn('[webhook] inbound: dedupe falhou (segue criando):', e instanceof Error ? e.message : String(e));
+    }
+    if (jaTem) {
       ultimoInboundTs.set(telefoneCanon, agora);
       return;
     }
     const { id } = await criarLigacaoAvulsa(telefoneBruto, assignee);
     ultimoInboundTs.set(telefoneCanon, agora);
     await invalidarFilaCache(assignee);
+    derrubarFilaMem(assignee);
     // propaga o vínculo (se criarLigacaoAvulsa achou o lead): mapa em memória
     // pro restante do pipeline + lead_task_id retroativo nas mensagens do DB.
     let leadId = '';
@@ -417,6 +442,38 @@ async function mapaConversaCacheado(): Promise<Map<string, ResumoConversaLead> |
 // efeito no cache. /voto usa aquecerFilaCache (D-07b, read-your-writes) —
 // evento SEPARADO, o sync ao ClickUp e ASSINCRONO (janela <60s).
 import { removerDaFilaCache, invalidarFilaCache, aquecerFilaCache } from './cache-fila.ts';
+
+/* FILA RESILIENTE (2026-08-19 — "parar de dar 502 por causa do ClickUp"):
+   cache POR OPERADOR em memória com stale-while-revalidate. Fresca por 20s
+   (cada cliente sonda a cada 4-30s — o grosso das leituras deixa de bater no
+   ClickUp), e quando o ClickUp falha/aborta serve a ÚLTIMA CÓPIA BOA em vez
+   de estourar 502 na tela do operador. Falha alta (WR-03) só quando NUNCA
+   houve cópia (primeiro load do processo). pular/desfecho/inbound derrubam a
+   cópia do operador (read-your-writes). Complementa o cache Redis — este é o
+   colchão do processo, existe mesmo sem Redis. */
+const filaMem = new Map<string, { fila: Awaited<ReturnType<typeof buscarFilaLigacoes>>; em: number }>();
+const TTL_FILA_MEM_MS = 20_000;
+function derrubarFilaMem(assignee: string): void {
+  filaMem.delete(assignee);
+}
+async function buscarFilaResiliente(assignee: string): Promise<Awaited<ReturnType<typeof buscarFilaLigacoes>>> {
+  const copia = filaMem.get(assignee);
+  if (copia && Date.now() - copia.em < TTL_FILA_MEM_MS) return copia.fila;
+  try {
+    const fila = await buscarFilaLigacoes(assignee);
+    filaMem.set(assignee, { fila, em: Date.now() });
+    return fila;
+  } catch (e) {
+    if (copia) {
+      console.warn(
+        `[discador] fila do ClickUp falhou — servindo cópia de ${Math.round((Date.now() - copia.em) / 1000)}s atrás:`,
+        e instanceof Error ? e.message : String(e),
+      );
+      return copia.fila;
+    }
+    throw e;
+  }
+}
 // Sync assincrono do voto pos-ligacao (Fase 08 Plano 03, CACHE-03/D-07a):
 // /voto enfileira o job (worker espelha no ClickUp em <60s) com fallback
 // inline (processarSyncClickupJob) sem Redis (SC5).
@@ -468,6 +525,9 @@ import {
   buscarLeadPorTelefoneWhatsapp,
   ultimasMensagensWhatsapp,
   marcarMensagensLidas,
+  // Sinal de novidade (2026-08-19): ts da última mensagem persistida — o app
+  // sonda a cada ~4s e recarrega lista/conversa na hora quando muda.
+  ultimoTsMensagens,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -777,7 +837,8 @@ export const mastra = new Mastra({
             return c.json({ fila: [], semMapeamento: true });
           }
           try {
-            const fila = await buscarFilaLigacoes(assignee);
+            // resiliente: fresca por 20s; ClickUp fora → última cópia boa.
+            const fila = await buscarFilaResiliente(assignee);
             return c.json({ fila });
           } catch (e) {
             console.error('[discador] erro ao buscar fila:', e);
@@ -945,6 +1006,7 @@ export const mastra = new Mastra({
             // critico, nunca transforma um sucesso em erro.
             await removerDaFilaCache(assignee, taskId);
             await invalidarFilaCache(assignee);
+            derrubarFilaMem(assignee);
             return c.json({ status: 'ok' });
           } catch (e) {
             // LGPD: nunca logar telefone/CPF/taskId em claro — so a mensagem
@@ -998,6 +1060,7 @@ export const mastra = new Mastra({
             // próximo fetch, sem esperar TTL. No-op sem Redis, nunca lança.
             await removerDaFilaCache(assignee, taskId);
             await invalidarFilaCache(assignee);
+            derrubarFilaMem(assignee);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao pular contato:', e instanceof Error ? e.message : String(e));
@@ -1637,7 +1700,8 @@ export const mastra = new Mastra({
           const assignee = assigneeDoOperador(gate.usuario);
           if (!assignee) return c.json({ leads: [], semMapeamento: true });
           try {
-            const fila = await buscarFilaLigacoes(assignee);
+            // resiliente: fresca por 20s; ClickUp fora → última cópia boa.
+            const fila = await buscarFilaResiliente(assignee);
             const mapa = await mapaConversaCacheado();
             const ultimas = await ultimasMensagensWhatsapp().catch((e) => {
               console.warn('[discador] últimas mensagens indisponíveis (fila):', e instanceof Error ? e.message : String(e));
@@ -1687,6 +1751,25 @@ export const mastra = new Mastra({
           } catch (e) {
             console.error('[discador] erro na fila de áudios:', e instanceof Error ? e.message : String(e));
             return c.json({ erro: 'Erro ao carregar a fila' }, 502);
+          }
+        },
+      },
+      {
+        // SINAL DE NOVIDADE (2026-08-19, "tenho que dar F5 pra aparecer"): o
+        // app sonda a cada ~4s; quando o ts da última mensagem persistida
+        // muda, ele recarrega lista/conversa NA HORA — sem esperar o poll de
+        // 30s. 1 query de 1 linha no Supabase; erro degrada pra {ultimoTs:0}
+        // (os polls pesados continuam sendo o fallback).
+        path: '/api/discador/audios/novidades',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            return c.json({ ultimoTs: await ultimoTsMensagens() });
+          } catch (e) {
+            console.warn('[discador] novidades indisponíveis:', e instanceof Error ? e.message : String(e));
+            return c.json({ ultimoTs: 0 });
           }
         },
       },

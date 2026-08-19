@@ -1402,15 +1402,15 @@ export interface EnvioAudioHistorico {
  * LGPD: nenhum telefone logado aqui.
  */
 export async function listarEnviosAudioDoLead(leadTaskId: string): Promise<EnvioAudioHistorico[]> {
-  const tasks: TaskClickUp[] = [];
-  let page = 0;
-  let last = false;
-  while (!last) {
-    const r = await listarTasks(CLICKUP_LIST_AUDIOS, { page, includeClosed: true });
-    tasks.push(...r.tasks);
-    last = r.lastPage;
-    page += 1;
-  }
+  // 2026-08-19: filtro SERVER-SIDE (relação LEAD) no lugar da varredura da
+  // Lista 03 inteira — o backfill da conversa paginava TUDO a cada abertura
+  // de lead sem envio persistido (com o inbound, todo estranho novo caía
+  // aqui) e segurava a conversa por segundos. Mesmo padrão provado na
+  // timeline (buscarLigacoesDoLead).
+  const { tasks } = await listarTasks(CLICKUP_LIST_AUDIOS, {
+    includeClosed: true,
+    customFields: [{ field_id: CAMPOS_AUDIOS.LEAD, operator: 'ANY', value: [leadTaskId] }],
+  });
   const envios: EnvioAudioHistorico[] = [];
   for (const t of tasks) {
     const rel = t.custom_fields?.find((c) => c.id === CAMPOS_AUDIOS.LEAD)?.value;

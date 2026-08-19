@@ -5,7 +5,7 @@ import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Searc
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { iniciarLigacaoReal } from "@/lib/leads-real";
-import { buscarConversaLead, buscarMidiaMensagem, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
+import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
 import { Autobox, Vhead } from "./blocos";
 // 2026-08-19: tocar no NOME da conversa abre a ficha (dossiê + histórico) como
@@ -79,7 +79,7 @@ const SELO_UI: Record<"ligar" | "nao_ligar" | "indefinido" | "aguardando" | "env
 };
 
 export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
-  const { leads, carregando, erro, semMapeamento, recarregar, conectado } = useAudiosReais();
+  const { leads, carregando, erro, semMapeamento, recarregar, recarregarSilencioso, conectado } = useAudiosReais();
   /* Filtro pelo selo (2026-08-19) — o backend já manda a lista ordenada por
      última mensagem (quem falou por último no topo, estilo WhatsApp). */
   const [filtroSelo, setFiltroSelo] = React.useState<"todos" | "enviar_audio" | "aguardando" | "indefinido" | "ligar" | "nao_ligar">("todos");
@@ -438,6 +438,54 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     const timer = window.setInterval(() => void atualizarConversa(id, true), 10_000);
     return () => window.clearInterval(timer);
   }, [leadAberto, atualizarConversa]);
+
+  /* ── NOVIDADE EM ~4s (2026-08-19, "tenho que dar F5 pra aparecer"): sonda o
+        ts da última mensagem persistida; mudou → recarrega a LISTA silenciosa
+        e a CONVERSA aberta NA HORA. Voltar o foco/aba também dispara uma
+        checagem. Os polls de 30s/10s continuam como rede de segurança. ── */
+  const ultimoTsRef = React.useRef(0);
+  const leadAbertoRef = React.useRef<LeadAudioReal | null>(null);
+  leadAbertoRef.current = leadAberto;
+  React.useEffect(() => {
+    let vivo = true;
+    let checando = false;
+    const checar = async () => {
+      if (checando) return;
+      checando = true;
+      try {
+        const ts = await buscarNovidades();
+        if (!vivo || !ts) return;
+        if (ultimoTsRef.current === 0) {
+          ultimoTsRef.current = ts; // baseline: a carga inicial já trouxe tudo
+          return;
+        }
+        if (ts <= ultimoTsRef.current) return;
+        ultimoTsRef.current = ts;
+        recarregarSilencioso();
+        // segunda passada: mensagem de DESCONHECIDO dispara a criação da
+        // Ligação no backend (inbound→fila, leva ~5-8s) — sem isto a linha
+        // nova só entraria no poll de 30s.
+        window.setTimeout(() => {
+          if (vivo) recarregarSilencioso();
+        }, 8_000);
+        const aberto = leadAbertoRef.current;
+        if (aberto?.leadTaskId) void atualizarConversa(aberto.leadTaskId, true);
+      } finally {
+        checando = false;
+      }
+    };
+    const id = window.setInterval(() => void checar(), 4_000);
+    const aoVoltar = () => void checar();
+    window.addEventListener("focus", aoVoltar);
+    document.addEventListener("visibilitychange", aoVoltar);
+    void checar();
+    return () => {
+      vivo = false;
+      window.clearInterval(id);
+      window.removeEventListener("focus", aoVoltar);
+      document.removeEventListener("visibilitychange", aoVoltar);
+    };
+  }, [recarregarSilencioso, atualizarConversa]);
 
   /* ── Player das bolhas: UM <audio> compartilhado; ▶ toca o src da bolha
         (data-URI da sessão ou mídia baixada da conversa), toque de novo pausa.

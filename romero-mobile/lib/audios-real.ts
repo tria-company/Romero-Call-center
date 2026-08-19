@@ -60,6 +60,9 @@ export type EstadoAudiosReais = {
    *  distinto de fila vazia (mesma régua da fila clássica, WR-03). */
   semMapeamento: boolean;
   recarregar: () => void;
+  /** Recarrega a lista SEM piscar "carregando" (stale-while-revalidate) — o
+   *  sinal de novidade usa isto pra refletir mensagem nova na hora. */
+  recarregarSilencioso: () => void;
   /**
    * Estado REAL da instância dedicada (D-08). Começa `false` (nunca finge
    * conectado enquanto a primeira consulta está em voo) — mesmo racional do
@@ -166,7 +169,28 @@ export function useAudiosReais(
     void carregarLista();
   }, [carregarLista]);
 
-  return { leads, origens, carregando, erro, semMapeamento, recarregar, conectado };
+  const recarregarSilencioso = React.useCallback(() => {
+    void carregarLista(true);
+  }, [carregarLista]);
+
+  return { leads, origens, carregando, erro, semMapeamento, recarregar, recarregarSilencioso, conectado };
+}
+
+/**
+ * SINAL DE NOVIDADE (2026-08-19): ts (ms) da última mensagem de WhatsApp
+ * persistida (`GET /api/mobile/audios/novidades`). O Audios sonda a cada ~4s;
+ * mudou → recarrega lista/conversa na hora. 0 em falha (o poll de 30s segue
+ * como fallback). Nunca lança; nada logado.
+ */
+export async function buscarNovidades(): Promise<number> {
+  try {
+    const r = await fetch("/api/mobile/audios/novidades", { cache: "no-store" });
+    if (!r.ok) return 0;
+    const d = (await r.json().catch(() => null)) as { ultimoTs?: number } | null;
+    return typeof d?.ultimoTs === "number" ? d.ultimoTs : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /* ── Envio ───────────────────────────────────────────────────────────────── */

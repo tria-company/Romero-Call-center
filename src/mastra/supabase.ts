@@ -772,6 +772,29 @@ export async function listarMensagensWhatsapp(opts: {
   return Array.isArray(data) ? (data as MensagemWhatsappRow[]) : [];
 }
 
+/** Timestamp (ms) da mensagem de WhatsApp mais RECENTE persistida — o sinal
+ *  de NOVIDADE barato que o app sonda a cada ~4s (1 linha, ordenada por ts).
+ *  0 = sem Supabase/sem linhas; erro de rede/HTTP LANÇA (WR-03). */
+export async function ultimoTsMensagens(): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  const params = new URLSearchParams({ select: 'ts', order: 'ts.desc', limit: '1' });
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_MENSAGENS_WHATSAPP}?${params.toString()}`,
+      { headers: headers() },
+    );
+  } catch (e) {
+    throw new Error(`[supabase] falha de rede ao ler a última mensagem: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    if (res.status === 404) return 0; // tabela ainda não aplicada
+    throw new Error(`[supabase] HTTP ${res.status} ao ler a última mensagem`);
+  }
+  const data = (await res.json().catch(() => [])) as Array<{ ts?: string }>;
+  return Array.isArray(data) && data[0]?.ts ? Date.parse(data[0].ts) || 0 : 0;
+}
+
 /** Mídia (base64) de uma mensagem — playback instantâneo sem baixar do ClickUp/
  *  Evolution. `null` = sem Supabase, sem linha ou sem mídia na linha. */
 export async function buscarMidiaMensagemWhatsapp(
