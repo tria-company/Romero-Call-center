@@ -105,7 +105,7 @@ export type Telefonista = {
   turno: string;
   lig: number;
   cont: number;
-  /** conversão e tempo médio (segundos) */
+  /** conversão e tempo mediano (segundos) */
   conv: number;
   /** aderência em PERCENTUAL 0–100 (o backend converte a nota 0–10 do Agente de Análise) */
   ader: number;

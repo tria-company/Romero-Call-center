@@ -415,7 +415,7 @@ export interface TelefonistaCampanha {
    *  "—" em vez de 0%, senão quem nunca foi ouvido aparece como o pior da equipe. Medido
    *  em 19/08: só 52 das 1.345 ligações tinham nota, e 15 dos 28 operadores tinham zero. */
   aderAmostra: number;
-  tsec: number;   // tempo médio em segundos
+  tsec: number;   // tempo MEDIANO em segundos (mesma conta do card "tempo médio geral")
   votos: number;
   ligh: number;   // ligações por hora
 }
@@ -714,7 +714,6 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     if (ts) { a.ini = Math.min(a.ini, ts); a.fim = Math.max(a.fim, ts); }
     porOp.set(chave, a);
   }
-  const media = (xs: number[]) => (xs.length ? Math.round(xs.reduce((s, x) => s + x, 0) / xs.length) : 0);
   const balde = porOp.get(SEM_OP);
   const semOperador = { lig: balde?.lig ?? 0, cont: balde?.cont ?? 0 };
   const telefonistas: TelefonistaCampanha[] = [...porOp.entries()]
@@ -731,7 +730,12 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
         conv: a.lig ? Math.round((a.cont / a.lig) * 100) : 0,
         ader: aderenciaEmPct(a.aders),
         aderAmostra: a.aders.length,
-        tsec: media(a.segs),
+        // MEDIANA, igual ao card "tempo médio geral" — e não a média, que era o que estava
+        // aqui. Os dois carregam o rótulo "médio" na tela e precisam ser a MESMA conta,
+        // senão não fecham: medido em 19/08, mediana=83s contra média=204s no mesmo
+        // conjunto. A média ainda leva o outlier de 12.217s (3h23, ligação que nunca gravou
+        // FIM) e publicava 47min de "tempo médio" para quem fez 9 ligações.
+        tsec: mediana([...a.segs].sort((x, y) => x - y)),
         votos: 0, // voto não é atribuível ao operador: o ClickUp não guarda quem o registrou
         ligh: Math.round((a.lig / horas) * 10) / 10,
       };
