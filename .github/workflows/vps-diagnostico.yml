@@ -1,0 +1,27 @@
+name: Diagnostico VPS (somente leitura)
+
+# Dispatch manual (gh workflow run --ref ops/diagnostico-vps). Só LÊ: nomes das
+# envs do service (valores mascarados) + logs recentes filtrados do discador.
+# LGPD: o backend não loga telefone/CPF; ainda assim os valores de env NUNCA
+# são impressos aqui.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ler envs (nomes) e logs via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            echo "=== envs do service (SÓ NOMES) ==="
+            docker service inspect discador_discador --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | sed 's/=.*//' | sort
+            echo "=== replicas ==="
+            docker service ps discador_discador --format 'table {{.Name}}\t{{.CurrentState}}' | head -5
+            echo "=== logs recentes (erros/audios/clickup/supabase) ==="
+            docker service logs --tail 400 discador_discador 2>&1 | grep -i "erro\|error\|audios\|clickup\|supabase\|warn" | tail -80
