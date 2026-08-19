@@ -674,11 +674,29 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     .map(([dia, v]) => ({ dia, ligacoes: v.ligacoes, contatos: v.contatos }));
 
   // --- ranking por telefonista ---
-  interface Acc { lig: number; cont: number; segs: number[]; aders: number[]; ini: number; fim: number }
+  //
+  // A chave do grupo é o login em MINÚSCULA, não o texto cru: medido em 19/08, o campo
+  // trazia `kalinebrito288` (67 ligações) e `Kalinebrito288` (8) — a MESMA pessoa em duas
+  // linhas do ranking, competindo consigo mesma com metade do volume cada. O rótulo
+  // exibido é a grafia mais frequente do próprio grupo (mesmo critério de `agruparMotivos`),
+  // então a tela mostra como a operação escreve, sem inventar caixa.
+  const SEM_OP = 'sem operador';
+  interface Acc {
+    lig: number;
+    cont: number;
+    segs: number[];
+    aders: number[];
+    /** grafias vistas deste mesmo login -> quantas vezes; a mais comum vira o rótulo */
+    variantes: Map<string, number>;
+    ini: number;
+    fim: number;
+  }
   const porOp = new Map<string, Acc>();
   for (const t of todas) {
-    const nome = String(valorCampo(t, CAMPOS_LIGACOES.OPERADOR) ?? '').trim() || 'sem operador';
-    const a = porOp.get(nome) ?? { lig: 0, cont: 0, segs: [], aders: [], ini: Infinity, fim: 0 };
+    const bruto = String(valorCampo(t, CAMPOS_LIGACOES.OPERADOR) ?? '').trim();
+    const chave = bruto.toLowerCase() || SEM_OP;
+    const a = porOp.get(chave) ?? { lig: 0, cont: 0, segs: [], aders: [], variantes: new Map<string, number>(), ini: Infinity, fim: 0 };
+    if (bruto) a.variantes.set(bruto, (a.variantes.get(bruto) ?? 0) + 1);
     a.lig += 1;
     if (contato(t)) a.cont += 1;
     const seg = duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO));
@@ -694,19 +712,19 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     }
     const ts = Number(t.date_created);
     if (ts) { a.ini = Math.min(a.ini, ts); a.fim = Math.max(a.fim, ts); }
-    porOp.set(nome, a);
+    porOp.set(chave, a);
   }
   const media = (xs: number[]) => (xs.length ? Math.round(xs.reduce((s, x) => s + x, 0) / xs.length) : 0);
-  const SEM_OP = 'sem operador';
   const balde = porOp.get(SEM_OP);
   const semOperador = { lig: balde?.lig ?? 0, cont: balde?.cont ?? 0 };
   const telefonistas: TelefonistaCampanha[] = [...porOp.entries()]
-    .filter(([nome]) => nome !== SEM_OP)
-    .map(([nome, a], i) => {
+    .filter(([chave]) => chave !== SEM_OP)
+    .map(([chave, a], i) => {
       const horas = Math.max(1, (a.fim - a.ini) / 3600000);
+      const grafia = [...a.variantes.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? chave;
       return {
         id: i + 1,
-        nome: nomeDeOperador(nome),
+        nome: nomeDeOperador(grafia),
         turno: '',
         lig: a.lig,
         cont: a.cont,
