@@ -180,35 +180,65 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     };
   }, []);
   const [ligando, setLigando] = React.useState(false);
+  /* Ligação SEM SAIR DA TELA (2026-08-19, estilo WhatsApp): o discador abre
+     EMBUTIDO num overlay por cima da conversa/lista, já discando (auto=1) —
+     nada de navegar nem abrir aba. O fluxo operacional inteiro (chamada,
+     desfecho, voto) roda dentro do frame; o X fecha e devolve pra cá. */
+  const [chamadaUrl, setChamadaUrl] = React.useState<string | null>(null);
   function ligarParaLead(lead: LeadAudioReal) {
     if (ligando) return;
     vibrar();
-    // Fonte "fila" (2026-08-19): a linha JÁ é uma Ligação — handoff direto na
-    // MESMA aba com auto=1, exatamente como a fila clássica liga hoje (u7:
-    // mesma origem; o "voltar" do discador devolve pra cá).
+    // Fonte "fila": a linha JÁ é uma Ligação — o overlay abre essa task direto.
     if (lead.ligacaoTaskId) {
-      window.location.href = urlCallCenter(tokenCC, lead.ligacaoTaskId) + "&auto=1";
+      setChamadaUrl(urlCallCenter(tokenCC, lead.ligacaoTaskId) + "&auto=1");
       return;
     }
-    // Fonte nunca-ligados (sem Ligação ainda): cria a avulsa e abre em aba nova
-    // (mesmo circuito do PerfilLead — window.open síncrono no gesto).
+    // Fonte nunca-ligados (sem Ligação ainda): cria a avulsa e então abre o
+    // overlay — sem window.open, pop-up blocker deixou de ser problema.
     setLigando(true);
-    const w = window.open("about:blank", "_blank");
     iniciarLigacaoReal(lead.leadTaskId).then((taskId) => {
-      if (montadoRef.current) setLigando(false);
-      if (!taskId) {
-        if (w) w.close(); // sem Ligação criada: fecha a aba órfã (igual PerfilLead)
-        return;
-      }
-      // auto=1: o discador disca SOZINHO ao abrir a Ligação (um toque = ligar).
-      const url = urlCallCenter(tokenCC, taskId) + "&auto=1";
-      if (w) {
-        w.location.href = url;
-      } else {
-        window.open(url, "_blank");
-      }
+      if (!montadoRef.current) return;
+      setLigando(false);
+      if (taskId) setChamadaUrl(urlCallCenter(tokenCC, taskId) + "&auto=1");
     });
   }
+
+  /* Fecho AUTOMÁTICO (2026-08-19): quando o fluxo da task encerra no discador
+     (desfecho/voto feitos ou "voltar"), o frame posta
+     `{tipo:'discador:fluxo-encerrado'}` — fecha o overlay e recarrega a lista
+     (a Ligação com desfecho sai da fila na hora). Origem conferida contra a
+     própria URL do frame. */
+  React.useEffect(() => {
+    if (!chamadaUrl) return;
+    function aoMensagem(e: MessageEvent) {
+      if ((e.data as { tipo?: string } | null)?.tipo !== "discador:fluxo-encerrado") return;
+      try {
+        if (e.origin !== new URL(chamadaUrl!, window.location.href).origin) return;
+      } catch {
+        return;
+      }
+      setChamadaUrl(null);
+      recarregar();
+    }
+    window.addEventListener("message", aoMensagem);
+    return () => window.removeEventListener("message", aoMensagem);
+  }, [chamadaUrl, recarregar]);
+
+  /* Overlay da CHAMADA — renderizado tanto na conversa quanto na lista (a
+     conversa retorna cedo, então o markup entra nos dois returns). `allow`
+     delega microfone/autoplay pro frame do discador (WebRTC Wavoip). */
+  const overlayChamada = chamadaUrl && (
+    <div className="au-call" role="dialog" aria-label="Ligação em andamento">
+      <div className="au-call-top">
+        <span className="au-call-tit">Ligação pelo discador — encerre a chamada antes de fechar</span>
+        <button type="button" className="au-call-x" onClick={() => setChamadaUrl(null)} aria-label="Fechar a ligação">
+          <X size={20} />
+        </button>
+      </div>
+      {/* eslint-disable-next-line react/iframe-missing-sandbox */}
+      <iframe src={chamadaUrl} className="au-call-frame" allow="microphone; autoplay" title="Discador" />
+    </div>
+  );
 
   /* ── Gravação (D-01/D-02/D-03) — grava uma vez, serve pra vários leads. ── */
   const [estadoGravacao, setEstadoGravacao] = React.useState<EstadoGravacao>("vazio");
@@ -799,6 +829,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           )}
         </div>
 
+        {/* chamada embutida (estilo WhatsApp) — por cima de tudo */}
+        {overlayChamada}
+
         {/* ── FICHA do lead (2026-08-19): dossiê + histórico como OVERLAY —
               a conversa fica viva por trás; voltar fecha só a ficha. ── */}
         {fichaAberta && (
@@ -983,6 +1016,10 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         </div>
       )}
 
+      {/* chamada embutida (estilo WhatsApp) — também disponível na LISTA
+          (linhas call-only sem vínculo ligam direto daqui). */}
+      {overlayChamada}
+
       {/* ── modal do PULAR (2026-08-19): motivo OBRIGATÓRIO — vira comentário
             na Ligação (⏭️ Contato pulado) e a task fecha, saindo da fila. ── */}
       {pularAlvo && (
@@ -1113,6 +1150,13 @@ const AU_CSS = `
 .au-ct{ min-width:0; }
 .au-cnm{ font-size:16px; font-weight:700; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .au-cst{ font-size:12px; color:var(--dim); }
+/* chamada embutida (2026-08-19): o discador num frame, por cima de tudo */
+.au-call{ position:fixed; inset:0; z-index:320; background:var(--bg-0); display:flex; flex-direction:column; }
+.au-call-top{ flex:none; display:flex; align-items:center; gap:10px; padding:calc(var(--safe-t) + 8px) 12px 8px; background:var(--bg-1); border-bottom:1px solid var(--line); }
+.au-call-tit{ flex:1; min-width:0; font-size:12.5px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.au-call-x{ flex:none; width:34px; height:34px; border:none; border-radius:50%; background:var(--card-2); color:var(--ink); display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-call-x:active{ filter:brightness(1.2); }
+.au-call-frame{ flex:1; width:100%; border:0; background:#0b141a; }
 /* nome tocável → ficha (2026-08-19) */
 .au-ct-btn{ flex:1; cursor:pointer; border-radius:10px; padding:3px 8px; margin:-3px 0 -3px -4px; -webkit-tap-highlight-color:transparent; }
 .au-ct-btn:active{ background:var(--card-2); }

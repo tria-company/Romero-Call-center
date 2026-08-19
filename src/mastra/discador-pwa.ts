@@ -493,7 +493,11 @@ export const DISCADOR_APP_JS = `(function(){
   // MESMO ENDERECO (u7): se veio do painel (deep-link de gestor), volta pra FILA
   // DELE no painel — nao pra fila do discador. retornoPainel so e setado no init
   // quando /me diz gestor + panelUrl.
-  function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';$('motivo-overlay').style.display='none';if(retornoPainel){window.location.href=retornoPainel;return;}carregarFilaSilencioso();}
+  // 2026-08-19: rodando EMBUTIDO (iframe do app do Romero) — em vez de navegar
+  // ou recarregar a fila AQUI DENTRO, avisa o pai que o fluxo encerrou; o app
+  // fecha o overlay e devolve pra conversa. true = tratado (caller retorna).
+  function avisarPaiEmbutido(){if(window.parent===window){return false;}try{window.parent.postMessage({tipo:'discador:fluxo-encerrado'},'*');}catch(e){}return true;}
+  function voltarParaFila(){$('call-overlay').style.display='none';$('voto-overlay').style.display='none';$('motivo-overlay').style.display='none';if(avisarPaiEmbutido()){return;}if(retornoPainel){window.location.href=retornoPainel;return;}carregarFilaSilencioso();}
   // Preview do lead antes de ligar (T-m3v): abre ao tocar "Ligar" na fila,
   // mostra CONTEXTO (dossie nativo) + SCRIPT; a chamada so comeca ao tocar
   // "Ligar" DENTRO do preview (delega pra iniciarLigacao existente).
@@ -510,7 +514,7 @@ export const DISCADOR_APP_JS = `(function(){
   }
   function fecharPreview(){$('preview-overlay').style.display='none';previewAtualItem=null;}
   // Botao "Voltar" do preview (u7): gestor vindo do painel volta pra fila DELE.
-  function voltarDoPreview(){if(retornoPainel){window.location.href=retornoPainel;return;}fecharPreview();}
+  function voltarDoPreview(){if(avisarPaiEmbutido()){return;}if(retornoPainel){window.location.href=retornoPainel;return;}fecharPreview();}
   // Deep-link &task (quick-260815-r3): abre o preview da Ligacao exata pelo
   // taskId vindo do handoff. Ownership validado no backend (GET /ligacao/:taskId,
   // CR-01) — status !=200 (ex. 404 de outro operador) so nao abre, sem erro.
