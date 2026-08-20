@@ -9,6 +9,7 @@ import { fmtTelefone, urlCallCenter, urlWhatsApp, vibrar } from "@/lib/contato";
 import { useLeadReal, salvarVotoReal, salvarAnotacaoReal, iniciarLigacaoReal } from "@/lib/leads-real";
 import type { VotoReal } from "@/lib/discador-servidor";
 import { Autobox, BlocoLista, Esqueleto, Voltar } from "./blocos";
+import { DossieMarkdown } from "@/components/DossieMarkdown";
 
 /* TELA 03 · FICHA DO LEAD (dado REAL)
    Fonte: `useLeadReal` (ClickUp via /api/mobile/lead/:id). Sem localStorage,
@@ -208,9 +209,7 @@ export function PerfilLead({
 
       <BlocoLista titulo="Dossiê">
         {dossie ? (
-          <div className="dim" style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.5 }}>
-            {dossie}
-          </div>
+          <DossieMarkdown texto={dossie} />
         ) : (
           <div className="dim2" style={{ fontSize: 11.5 }}>
             Sem dossiê ainda.
