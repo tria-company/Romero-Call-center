@@ -28,6 +28,8 @@ import {
   SUPABASE_TABLE_LEADS_ESPELHO,
   SUPABASE_TABLE_MENSAGENS_WHATSAPP,
   SUPABASE_TABLE_VOTOS_LIGACAO,
+  SUPABASE_TABLE_LIGACOES,
+  SUPABASE_TABLE_AUDIOS_ENVIOS,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -531,6 +533,140 @@ export async function upsertLeadsEspelho(rows: LeadEspelhoRow[]): Promise<number
   }
   if (!res.ok) {
     throw new Error(`[supabase] HTTP ${res.status} ao upsertar leads no espelho (${SUPABASE_TABLE_LEADS_ESPELHO})`);
+  }
+  return rows.length;
+}
+
+// ===== Fase 17-A — espelho de ligacoes/audios_envios/leads-full (só POPULA — u17) =====
+//
+// Mesmo molde EXATO de `upsertLeadsEspelho` acima: POST em lote com
+// `Prefer: resolution=merge-duplicates,return=minimal` (upsert por
+// `clickup_task_id`), no-op sem Supabase configurado, LANÇA em erro de
+// rede/HTTP (WR-03) com o NOME da tabela no erro. `sincronizarEspelho*`
+// (espelho.ts) é quem chama estas funções — nenhuma rota lê estas tabelas
+// ainda (17-CONTEXT.md decisão 3). NUNCA loga telefone/CPF/transcrição.
+
+/** Linha de `ligacoes` (materializa a Lista 02 LIGACOES — design §2.1). `lead_id`
+ *  (FK numérica) fica `null` nesta fase — resolvido só quando a ESCRITA inverter
+ *  (Phase 19); a junção por enquanto é via `lead_clickup_task_id`. */
+export interface LigacaoEspelhoRow {
+  clickup_task_id: string;
+  lead_id: number | null;
+  lead_clickup_task_id: string | null;
+  operador: string | null;
+  assignee_clickup_id: number | null;
+  telefone_canonico: string | null;
+  telefone_variantes: string[];
+  script: string | null;
+  status: 'aberta' | 'em_processamento' | 'fechada';
+  resultado: string | null;
+  inicio: string | null; // ISO
+  fim: string | null; // ISO
+  duracao_seg: number | null;
+  atendeu: boolean | null;
+  motivo_falha: string | null;
+  url_gravacao: string | null;
+  transcricao: string | null;
+  analise_ia: Record<string, unknown> | null;
+  necessita_revisao: boolean | null;
+  lote_data: string | null; // date (YYYY-MM-DD)
+  origem: string | null;
+  atualizado_em: string; // ISO
+}
+
+/** Upsert (merge por `clickup_task_id`) de um LOTE de ligações no espelho. */
+export async function upsertLigacoesEspelho(rows: LigacaoEspelhoRow[]): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  if (rows.length === 0) return 0;
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao upsertar ${rows.length} ligacoes no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao upsertar ligacoes no espelho (${SUPABASE_TABLE_LIGACOES})`);
+  }
+  return rows.length;
+}
+
+/** Linha de `audios_envios` (materializa a Lista 03 AUDIOS — design §2.2). `midia_ref`
+ *  fica `null` nesta fase — a migração do binário pro Supabase Storage é o 17-05. */
+export interface AudioEnvioRow {
+  clickup_task_id: string;
+  lead_id: number | null;
+  lead_clickup_task_id: string | null;
+  tipo: 'audio' | 'texto';
+  corpo: string | null;
+  transcricao_audio: string | null;
+  midia_ref: string | null;
+  selo_conversa: string | null;
+  enviado_em: string | null; // ISO
+}
+
+/** Upsert (merge por `clickup_task_id`) de um LOTE de envios de áudio/texto no espelho. */
+export async function upsertAudiosEnvios(rows: AudioEnvioRow[]): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  if (rows.length === 0) return 0;
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao upsertar ${rows.length} audios no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao upsertar audios no espelho (${SUPABASE_TABLE_AUDIOS_ENVIOS})`);
+  }
+  return rows.length;
+}
+
+/** Linha COMPLETA da Lista 01 LEADS (`LeadEspelhoRow` + as colunas novas de §2.3 —
+ *  score/tentativas/priorização, que faltavam pro espelho servir a geração do lote). */
+export interface LeadFullEspelhoRow extends LeadEspelhoRow {
+  score: number | null;
+  tentativas: number | null;
+  proximo_contato: string | null; // date (YYYY-MM-DD)
+  retorno_necessario: boolean | null;
+  observacao_consolidada: string | null;
+  dossie: string | null;
+  ultimo_contato: string | null; // ISO
+  qtd_contatos: number | null;
+  id_lead: string | null;
+  tags: string[];
+  elegivel: boolean | null;
+}
+
+/** Upsert (merge por `clickup_task_id`) de um LOTE de leads COMPLETOS no espelho —
+ *  mesma tabela de `upsertLeadsEspelho` (discador_leads_espelho), colunas estendidas. */
+export async function upsertLeadFullEspelho(rows: LeadFullEspelhoRow[]): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  if (rows.length === 0) return 0;
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao upsertar ${rows.length} leads (full) no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao upsertar leads (full) no espelho (${SUPABASE_TABLE_LEADS_ESPELHO})`);
   }
   return rows.length;
 }
