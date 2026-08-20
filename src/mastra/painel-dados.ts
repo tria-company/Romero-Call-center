@@ -26,6 +26,7 @@ import {
   CLICKUP_API_TOKEN,
   CLICKUP_LIST_LEADS,
   CLICKUP_LIST_LIGACOES,
+  CLICKUP_TIMEOUT_MS,
   SUPABASE_URL,
   SUPABASE_SERVICE_KEY,
   SUPABASE_TABLE_MILITANTES,
@@ -183,7 +184,10 @@ async function contarPorCustomField(
   let ultima = false;
   while (!ultima && page < PAINEL_MAX_PAGINAS) {
     const url = `${CLICKUP_BASE_URL}/list/${CLICKUP_LIST_LEADS}/task?page=${page}&include_closed=true&custom_fields=${filtro}`;
-    const res = await fetchTimeout(url, { headers: { Authorization: CLICKUP_API_TOKEN } });
+    // Mesmo CLICKUP_TIMEOUT_MS do choke point fetchClickUp: esta é uma chamada
+    // ClickUp fora do choke (débito conhecido) e o default de 15s do
+    // fetchTimeout aborta quando o índice do ClickUp degrada (~45s, 2026-08-20).
+    const res = await fetchTimeout(url, { headers: { Authorization: CLICKUP_API_TOKEN } }, CLICKUP_TIMEOUT_MS);
     if (!res.ok) throw new Error(`[painel] HTTP ${res.status} ao contar custom field na Lista 01`);
     const data = await res.json();
     for (const t of data?.tasks || []) {

@@ -184,6 +184,14 @@ export const CLICKUP_LIST_LIGACOES = process.env.CLICKUP_LIST_LIGACOES || '10003
 // clickup.ts), nunca cria lista/campo (D-07).
 export const CLICKUP_LIST_AUDIOS = process.env.CLICKUP_LIST_AUDIOS || '1000320000003180';
 
+// Timeout das chamadas de SAÍDA ao ClickUp (fetchClickUp em clickup.ts).
+// Separado do default global de 15s do fetchTimeout (http.ts) porque as
+// consultas de tasks do workspace chegam a ~45s quando o índice do ClickUp
+// degrada (incidente 2026-08-20) — com 15s, 100% abortam e o painel/fila
+// ficam presos no cache. 60s cobre a degradação observada; Azure/GHL/Supabase
+// continuam nos 15s globais.
+export const CLICKUP_TIMEOUT_MS = Number(process.env.CLICKUP_TIMEOUT_MS) || 60000;
+
 // Workspace (team) cujos MEMBROS aparecem no painel de admin (dropdown do
 // vínculo clickup_member_id). Default = Gabinete 509 (9014971829, a mesma das
 // listas). O token enxerga várias workspaces; sem esse filtro o painel mistura

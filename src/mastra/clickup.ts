@@ -15,6 +15,7 @@ import {
   CLICKUP_LIST_LIGACOES,
   CLICKUP_LIST_AUDIOS,
   CLICKUP_TEAM_ID,
+  CLICKUP_TIMEOUT_MS,
   OPER_STATUS_EM_PROCESSAMENTO,
   OPER_STATUS_FECHADO,
 } from './config.ts';
@@ -39,7 +40,10 @@ const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
  */
 async function fetchClickUp(url: string, options?: RequestInit, timeoutMs?: number): Promise<Response> {
   await adquirirToken();
-  const res = await fetchTimeout(url, options, timeoutMs);
+  // CLICKUP_TIMEOUT_MS (60s) e não o default global de 15s do fetchTimeout:
+  // as consultas de tasks degradam a ~45s no ClickUp (incidente 2026-08-20)
+  // e com 15s TODAS abortam — caller com timeout explícito segue mandando.
+  const res = await fetchTimeout(url, options, timeoutMs ?? CLICKUP_TIMEOUT_MS);
   // D-06: conta o 429 REAL que ainda escapou do rate limiter proativo — so o
   // incremento do contador (metricas.ts nunca lanca), sem alterar o fluxo de
   // retorno nem logar URL/corpo (LGPD, ja evitado neste choke point).
