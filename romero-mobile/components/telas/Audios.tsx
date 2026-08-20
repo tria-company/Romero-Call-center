@@ -735,6 +735,8 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   const [fastAgora, setFastAgora] = React.useState(0);
   const [fastTempoFim, setFastTempoFim] = React.useState(0);
   const [fastEmVoo, setFastEmVoo] = React.useState(0); // envios otimistas ainda confirmando
+  const [fastPulados, setFastPulados] = React.useState(0); // quantos ele decidiu NÃO mandar áudio
+  const [fastPuladosSet, setFastPuladosSet] = React.useState<Set<string>>(() => new Set());
   const fastInicioRef = React.useRef(0);
 
   /* Fila do fast = mesma régua do ⏭ da conversa: pendente de áudio, com lead,
@@ -751,9 +753,10 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           (l.conversa?.status ?? "enviar_audio") === "enviar_audio" &&
           situacaoPorLead[l.leadTaskId] !== "sem-whatsapp" &&
           !fastEnviadosIds.has(l.leadTaskId) &&
+          !fastPuladosSet.has(l.leadTaskId) &&
           !audioEnviadoPorLead[l.leadTaskId],
       ),
-    [leadsFiltrados, pulados, situacaoPorLead, fastEnviadosIds, audioEnviadoPorLead],
+    [leadsFiltrados, pulados, situacaoPorLead, fastEnviadosIds, fastPuladosSet, audioEnviadoPorLead],
   );
 
   /* Dossiê do lead em foco no fast — hook próprio (ocioso fora do modo),
@@ -787,6 +790,8 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     vibrar();
     regravar();
     setFastSessao(0);
+    setFastPulados(0);
+    setFastPuladosSet(new Set());
     setFastAviso(null);
     setFastFim(pendentesFast.length === 0);
     setFastLead(pendentesFast[0] ?? null);
@@ -809,6 +814,20 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     const prox = pendentesFast.find((l) => l.leadTaskId !== aposId) ?? null;
     if (prox) setFastLead(prox);
     else encerrarModoFast();
+  }
+  /* PULAR pessoa (2026-08-20): o Romero decide NÃO mandar áudio pra esta —
+     conta como pulado e cai no próximo, sem enviar nada. Não volta nesta
+     sessão (fastPuladosSet). O total aparece na tela final. */
+  function pularNoFast() {
+    const lead = fastLead;
+    if (!lead) return;
+    const id = lead.leadTaskId;
+    vibrar();
+    setFastAviso(null);
+    setFastPulados((n) => n + 1);
+    setFastPuladosSet((p) => new Set(p).add(id));
+    regravar(); // descarta qualquer áudio em preview
+    avancarFast(id);
   }
   /* OTIMISTA (2026-08-20, feedback: "demora demais pra passar pro próximo"):
      o toque AVANÇA NA HORA — placar +1, próximo lead, microfone limpo — e o
@@ -868,12 +887,16 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         <style>{AU_CSS}</style>
         {fastFim ? (
           <div className="au-fast-fim">
-            <div className="au-fast-emoji">{fastSessao > 0 ? "🎉" : "😴"}</div>
-            <div className="au-fast-tit">{fastSessao > 0 ? "Mandou bem!" : "Nada pendente"}</div>
+            <div className="au-fast-emoji">{fastSessao > 0 ? "🎉" : fastPulados > 0 ? "👋" : "😴"}</div>
+            <div className="au-fast-tit">
+              {fastSessao > 0 ? "Mandou bem!" : fastPulados > 0 ? "Sessão encerrada" : "Nada pendente"}
+            </div>
             <div className="au-fast-sub">
               {fastSessao > 0
                 ? `${fastSessao} áudio${fastSessao === 1 ? "" : "s"} nesta sessão — todo mundo com contexto do dossiê.`
-                : "Todo mundo da lista já recebeu áudio hoje."}
+                : fastPulados > 0
+                  ? "Nenhum áudio enviado nesta sessão."
+                  : "Todo mundo da lista já recebeu áudio hoje."}
             </div>
             <div className="au-fast-tiles">
               <div className="au-fast-tile am">
@@ -889,6 +912,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                 <span className="au-fast-tile-val">{fmtRelogio(tempoMs)}</span>
               </div>
             </div>
+            {fastPulados > 0 && (
+              <div className="au-fast-sub">⏭️ Você pulou {fastPulados} {fastPulados === 1 ? "pessoa" : "pessoas"} nesta sessão.</div>
+            )}
             {fastEmVoo > 0 && (
               <div className="au-fast-sub">✈️ {fastEmVoo} envio{fastEmVoo === 1 ? "" : "s"} confirmando em segundo plano…</div>
             )}
@@ -968,6 +994,11 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                       ? "Confere o áudio e envia — já caio no próximo."
                       : "Segure o microfone e grave usando o dossiê aí de cima."}
               </div>
+              {/* PULAR pessoa (2026-08-20): não quer mandar áudio pra esta →
+                  cai no próximo sem enviar. Neutro (a ação verde é enviar). */}
+              <button type="button" className="au-fast-pular" onClick={pularNoFast}>
+                <SkipForward size={16} /> Pular esta pessoa
+              </button>
               <button type="button" className="au-fast-end" onClick={encerrarModoFast}>
                 Encerrar modo fast
               </button>
@@ -1723,6 +1754,8 @@ const AU_CSS = `
 .au-fast-regravar{ display:inline-flex; align-items:center; gap:5px; border:none; background:none; color:var(--dim); font-size:12.5px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .au-fast-send{ width:100%; max-width:340px; border:none; border-radius:14px; padding:15px; background:var(--go); color:#fff; font-size:16px; font-weight:900; display:inline-flex; align-items:center; justify-content:center; gap:8px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .au-fast-send:disabled{ opacity:.65; }
+.au-fast-pular{ display:inline-flex; align-items:center; justify-content:center; gap:7px; width:100%; max-width:340px; border:1px solid var(--line); border-radius:12px; padding:11px; background:var(--card-2); color:var(--ink); font-size:14px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-fast-pular:active{ filter:brightness(1.2); }
 .au-fast-end{ border:none; background:none; color:var(--dim-2); font-size:13px; padding:8px 14px; cursor:pointer; text-decoration:underline; text-underline-offset:3px; -webkit-tap-highlight-color:transparent; }
 
 /* tela final — celebração estilo Duolingo: emoji grande, frase, 3 tiles, CTA */
