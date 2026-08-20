@@ -4,7 +4,7 @@ import * as React from "react";
 import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Search, Send, SkipForward, X } from "lucide-react";
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
-import { iniciarLigacaoReal } from "@/lib/leads-real";
+import { iniciarLigacaoReal, useLeadReal } from "@/lib/leads-real";
 import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
 import { Autobox, Vhead } from "./blocos";
@@ -12,6 +12,7 @@ import { Autobox, Vhead } from "./blocos";
 // overlay — mesma PerfilLead da Base, em modo embutido (sem navegar, o chat
 // continua aberto por trás).
 import { PerfilLead } from "./PerfilLead";
+import { DossieMarkdown } from "@/components/DossieMarkdown";
 
 /* TELA · ÁUDIOS — estilo WhatsApp, CONVERSA por lead. Toca no lead → abre a
    conversa dele; grava (segurar o microfone) e o áudio vira uma mensagem de voz
@@ -400,9 +401,16 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   /* Ficha (dossiê + histórico) como overlay da conversa (2026-08-19) — abre no
      toque do NOME, fecha no voltar; trocar/fechar a conversa fecha junto. */
   const [fichaAberta, setFichaAberta] = React.useState(false);
+  /* Card recolhível do DOSSIÊ (2026-08-19) — faixa fixa entre .au-chead e
+     .au-thread, mesmo dado da ficha (useLeadReal) sem duplicar fetch aqui:
+     o hook é ocioso (sem fetch) enquanto não há conversa aberta. */
+  const [dossieAberto, setDossieAberto] = React.useState(false);
   React.useEffect(() => {
     setFichaAberta(false);
+    setDossieAberto(false);
   }, [leadAberto]);
+  const { ficha: fichaDossie, carregando: dossieCarregando } = useLeadReal(leadAberto?.leadTaskId ?? null);
+  const dossieTexto = typeof fichaDossie?.dossie === "string" ? fichaDossie.dossie : "";
   const [bolhasPorLead, setBolhasPorLead] = React.useState<Record<string, Bolha[]>>({});
   /* Qual ÁUDIO (identidade = prefixo do base64) já foi enviado pra cada lead
      NESTA sessão — decide a barra da conversa: o MESMO áudio não se reenvia
@@ -673,6 +681,29 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             {ligando ? <span className="au-spin" /> : <Phone size={19} />}
           </button>
         </div>
+
+        {/* ── card recolhível do DOSSIÊ (2026-08-19): faixa fixa (não rola com
+              o thread), some sozinha quando o lead não tem dossiê (erro/vazio
+              já carregado degradam em silêncio — a conversa segue normal). ── */}
+        {(dossieCarregando || dossieTexto) && (
+          <div className="au-dossie">
+            <button
+              type="button"
+              className="au-dossie-strip"
+              onClick={() => setDossieAberto((v) => !v)}
+              disabled={dossieCarregando && !dossieTexto}
+              aria-expanded={dossieAberto}
+            >
+              <span>📋 Dossiê{dossieCarregando && !dossieTexto ? " — carregando…" : ""}</span>
+              {!!dossieTexto && <span className="au-dossie-chev">{dossieAberto ? "▴ ocultar" : "▾"}</span>}
+            </button>
+            {dossieAberto && dossieTexto && (
+              <div className="au-dossie-body">
+                <DossieMarkdown texto={dossieTexto} />
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="au-thread" ref={threadRef}>
           {/* com mensagens de outros dias na conversa, "HOJE" mentiria */}
@@ -1227,6 +1258,12 @@ const AU_CSS = `
 .au-ficha{ position:fixed; inset:0; z-index:240; background:var(--bg-0); display:flex; flex-direction:column; }
 .au-fbody{ flex:1; overflow-y:auto; padding:4px 14px calc(24px + var(--safe-b)); }
 .au-fbody .view{ min-height:0; }
+/* card recolhível do dossiê (2026-08-19) — fixo entre chead e thread, não rola */
+.au-dossie{ flex:none; border-bottom:1px solid var(--line); background:var(--bg-1); }
+.au-dossie-strip{ width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:space-between; gap:8px; background:none; border:none; padding:10px 14px; color:var(--ink); font-size:12.5px; font-weight:700; text-align:left; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-dossie-strip:disabled{ opacity:.6; cursor:default; }
+.au-dossie-chev{ font-size:11.5px; font-weight:700; color:var(--dim); flex:none; }
+.au-dossie-body{ padding:2px 14px 12px; max-height:40vh; overflow-y:auto; }
 .au-thread{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:8px; }
 .au-day{ align-self:center; background:var(--card-2); color:var(--dim); font-size:11px; padding:5px 12px; border-radius:8px; margin-bottom:4px; }
 .au-hintbig{ align-self:center; color:var(--dim); font-size:13.5px; text-align:center; margin:auto 24px; line-height:1.7; }
