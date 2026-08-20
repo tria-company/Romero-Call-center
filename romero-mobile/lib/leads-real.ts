@@ -188,6 +188,55 @@ export type EstadoLeadReal = {
   recarregar: () => void;
 };
 
+/* Cache de MÓDULO + dedup em-voo compartilhados entre TODAS as instâncias de
+ * `useLeadReal` (quick 260819-v2a) — card (Audios.tsx) + overlay
+ * (PerfilLead.tsx) + timeline (LinhaDoTempo.tsx) abertos juntos pro mesmo
+ * lead colapsam num request só. Fresco por 30s (mesma faixa do backend).
+ *
+ * `Resultado` é discriminado (D-4 do plano) porque o dedup precisa propagar
+ * 403/erro corretamente pras instâncias que aguardam a mesma promise — não
+ * só a ficha em caso de sucesso. */
+type ResultadoLeadReal = { tipo: "ok"; ficha: LeadFichaReal } | { tipo: "semAcesso" } | { tipo: "erro" };
+
+const TTL_FICHA_MS = 30_000;
+const cacheFicha = new Map<string, { ficha: LeadFichaReal; em: number }>();
+const emVooFicha = new Map<string, Promise<ResultadoLeadReal>>();
+
+async function buscarFicha(id: string): Promise<ResultadoLeadReal> {
+  try {
+    const r = await fetch(`/api/mobile/lead/${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (r.status === 403) return { tipo: "semAcesso" };
+    if (!r.ok) return { tipo: "erro" };
+    const d = (await r.json().catch(() => null)) as LeadFichaReal | null;
+    if (!d) return { tipo: "erro" };
+    return { tipo: "ok", ficha: d };
+  } catch {
+    return { tipo: "erro" };
+  }
+}
+
+/** Hit fresco resolve sem fetch; senão dedupa via `emVooFicha` (1 fetch para
+ * N instâncias concorrentes do hook); 403/erro NÃO entram em `cacheFicha`. */
+function carregarCompartilhado(id: string): Promise<ResultadoLeadReal> {
+  const copia = cacheFicha.get(id);
+  if (copia && Date.now() - copia.em < TTL_FICHA_MS) {
+    return Promise.resolve({ tipo: "ok", ficha: copia.ficha });
+  }
+  const jaEmVoo = emVooFicha.get(id);
+  if (jaEmVoo) return jaEmVoo;
+
+  const p = buscarFicha(id)
+    .then((resultado) => {
+      if (resultado.tipo === "ok") cacheFicha.set(id, { ficha: resultado.ficha, em: Date.now() });
+      return resultado;
+    })
+    .finally(() => {
+      emVooFicha.delete(id);
+    });
+  emVooFicha.set(id, p);
+  return p;
+}
+
 /** Carrega a ficha completa de um lead. `id` null → não busca (estado ocioso). */
 export function useLeadReal(leadTaskId: string | null): EstadoLeadReal {
   const [ficha, setFicha] = React.useState<LeadFichaReal | null>(null);
@@ -195,6 +244,10 @@ export function useLeadReal(leadTaskId: string | null): EstadoLeadReal {
   const [erro, setErro] = React.useState(false);
   const [semAcesso, setSemAcesso] = React.useState(false);
 
+  // D-4: vivoRef guarda só o setState desta instância — a promise
+  // COMPARTILHADA (emVooFicha) roda até o fim mesmo que esta instância
+  // desmonte, porque outras instâncias (card/overlay/timeline) podem estar
+  // aguardando a MESMA busca.
   const vivoRef = React.useRef(true);
 
   const carregar = React.useCallback(async (id: string | null) => {
@@ -208,27 +261,18 @@ export function useLeadReal(leadTaskId: string | null): EstadoLeadReal {
     setCarregando(true);
     setErro(false);
     setSemAcesso(false);
-    try {
-      const r = await fetch(`/api/mobile/lead/${encodeURIComponent(id)}`, { cache: "no-store" });
-      if (!vivoRef.current) return;
-      if (r.status === 403) {
-        setSemAcesso(true);
-        setFicha(null);
-        return;
-      }
-      if (!r.ok) {
-        setErro(true);
-        setFicha(null);
-        return;
-      }
-      const d = (await r.json().catch(() => null)) as LeadFichaReal | null;
-      if (!vivoRef.current) return;
-      setFicha(d ?? null);
-    } catch {
-      if (vivoRef.current) setErro(true);
-    } finally {
-      if (vivoRef.current) setCarregando(false);
+    const resultado = await carregarCompartilhado(id);
+    if (!vivoRef.current) return;
+    if (resultado.tipo === "semAcesso") {
+      setSemAcesso(true);
+      setFicha(null);
+    } else if (resultado.tipo === "erro") {
+      setErro(true);
+      setFicha(null);
+    } else {
+      setFicha(resultado.ficha);
     }
+    setCarregando(false);
   }, []);
 
   React.useEffect(() => {
@@ -239,7 +283,13 @@ export function useLeadReal(leadTaskId: string | null): EstadoLeadReal {
     };
   }, [leadTaskId, carregar]);
 
+  // `recarregar` fura o cache: invalida a cópia de módulo + o em-voo antes de
+  // re-chamar `carregar` (invalidate + refetch, nunca serve stale aqui).
   const recarregar = React.useCallback(() => {
+    if (leadTaskId) {
+      cacheFicha.delete(leadTaskId);
+      emVooFicha.delete(leadTaskId);
+    }
     void carregar(leadTaskId);
   }, [leadTaskId, carregar]);
 
