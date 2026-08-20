@@ -1,0 +1,94 @@
+version: "3.7"
+
+## ============================================================================
+## STACK DE HOMOLOGAÇÃO do RomeroCall — isolado de produção na MESMA VPS.
+##
+## As diferenças vs. produção (deploy/discador.swarm.yaml) vivem 100% no arquivo
+## de env `deploy/homolog.env` (NÃO versionado). Trocar homolog -> prod = trocar
+## o env. Isolamento garantido por 4 eixos:
+##   1. Rede própria (homolog_net)      -> `redis` resolve o Redis do homolog.
+##   2. Redis próprio (homolog_redis)   -> filas BullMQ não colidem com prod.
+##   3. Porta host 4112                 -> Vercel de homolog aponta pra cá.
+##   4. Imagem própria (…-homolog)      -> build da branch homolog, prod intacto.
+## + no env: CLICKUP_ESCRITA_HABILITADA=false (ClickUp de prod SÓ-LEITURA) e
+##   tabelas Supabase hml_* (escrita do homolog não toca dados de produção).
+##
+## Deploy (na VPS, a partir de /opt/discador-homolog):
+##   cd deploy && docker stack deploy -c homolog.swarm.yaml homolog
+## ============================================================================
+
+services:
+
+  ## --------------------------- DISCADOR (web) --------------------------- ##
+  discador:
+    image: discador-wavoip-homolog:latest ## build local: docker build -t discador-wavoip-homolog:latest /opt/discador-homolog
+    env_file: [homolog.env]               ## herda TODO o ambiente; overrides de homolog no fim do arquivo (última ocorrência vence)
+    networks: [homolog_net]
+
+    ports:
+      - target: 4111
+        published: 4112 ## host:4112 -> container:4111. Vercel homolog reescreve /api/* -> http://85.155.178.244:4112
+        protocol: tcp
+        mode: host      ## bypassa a malha ingress (single-node), igual produção
+
+    ## healthcheck raso (só confirma o HTTP em localhost:4111) — mesmo desenho
+    ## de produção; não checa Redis/ClickUp/Supabase pra não derrubar por queda
+    ## de dependência externa. wget porque a imagem base (alpine) só tem busybox.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:4111/api/discador/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    deploy:
+      mode: replicated
+      replicas: 1 ## homolog: 1 réplica basta (prod usa 2 por resiliência de processo)
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        limits: { cpus: "1", memory: 512M }
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+    ## SEM labels do Traefik: homolog é acessado direto pela porta host 4112.
+
+  ## ------------------------------- WORKER ------------------------------- ##
+  ## Mesma imagem; sobrescreve o CMD para rodar o consumidor da fila BullMQ
+  ## (processamento-ligacao) em vez do servidor HTTP. Igual produção.
+  worker:
+    image: discador-wavoip-homolog:latest
+    command: node worker.mjs
+    env_file: [homolog.env]
+    networks: [homolog_net]
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        limits: { cpus: "1", memory: 768M }
+      stop_grace_period: 120s ## drena o job em andamento no SIGTERM (dedup é crash-safe)
+
+  ## ------------------------------- REDIS -------------------------------- ##
+  ## Redis DEDICADO do homolog — isolado do discador_redis de produção.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    networks: [homolog_net]
+    volumes: [homolog_redis_data:/data]
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+
+networks:
+  homolog_net:
+    driver: overlay ## rede própria do stack — NÃO é a public_network de produção
+
+volumes:
+  homolog_redis_data:

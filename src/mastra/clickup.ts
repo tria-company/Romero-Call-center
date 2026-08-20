@@ -16,6 +16,7 @@ import {
   CLICKUP_LIST_AUDIOS,
   CLICKUP_TEAM_ID,
   CLICKUP_TIMEOUT_MS,
+  CLICKUP_ESCRITA_HABILITADA,
   OPER_STATUS_EM_PROCESSAMENTO,
   OPER_STATUS_FECHADO,
 } from './config.ts';
@@ -39,6 +40,15 @@ const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
  * envolvendo esta função com o mesmo try/catch de sempre.
  */
 async function fetchClickUp(url: string, options?: RequestInit, timeoutMs?: number): Promise<Response> {
+  // Trava de escrita (homolog aponta pro ClickUp de produção só-leitura): se
+  // CLICKUP_ESCRITA_HABILITADA=false, bloqueia todo verbo mutante ANTES de
+  // qualquer efeito — nenhum voto/desfecho/task de homolog toca uma task real.
+  // Fail-closed e barato: default de produção (true) nem entra aqui. LGPD: não
+  // loga URL (pode conter ids); só o método.
+  const metodo = (options?.method ?? 'GET').toUpperCase();
+  if (!CLICKUP_ESCRITA_HABILITADA && metodo !== 'GET' && metodo !== 'HEAD') {
+    throw new Error(`[clickup] escrita bloqueada (CLICKUP_ESCRITA_HABILITADA=false): ${metodo} não permitido neste ambiente`);
+  }
   await adquirirToken();
   // CLICKUP_TIMEOUT_MS (60s) e não o default global de 15s do fetchTimeout:
   // as consultas de tasks degradam a ~45s no ClickUp (incidente 2026-08-20)
