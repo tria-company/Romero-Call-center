@@ -4,7 +4,7 @@ import * as React from "react";
 import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Search, Send, SkipForward, X } from "lucide-react";
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
-import { iniciarLigacaoReal, useLeadReal } from "@/lib/leads-real";
+import { iniciarLigacaoReal, preaquecerDossieLead, useLeadReal } from "@/lib/leads-real";
 import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
 import { Autobox, Vhead } from "./blocos";
@@ -71,6 +71,35 @@ type SituacaoLead = "sem-whatsapp" | "desconectado" | "erro" | null;
 /** Selo por status (modelo de 4 estados, 2026-08-19) — rótulo + classe de cor.
  *  enviar_audio = nada enviado/aguardando; indefinido = respondeu neutro (Romero
  *  decide); ligar/nao_ligar = desfecho claro. */
+/* ── Contador de áudios DO DIA (modo fast, 2026-08-20): persistido por
+   aparelho em localStorage e zerado quando vira o dia. Soma envios do modo
+   fast E da conversa — é o "quanto enviei hoje" da tela final do jogo. ── */
+function lerAudiosDia(): number {
+  try {
+    const o = JSON.parse(localStorage.getItem("audiosEnviadosDia") ?? "null") as { data?: string; total?: number } | null;
+    const hoje = new Date().toISOString().slice(0, 10);
+    return o?.data === hoje ? Number(o.total) || 0 : 0;
+  } catch {
+    return 0;
+  }
+}
+function somarAudiosDia(n: number): number {
+  const hoje = new Date().toISOString().slice(0, 10);
+  // aceita n negativo (estorno do envio otimista que falhou) — nunca abaixo de 0
+  const total = Math.max(0, lerAudiosDia() + n);
+  try {
+    localStorage.setItem("audiosEnviadosDia", JSON.stringify({ data: hoje, total }));
+  } catch {
+    /* storage cheio/privado: o contador degrada, o envio não */
+  }
+  return total;
+}
+/** mm:ss para o placar/cronômetro do modo fast. */
+function fmtRelogio(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
 const SELO_UI: Record<"ligar" | "nao_ligar" | "indefinido" | "aguardando" | "enviar_audio", { rotulo: string; cls: string }> = {
   enviar_audio: { rotulo: "Enviar áudio", cls: "envaudio" },
   aguardando: { rotulo: "Aguardando", cls: "aguard" },
@@ -248,6 +277,16 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   /* ── Gravação (D-01/D-02/D-03) — grava uma vez, serve pra vários leads. ── */
   const [estadoGravacao, setEstadoGravacao] = React.useState<EstadoGravacao>("vazio");
   const [erroMic, setErroMic] = React.useState<string | null>(null);
+  /* Aviso "segure para gravar" (2026-08-20): um CLIQUE rápido no microfone
+     (soltou em <600ms) não grava nada — antes isso era silencioso e o operador
+     achava que o botão não funcionava. Agora acende uma dica transitória. */
+  const [dicaSegurar, setDicaSegurar] = React.useState(false);
+  const dicaSegurarRef = React.useRef<number | null>(null);
+  const flashDicaSegurar = React.useCallback(() => {
+    setDicaSegurar(true);
+    if (dicaSegurarRef.current != null) window.clearTimeout(dicaSegurarRef.current);
+    dicaSegurarRef.current = window.setTimeout(() => setDicaSegurar(false), 2600);
+  }, []);
   const [duracaoMs, setDuracaoMs] = React.useState(0);
   const [duracaoPreviewMs, setDuracaoPreviewMs] = React.useState(0);
   const [audioUrl, setAudioUrl] = React.useState<string | null>(null);
@@ -317,7 +356,11 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           stream.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
           if (decorridoMs < 600) {
-            if (montadoRef.current) setEstadoGravacao("vazio");
+            // clique rápido (não segurou): reseta e AVISA que precisa segurar.
+            if (montadoRef.current) {
+              setEstadoGravacao("vazio");
+              flashDicaSegurar();
+            }
             return;
           }
           const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeAlvo });
@@ -382,6 +425,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         /* ignora */
       }
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      if (dicaSegurarRef.current != null) window.clearTimeout(dicaSegurarRef.current);
       setAudioUrl((a) => {
         if (a) URL.revokeObjectURL(a);
         return a;
@@ -409,7 +453,10 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     setFichaAberta(false);
     setDossieAberto(false);
   }, [leadAberto]);
-  const { ficha: fichaDossie, carregando: dossieCarregando } = useLeadReal(leadAberto?.leadTaskId ?? null);
+  // leve:true (2026-08-20): o card só mostra o DOSSIÊ — a variante sem
+  // timeline carrega em ~1-2s frio (e ms no cache) em vez dos 10s+ da ficha
+  // completa. A ficha completa (com timeline) fica pro overlay do PerfilLead.
+  const { ficha: fichaDossie, carregando: dossieCarregando } = useLeadReal(leadAberto?.leadTaskId ?? null, { leve: true });
   const dossieTexto = typeof fichaDossie?.dossie === "string" ? fichaDossie.dossie : "";
   const [bolhasPorLead, setBolhasPorLead] = React.useState<Record<string, Bolha[]>>({});
   /* Qual ÁUDIO (identidade = prefixo do base64) já foi enviado pra cada lead
@@ -572,6 +619,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     const r = await enviarAudioParaLead(id, audioBase64!, audioMime);
     setEnviandoLead(null);
     if (r.tipo === "sucesso") {
+      somarAudiosDia(1); // entra no "🔥 Hoje" da tela final do modo fast
       setBolhasPorLead((p) => ({
         ...p,
         [id]: (p[id] ?? []).map((b, i, arr) => (i === arr.length - 1 && b.status === "enviando" ? { ...b, status: "ok" } : b)),
@@ -640,6 +688,296 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     return { txt: fmtTelefone(lead.telefone) || "sem telefone", cls: "" };
   }
 
+  /* Próximo lead ainda SEM áudio enviado (2026-08-20): dentro da conversa, o
+     fluxo do Romero é gravar → próximo → gravar, sem voltar pra lista. Anda a
+     lista COMPLETA na ordem do backend (ignora filtro/busca ativos), começa
+     DEPOIS do lead aberto e dá a volta; pula quem já saiu (pulados), quem não
+     tem lead vinculado (linha só-ligação) e número sem WhatsApp (o áudio não
+     entregaria). null = ninguém pendente → o botão nem aparece. */
+  const proximoSemAudio = React.useMemo(() => {
+    if (!leadAberto) return null;
+    const vivos = leads.filter(
+      (l) => l.leadTaskId && !(l.ligacaoTaskId && pulados.has(l.ligacaoTaskId)),
+    );
+    const pendente = (l: LeadAudioReal) =>
+      l.leadTaskId !== leadAberto.leadTaskId &&
+      (l.conversa?.status ?? "enviar_audio") === "enviar_audio" &&
+      situacaoPorLead[l.leadTaskId] !== "sem-whatsapp";
+    const i = vivos.findIndex((l) => l.leadTaskId === leadAberto.leadTaskId);
+    const giro = [...vivos.slice(i + 1), ...vivos.slice(0, Math.max(i, 0))];
+    return giro.find(pendente) ?? null;
+  }, [leads, pulados, situacaoPorLead, leadAberto]);
+
+  const irParaProximoSemAudio = () => {
+    if (!proximoSemAudio) return;
+    // mesmo par de efeitos do toque na linha da lista: bolinha apaga na hora
+    // e a conversa troca de lead (dossiê/thread recarregam pelos efeitos).
+    setLidosLocais((p) => {
+      const n = new Set(p);
+      n.add(proximoSemAudio.leadTaskId);
+      return n;
+    });
+    setLeadAberto(proximoSemAudio);
+  };
+
+  /* ═══════════════ MODO FAST (2026-08-20) ═══════════════
+     A visão: mandar o MÁXIMO de áudios em pouco tempo, com contexto. Tela
+     cheia com só o lead + dossiê + microfone; gravou → confere → enviou →
+     JÁ CAI NO PRÓXIMO. Placar (⚡ sessão) + cronômetro em cima, "Encerrar"
+     embaixo, e no fim uma tela de celebração estilo Duolingo com os tiles
+     (sessão / hoje / tempo). */
+  const [modoFast, setModoFast] = React.useState(false);
+  const [fastLead, setFastLead] = React.useState<LeadAudioReal | null>(null);
+  const [fastFim, setFastFim] = React.useState(false);
+  const [fastSessao, setFastSessao] = React.useState(0);
+  const [fastEnviadosIds, setFastEnviadosIds] = React.useState<Set<string>>(() => new Set());
+  const [fastAviso, setFastAviso] = React.useState<string | null>(null);
+  const [fastAgora, setFastAgora] = React.useState(0);
+  const [fastTempoFim, setFastTempoFim] = React.useState(0);
+  const [fastEmVoo, setFastEmVoo] = React.useState(0); // envios otimistas ainda confirmando
+  const fastInicioRef = React.useRef(0);
+
+  /* Fila do fast = mesma régua do ⏭ da conversa: pendente de áudio, com lead,
+     não pulado, não sem-whatsapp — MENOS quem já recebeu nesta sessão (o selo
+     do backend só vira "aguardando" no próximo refetch). Parte de
+     `leadsFiltrados` (respeita BUSCA e filtro de selo ativos): buscar "TESTE"
+     e entrar no ⚡ treina só nos leads de teste; sem filtro, é a lista toda. */
+  const pendentesFast = React.useMemo(
+    () =>
+      leadsFiltrados.filter(
+        (l) =>
+          l.leadTaskId &&
+          !(l.ligacaoTaskId && pulados.has(l.ligacaoTaskId)) &&
+          (l.conversa?.status ?? "enviar_audio") === "enviar_audio" &&
+          situacaoPorLead[l.leadTaskId] !== "sem-whatsapp" &&
+          !fastEnviadosIds.has(l.leadTaskId) &&
+          !audioEnviadoPorLead[l.leadTaskId],
+      ),
+    [leadsFiltrados, pulados, situacaoPorLead, fastEnviadosIds, audioEnviadoPorLead],
+  );
+
+  /* Dossiê do lead em foco no fast — hook próprio (ocioso fora do modo),
+     variante LEVE (sem timeline: só o dossiê importa aqui). */
+  const { ficha: fichaFast, carregando: fastDossieCarregando } = useLeadReal(
+    modoFast ? (fastLead?.leadTaskId ?? null) : null,
+    { leve: true },
+  );
+  const dossieFastTexto = typeof fichaFast?.dossie === "string" ? fichaFast.dossie : "";
+
+  /* PRÉ-AQUECIMENTO (a estratégia dos "milésimos"): enquanto o Romero grava
+     pro lead atual, os dossiês dos 2 PRÓXIMOS da esteira já são buscados —
+     o avanço encontra tudo em cache. Re-dispara no preview (audioPronto):
+     envio vem em segundos, garante frescor. Dedup/cache do lib fazem as
+     repetições custarem zero. */
+  React.useEffect(() => {
+    if (!modoFast || fastFim) return;
+    for (const l of pendentesFast.filter((x) => x.leadTaskId !== fastLead?.leadTaskId).slice(0, 2)) {
+      preaquecerDossieLead(l.leadTaskId);
+    }
+  }, [modoFast, fastFim, fastLead, audioPronto, pendentesFast]);
+
+  // cronômetro do placar (1s) — só enquanto o modo está vivo
+  React.useEffect(() => {
+    if (!modoFast || fastFim) return;
+    const t = window.setInterval(() => setFastAgora(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [modoFast, fastFim]);
+
+  function entrarModoFast() {
+    vibrar();
+    regravar();
+    setFastSessao(0);
+    setFastAviso(null);
+    setFastFim(pendentesFast.length === 0);
+    setFastLead(pendentesFast[0] ?? null);
+    fastInicioRef.current = Date.now();
+    setFastAgora(Date.now());
+    setModoFast(true);
+  }
+  function encerrarModoFast() {
+    setFastTempoFim(Date.now() - fastInicioRef.current);
+    setFastFim(true);
+  }
+  function sairModoFast() {
+    setModoFast(false);
+    setFastFim(false);
+    setFastLead(null);
+    setFastAviso(null);
+    regravar();
+  }
+  function avancarFast(aposId: string) {
+    const prox = pendentesFast.find((l) => l.leadTaskId !== aposId) ?? null;
+    if (prox) setFastLead(prox);
+    else encerrarModoFast();
+  }
+  /* OTIMISTA (2026-08-20, feedback: "demora demais pra passar pro próximo"):
+     o toque AVANÇA NA HORA — placar +1, próximo lead, microfone limpo — e o
+     envio real corre em segundo plano (Evolution leva 3-10s), igual à bolha
+     otimista da conversa. Falhou → placar/da­dia voltam, o lead RETORNA pra
+     fila e o aviso conta pra quem falhou. `fastEmVoo` mostra o que ainda está
+     confirmando (inclusive na tela final, que atualiza ao vivo). */
+  function enviarNoFast() {
+    const lead = fastLead;
+    if (!lead || !audioPronto || !conectado) return;
+    const id = lead.leadTaskId;
+    const nome = lead.nome;
+    const b64 = audioBase64!;
+    const mime = audioMime;
+    vibrar();
+    setFastAviso(null);
+    setFastEnviadosIds((p) => new Set(p).add(id));
+    setFastSessao((n) => n + 1);
+    somarAudiosDia(1);
+    setAudioEnviadoPorLead((p) => ({ ...p, [id]: b64.slice(0, 32) })); // selo vira "Aguardando" na hora
+    setFastEmVoo((n) => n + 1);
+    regravar(); // áudio é personalizado por lead — o próximo grava o dele
+    avancarFast(id);
+    void (async () => {
+      const r = await enviarAudioParaLead(id, b64, mime);
+      setFastEmVoo((n) => Math.max(0, n - 1));
+      if (r.tipo === "sucesso") {
+        setSituacaoPorLead((p) => ({ ...p, [id]: null }));
+        return;
+      }
+      // não confirmou: desfaz o placar/dia e o selo otimista
+      setFastSessao((n) => Math.max(0, n - 1));
+      somarAudiosDia(-1);
+      setAudioEnviadoPorLead((p) => {
+        const { [id]: _descartado, ...resto } = p;
+        return resto;
+      });
+      if (r.tipo === "sem_whatsapp") {
+        setSituacaoPorLead((p) => ({ ...p, [id]: "sem-whatsapp" }));
+        setFastAviso(`${nome}: número sem WhatsApp — ficou de fora.`);
+      } else {
+        // volta pra fila (sai dos enviados) pra tentar de novo depois
+        setFastEnviadosIds((p) => {
+          const n = new Set(p);
+          n.delete(id);
+          return n;
+        });
+        setFastAviso(`⚠️ Falha ao enviar pra ${nome} — voltou pra fila.`);
+      }
+    })();
+  }
+
+  if (modoFast) {
+    const tempoMs = fastFim ? fastTempoFim : (fastAgora || Date.now()) - fastInicioRef.current;
+    return (
+      <div className="au-fast">
+        <style>{AU_CSS}</style>
+        {fastFim ? (
+          <div className="au-fast-fim">
+            <div className="au-fast-emoji">{fastSessao > 0 ? "🎉" : "😴"}</div>
+            <div className="au-fast-tit">{fastSessao > 0 ? "Mandou bem!" : "Nada pendente"}</div>
+            <div className="au-fast-sub">
+              {fastSessao > 0
+                ? `${fastSessao} áudio${fastSessao === 1 ? "" : "s"} nesta sessão — todo mundo com contexto do dossiê.`
+                : "Todo mundo da lista já recebeu áudio hoje."}
+            </div>
+            <div className="au-fast-tiles">
+              <div className="au-fast-tile am">
+                <span className="au-fast-tile-rot">⚡ Sessão</span>
+                <span className="au-fast-tile-val">{fastSessao}</span>
+              </div>
+              <div className="au-fast-tile vd">
+                <span className="au-fast-tile-rot">🔥 Hoje</span>
+                <span className="au-fast-tile-val">{lerAudiosDia()}</span>
+              </div>
+              <div className="au-fast-tile az">
+                <span className="au-fast-tile-rot">⏱ Tempo</span>
+                <span className="au-fast-tile-val">{fmtRelogio(tempoMs)}</span>
+              </div>
+            </div>
+            {fastEmVoo > 0 && (
+              <div className="au-fast-sub">✈️ {fastEmVoo} envio{fastEmVoo === 1 ? "" : "s"} confirmando em segundo plano…</div>
+            )}
+            <button type="button" className="au-fast-claim" onClick={sairModoFast}>
+              Voltar pra lista
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="au-fast-top">
+              <span className="au-fast-score">⚡ {fastSessao}</span>
+              <span className="au-fast-relogio">{fmtRelogio(tempoMs)}</span>
+              <span className="au-fast-resta">
+                {pendentesFast.length} na fila{fastEmVoo > 0 ? ` · ✈️ ${fastEmVoo}` : ""}
+              </span>
+            </div>
+            <div className="au-fast-lead">
+              <div className="au-fast-nome">{fastLead?.nome}</div>
+              <div className="au-fast-tel">{fmtTelefone(fastLead?.telefone ?? "")}</div>
+            </div>
+            <div className="au-fast-dossie">
+              {fastDossieCarregando && !dossieFastTexto ? (
+                <div className="au-fast-dossie-vazio">📋 carregando o dossiê…</div>
+              ) : dossieFastTexto ? (
+                <DossieMarkdown texto={dossieFastTexto} />
+              ) : (
+                <div className="au-fast-dossie-vazio">Sem dossiê deste lead — vale usar o nome e a cidade.</div>
+              )}
+            </div>
+            {(fastAviso || erroMic) && <div className="au-fast-aviso">{fastAviso ?? erroMic}</div>}
+            <div className="au-fast-acao">
+              {audioPronto && audioUrl ? (
+                <>
+                  <div className="au-fast-preview">
+                    <button
+                      type="button"
+                      className="au-fast-play"
+                      onClick={alternarReproducao}
+                      aria-label={tocando ? "Pausar o áudio" : "Ouvir o áudio"}
+                    >
+                      {tocando ? <Pause size={20} /> : <Play size={20} />}
+                    </button>
+                    <span className="au-fast-dur">{fmtRelogio(duracaoPreviewMs)}</span>
+                    <button type="button" className="au-fast-regravar" onClick={regravar} aria-label="Regravar o áudio">
+                      <RotateCcw size={16} /> regravar
+                    </button>
+                    <audio
+                      ref={audioElRef}
+                      src={audioUrl}
+                      onPlay={() => setTocando(true)}
+                      onPause={() => setTocando(false)}
+                      onEnded={() => setTocando(false)}
+                    />
+                  </div>
+                  <button type="button" className="au-fast-send" onClick={enviarNoFast}>
+                    Enviar e próximo
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className={"au-fast-mic" + (estadoGravacao === "gravando" ? " gravando" : "")}
+                  onPointerDown={aoApertarMic}
+                  onPointerUp={aoSoltarMic}
+                  onPointerLeave={aoSoltarMic}
+                  aria-label="Segure para gravar o áudio"
+                >
+                  <Mic size={30} />
+                </button>
+              )}
+              <div className={"au-fast-hint" + (dicaSegurar ? " dica" : "")}>
+                {dicaSegurar
+                  ? "✋ Segure o microfone (não solte) para gravar o áudio."
+                  : estadoGravacao === "gravando"
+                    ? `Gravando… ${fmtRelogio(duracaoMs)} — solte para parar`
+                    : audioPronto
+                      ? "Confere o áudio e envia — já caio no próximo."
+                      : "Segure o microfone e grave usando o dossiê aí de cima."}
+              </div>
+              <button type="button" className="au-fast-end" onClick={encerrarModoFast}>
+                Encerrar modo fast
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
   /* ═══════════════ CONVERSA (por lead) ═══════════════ */
   if (leadAberto) {
     const bolhas = bolhasPorLead[leadAberto.leadTaskId] ?? [];
@@ -680,6 +1018,17 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           >
             {ligando ? <span className="au-spin" /> : <Phone size={19} />}
           </button>
+          {proximoSemAudio && (
+            <button
+              type="button"
+              className="au-nextbtn"
+              onClick={irParaProximoSemAudio}
+              aria-label={`Próximo lead sem áudio: ${proximoSemAudio.nome}`}
+              title={`Próximo sem áudio: ${proximoSemAudio.nome}`}
+            >
+              <SkipForward size={18} />
+            </button>
+          )}
         </div>
 
         {/* ── card recolhível do DOSSIÊ (2026-08-19): faixa fixa (não rola com
@@ -817,7 +1166,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           {situ === "sem-whatsapp" && <div className="au-sysmsg semwa">🚫 Este número não tem WhatsApp — pulado.</div>}
           {situ === "desconectado" && <div className="au-sysmsg semwa">Não enviou — número desconectado.</div>}
           {situ === "erro" && <div className="au-sysmsg semwa">O envio falhou. Toque em Enviar para tentar de novo.</div>}
-          {avisoSemAudio && <div className="au-sysmsg">{conectado ? "Grave um áudio primeiro." : "Sessão desconectada."}</div>}
+          {avisoSemAudio && <div className="au-sysmsg">{conectado === false ? "Sessão desconectada." : "Grave um áudio primeiro."}</div>}
         </div>
 
         {/* compose: áudio pronto E ESTE áudio ainda não foi mandado pra ESTE
@@ -825,6 +1174,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             ESVAZIA (a bolha já subiu no fio) — o mesmo áudio segue pronto pros
             PRÓXIMOS leads (D-03), e um áudio NOVO reabre o envio aqui. */}
         <div className="au-compose">
+          {/* aviso "segure para gravar" (2026-08-20): flutua acima da barra ao
+              clicar rápido no microfone — some sozinho em ~2,6s. */}
+          {dicaSegurar && <div className="au-dica-segurar">✋ Segure o microfone para gravar — não solte enquanto fala.</div>}
           {audioPronto && audioBase64 && audioEnviadoPorLead[leadAberto.leadTaskId] !== audioBase64.slice(0, 32) ? (
             <>
               <div className="au-field ready">
@@ -977,8 +1329,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
 
       {/* Filtro pelo SELO da conversa (pedido 2026-08-19) — substitui os chips
           de origem (ENVIO-04): o operador filtra por "posso ligar?", não por
-          onde o lead entrou. */}
-      <div className="scroll-x">
+          onde o lead entrou. QUEBRA DE LINHA (2026-08-20): antes era scroll-x e
+          os últimos chips vazavam pra fora da tela. */}
+      <div className="au-filtros">
         {(
           [
             ["todos", "Todos"],
@@ -993,7 +1346,6 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             key={valor}
             type="button"
             className={filtroSelo === valor ? "seg on" : "seg"}
-            style={{ fontWeight: 700 }}
             onClick={() => setFiltroSelo(valor)}
           >
             {rotulo}
@@ -1037,16 +1389,22 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           {leadsVisiveis.map((lead) => {
             const st = statusLista(lead);
             // Selo "posso ligar?" (Fase 13 fatia 2): sem-whatsapp da sessão
-            // sobrepõe; senão vale a avaliação do backend (LLM/heurística).
+            // sobrepõe; senão, ENVIO desta sessão (fast/conversa) vira
+            // "Aguardando" NA HORA (2026-08-20 — o backend só reflete no
+            // próximo refetch, e a linha parecia continuar "Enviar áudio");
+            // por último vale a avaliação do backend (LLM/heurística).
             const selo =
               situacaoPorLead[lead.leadTaskId] === "sem-whatsapp"
                 ? { status: "nao_ligar" as const, motivo: "Número sem WhatsApp" }
-                : lead.conversa;
+                : audioEnviadoPorLead[lead.leadTaskId] && (lead.conversa?.status ?? "enviar_audio") === "enviar_audio"
+                  ? { status: "aguardando" as const, motivo: "Áudio enviado — aguardando resposta" }
+                  : lead.conversa;
             // Linha SEM lead vinculado (Ligação avulsa/manual sem LEAD_REL):
-            // não há conversa possível — o toque LIGA direto (handoff auto=1).
+            // não há conversa possível. O toque NÃO liga mais (2026-08-20 —
+            // pedido: "não quero tocar e já ligar"); ligar é só pelo botão 📞
+            // explícito no canto da linha.
             const abrir = () => {
               if (!lead.leadTaskId) {
-                ligarParaLead(lead);
                 return;
               }
               // bolinha apaga NA HORA (o backend marca lido_em em paralelo)
@@ -1098,6 +1456,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                         <SkipForward size={12} /> Pular
                       </button>
                     )}
+                    {/* linha sem lead: NÃO liga daqui (decisão 2026-08-20 — o
+                        Romero encostava sem querer e caía numa chamada). A
+                        linha é só informativa; ligação é pela fila/conversa. */}
                   </span>
                 )}
               </div>
@@ -1114,6 +1475,14 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
       {/* chamada embutida (estilo WhatsApp) — também disponível na LISTA
           (linhas call-only sem vínculo ligam direto daqui). */}
       {overlayChamada}
+
+      {/* ⚡ MODO FAST (2026-08-20): entra na esteira de envio de áudio — some
+          quando não há ninguém pendente. */}
+      {pendentesFast.length > 0 && (
+        <button type="button" className="au-fastfab" onClick={entrarModoFast}>
+          ⚡ Modo fast <span className="au-fastfab-n">{pendentesFast.length}</span>
+        </button>
+      )}
 
       {/* ── modal do PULAR (2026-08-19): motivo OBRIGATÓRIO — vira comentário
             na Ligação (⏭️ Contato pulado) e a task fecha, saindo da fila. ── */}
@@ -1184,6 +1553,12 @@ const AU_CSS = `
 .au-search-ic{ position:absolute; left:12px; color:var(--dim); pointer-events:none; }
 .au-search-in{ width:100%; box-sizing:border-box; padding:11px 38px 11px 38px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:15px; outline:none; -webkit-appearance:none; }
 .au-search-in::placeholder{ color:var(--dim); }
+/* Filtros de selo: EMBRULHAM em vez de correr num scroll horizontal (2026-08-20,
+   "os filtros estão vazando na tela"). Todos os 6 ficam visíveis — ~2 linhas no
+   celular, 1 no tablet/rail. Chips um pouco mais compactos pra empacotar bem;
+   escopado a esta tela (não altera .seg/.scroll-x usados em outros lugares). */
+.au-filtros{ display:flex; flex-wrap:wrap; gap:7px; margin:2px 0 4px; }
+.au-filtros .seg{ padding:8px 13px; font-size:13px; font-weight:700; line-height:1; flex:0 1 auto; }
 .au-search-in:focus{ border-color:var(--go); }
 .au-search-in::-webkit-search-cancel-button{ display:none; }
 .au-search-x{ position:absolute; right:8px; width:26px; height:26px; border:none; border-radius:50%; background:transparent; color:var(--dim); display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; }
@@ -1242,6 +1617,10 @@ const AU_CSS = `
 .au-callbtn{ margin-left:auto; flex:none; width:38px; height:38px; border-radius:50%; border:none; background:var(--go); color:#fff; display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .au-callbtn:active{ filter:brightness(.9); }
 .au-callbtn:disabled{ opacity:.6; cursor:default; }
+/* "próximo sem áudio" na conversa: mesmo tamanho do 📞, mas neutro — a ação
+   verde continua sendo ligar; este é o avanço da esteira de áudios. */
+.au-nextbtn{ flex:none; width:38px; height:38px; border-radius:50%; border:1px solid var(--line); background:var(--card-2); color:var(--ink); display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-nextbtn:active{ filter:brightness(1.25); }
 .au-ct{ min-width:0; }
 .au-cnm{ font-size:16px; font-weight:700; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .au-cst{ font-size:12px; color:var(--dim); }
@@ -1267,6 +1646,12 @@ const AU_CSS = `
 .au-thread{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:8px; }
 .au-day{ align-self:center; background:var(--card-2); color:var(--dim); font-size:11px; padding:5px 12px; border-radius:8px; margin-bottom:4px; }
 .au-hintbig{ align-self:center; color:var(--dim); font-size:13.5px; text-align:center; margin:auto 24px; line-height:1.7; }
+/* dica "segure para gravar": destaque âmbar no hint do fast + pill flutuante na
+   conversa. Some sozinho; pulsa uma vez pra chamar atenção sem irritar. */
+.au-fast-hint.dica{ color:#f5a623; font-weight:700; }
+.au-dica-segurar{ position:absolute; left:12px; right:12px; bottom:calc(100% + 8px); background:color-mix(in srgb, #f5a623 18%, var(--card-2)); color:#f5a623; border:1px solid color-mix(in srgb, #f5a623 40%, transparent); border-radius:12px; padding:9px 13px; font-size:13px; font-weight:600; text-align:center; box-shadow:0 6px 18px rgba(0,0,0,.28); animation:audica .22s ease-out; }
+@keyframes audica{ from{ transform:translateY(6px); opacity:0; } to{ transform:translateY(0); opacity:1; } }
+@media (prefers-reduced-motion:reduce){ .au-dica-segurar{ animation:none; } }
 .au-bubble{ align-self:flex-end; max-width:80%; background:color-mix(in srgb, var(--go) 24%, var(--bg-1)); border-radius:12px 12px 4px 12px; padding:8px 10px 6px; animation:auB .2s ease both; }
 .au-bubble.in{ align-self:flex-start; background:var(--card-2); border-radius:12px 12px 12px 4px; }
 .au-btxt{ font-size:14px; color:var(--ink); line-height:1.45; word-break:break-word; white-space:pre-wrap; }
@@ -1287,7 +1672,7 @@ const AU_CSS = `
 .au-sysmsg.semwa{ color:var(--alert); }
 
 /* compose (conversa) */
-.au-compose{ flex:none; display:flex; align-items:center; gap:9px; padding:10px 10px calc(10px + var(--safe-b)); background:var(--bg-1); border-top:1px solid var(--line); }
+.au-compose{ position:relative; flex:none; display:flex; align-items:center; gap:9px; padding:10px 10px calc(10px + var(--safe-b)); background:var(--bg-1); border-top:1px solid var(--line); }
 .au-view .au-compose{ position:fixed; left:50%; transform:translateX(-50%); bottom:calc(var(--tabbar-h) + var(--tabbar-gap) * 2 + var(--safe-b) + 10px); width:min(620px, calc(100% - var(--pad-x) * 2)); background:transparent; border:none; padding:0; z-index:30; }
 .au-field{ flex:1; min-height:50px; background:var(--bg-2); border:1px solid var(--line); border-radius:26px; display:flex; align-items:center; gap:10px; padding:0 10px 0 16px; overflow:hidden; color:var(--dim); font-size:14px; box-shadow:0 4px 14px rgba(0,0,0,.25); }
 .au-field .au-hint{ flex:1; }
@@ -1311,5 +1696,47 @@ const AU_CSS = `
 .au-mic.recording{ background:var(--alert); color:#fff; transform:scale(1.14); box-shadow:0 0 0 8px color-mix(in srgb, var(--alert) 16%, transparent); }
 .au-mic.send{ background:var(--go-strong, var(--go)); }
 .au-mic:disabled{ opacity:.7; }
-@media (prefers-reduced-motion:reduce){ .au-spin,.au-recdot,.au-wave i,.au-mic,.au-bubble{ animation:none!important; transition:none!important; } }
+/* ── ⚡ MODO FAST ─────────────────────────────────────────────────────── */
+.au-fastfab{ position:fixed; right:14px; bottom:calc(var(--safe-b, 0px) + 86px); z-index:210; display:inline-flex; align-items:center; gap:7px; border:none; border-radius:999px; padding:12px 18px; background:linear-gradient(135deg,#f5a623,#f7c948); color:#1a1408; font-size:14px; font-weight:900; letter-spacing:.01em; box-shadow:0 6px 18px rgba(245,166,35,.35); cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-fastfab:active{ transform:scale(.97); }
+.au-fastfab-n{ background:#1a1408; color:#f7c948; border-radius:999px; padding:1px 8px; font-size:12px; }
+
+.au-fast{ position:fixed; inset:0; z-index:300; background:var(--bg-0); display:flex; flex-direction:column; padding:calc(var(--safe-t, 0px) + 10px) 14px calc(var(--safe-b, 0px) + 12px); gap:10px; }
+.au-fast-top{ flex:none; display:flex; align-items:center; gap:10px; }
+.au-fast-score{ font-size:20px; font-weight:900; color:#f7c948; font-variant-numeric:tabular-nums; }
+.au-fast-relogio{ flex:1; text-align:center; font-size:14px; color:var(--dim); font-variant-numeric:tabular-nums; }
+.au-fast-resta{ font-size:12px; color:var(--dim-2); }
+.au-fast-lead{ flex:none; }
+.au-fast-nome{ font-size:21px; font-weight:900; color:var(--ink); line-height:1.15; text-wrap:balance; }
+.au-fast-tel{ font-size:13px; color:var(--dim); margin-top:2px; }
+.au-fast-dossie{ flex:1; min-height:0; overflow-y:auto; background:var(--card-2); border:1px solid var(--line); border-radius:14px; padding:12px; }
+.au-fast-dossie-vazio{ color:var(--dim-2); font-size:13.5px; text-align:center; padding:26px 8px; }
+.au-fast-aviso{ flex:none; background:color-mix(in srgb, #f5a623 16%, transparent); color:#f5a623; border-radius:10px; padding:8px 12px; font-size:13px; text-align:center; }
+.au-fast-acao{ flex:none; display:flex; flex-direction:column; align-items:center; gap:10px; padding-top:2px; }
+.au-fast-mic{ width:84px; height:84px; border-radius:50%; border:none; background:var(--go); color:#fff; display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:none; box-shadow:0 8px 22px rgba(0,168,132,.35); }
+.au-fast-mic.gravando{ background:#e53935; animation:aufastpulso 1s infinite; }
+@keyframes aufastpulso{ 0%,100%{ transform:scale(1); } 50%{ transform:scale(1.08); } }
+.au-fast-hint{ font-size:12.5px; color:var(--dim); text-align:center; max-width:300px; }
+.au-fast-preview{ display:flex; align-items:center; gap:12px; background:var(--card-2); border:1px solid var(--line); border-radius:999px; padding:8px 14px; }
+.au-fast-play{ width:42px; height:42px; border-radius:50%; border:none; background:var(--accent, #4a90e2); color:#fff; display:grid; place-items:center; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-fast-dur{ font-size:14px; color:var(--ink); font-variant-numeric:tabular-nums; }
+.au-fast-regravar{ display:inline-flex; align-items:center; gap:5px; border:none; background:none; color:var(--dim); font-size:12.5px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-fast-send{ width:100%; max-width:340px; border:none; border-radius:14px; padding:15px; background:var(--go); color:#fff; font-size:16px; font-weight:900; display:inline-flex; align-items:center; justify-content:center; gap:8px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.au-fast-send:disabled{ opacity:.65; }
+.au-fast-end{ border:none; background:none; color:var(--dim-2); font-size:13px; padding:8px 14px; cursor:pointer; text-decoration:underline; text-underline-offset:3px; -webkit-tap-highlight-color:transparent; }
+
+/* tela final — celebração estilo Duolingo: emoji grande, frase, 3 tiles, CTA */
+.au-fast-fim{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; text-align:center; padding:18px; }
+.au-fast-emoji{ font-size:64px; line-height:1; }
+.au-fast-tit{ font-size:26px; font-weight:900; color:var(--ink); }
+.au-fast-sub{ font-size:14.5px; color:var(--dim); max-width:300px; }
+.au-fast-tiles{ display:flex; gap:10px; margin-top:10px; width:100%; max-width:360px; }
+.au-fast-tile{ flex:1; border-radius:14px; padding:2px; display:flex; flex-direction:column; overflow:hidden; }
+.au-fast-tile.am{ background:#f7c948; }
+.au-fast-tile.vd{ background:#58cc02; }
+.au-fast-tile.az{ background:#1cb0f6; }
+.au-fast-tile-rot{ font-size:10.5px; font-weight:900; letter-spacing:.05em; text-transform:uppercase; color:#14110a; padding:5px 4px 4px; }
+.au-fast-tile-val{ background:var(--card-2); color:var(--ink); border-radius:0 0 12px 12px; font-size:22px; font-weight:900; padding:10px 4px; font-variant-numeric:tabular-nums; }
+.au-fast-claim{ margin-top:14px; width:100%; max-width:340px; border:none; border-radius:14px; padding:15px; background:var(--accent, #4a90e2); color:#fff; font-size:15.5px; font-weight:900; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+@media (prefers-reduced-motion:reduce){ .au-spin,.au-recdot,.au-wave i,.au-mic,.au-bubble,.au-fast-mic{ animation:none!important; transition:none!important; } }
 `;

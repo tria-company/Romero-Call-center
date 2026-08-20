@@ -27,8 +27,15 @@ type ValorLeadDetalhe = Awaited<ReturnType<typeof lerLeadDetalhe>>;
 
 const memoria = new Map<string, { valor: ValorLeadDetalhe; em: number }>();
 const emVoo = new Map<string, Promise<ValorLeadDetalhe>>();
+// Variante LEVE (2026-08-20): ficha SEM timeline (`?leve=1` na rota) — mapas
+// PRÓPRIOS pra cópia sem timeline nunca "envenenar" a completa e vice-versa.
+const memoriaLeve = new Map<string, { valor: ValorLeadDetalhe; em: number }>();
+const emVooLeve = new Map<string, Promise<ValorLeadDetalhe>>();
 
-const TTL_LEAD_DETALHE_MS = 30_000; // fresco por 30s, faixa PAINEL_TTL_CLICKUP_MS
+// 2026-08-20: 30s → 3min. Os writes (voto/anotação/regenerar dossiê) derrubam
+// via derrubarLeadDetalheMem, então read-your-writes segue valendo — e 30s
+// forçava refetch de 10s+ (ClickUp de pico) no meio do modo fast.
+const TTL_LEAD_DETALHE_MS = 180_000;
 const CAP_MEMORIA = 500; // T-v2a-03: evita crescimento ilimitado do Map (evict do mais antigo)
 
 /** Mensagens de erro de VALIDAÇÃO — as MESMAS strings de clickup.ts:2129/2132
@@ -48,19 +55,42 @@ export async function lerLeadDetalheResiliente(
   ler: (id: string) => Promise<ValorLeadDetalhe> = lerLeadDetalhe,
   agora: () => number = Date.now,
 ): Promise<ValorLeadDetalhe> {
-  const copia = memoria.get(leadTaskId);
+  return lerResiliente(memoria, emVoo, leadTaskId, ler, agora);
+}
+
+/**
+ * Variante LEVE: ficha sem timeline — o custo da completa é quase todo a
+ * timeline (ClickUp), e o card da conversa/modo fast só usam o dossiê.
+ * Mesmíssima semântica resiliente, nos mapas próprios.
+ */
+export async function lerLeadDossieResiliente(
+  leadTaskId: string,
+  ler: (id: string) => Promise<ValorLeadDetalhe> = (id) => lerLeadDetalhe(id, { comTimeline: false }),
+  agora: () => number = Date.now,
+): Promise<ValorLeadDetalhe> {
+  return lerResiliente(memoriaLeve, emVooLeve, leadTaskId, ler, agora);
+}
+
+async function lerResiliente(
+  mem: Map<string, { valor: ValorLeadDetalhe; em: number }>,
+  voo: Map<string, Promise<ValorLeadDetalhe>>,
+  leadTaskId: string,
+  ler: (id: string) => Promise<ValorLeadDetalhe>,
+  agora: () => number,
+): Promise<ValorLeadDetalhe> {
+  const copia = mem.get(leadTaskId);
   if (copia && agora() - copia.em < TTL_LEAD_DETALHE_MS) return copia.valor;
 
-  const jaEmVoo = emVoo.get(leadTaskId);
+  const jaEmVoo = voo.get(leadTaskId);
   if (jaEmVoo) return jaEmVoo;
 
   const p = (async () => {
     try {
       const valor = await ler(leadTaskId);
-      memoria.set(leadTaskId, { valor, em: agora() });
-      if (memoria.size > CAP_MEMORIA) {
-        const chaveMaisAntiga = memoria.keys().next().value;
-        if (chaveMaisAntiga !== undefined) memoria.delete(chaveMaisAntiga);
+      mem.set(leadTaskId, { valor, em: agora() });
+      if (mem.size > CAP_MEMORIA) {
+        const chaveMaisAntiga = mem.keys().next().value;
+        if (chaveMaisAntiga !== undefined) mem.delete(chaveMaisAntiga);
       }
       return valor;
     } catch (e) {
@@ -75,17 +105,20 @@ export async function lerLeadDetalheResiliente(
       }
       throw e; // primeiro load, sem cópia: relança (WR-03).
     } finally {
-      emVoo.delete(leadTaskId);
+      voo.delete(leadTaskId);
     }
   })();
 
-  emVoo.set(leadTaskId, p);
+  voo.set(leadTaskId, p);
   return p;
 }
 
 /** Derruba a cópia em memória de um lead (read-your-writes: voto, anotação,
- * regeneração do dossiê). Espelho de `derrubarFilaMem` (index.ts:465-467). */
+ * regeneração do dossiê). Espelho de `derrubarFilaMem` (index.ts:465-467).
+ * Derruba as DUAS variantes (completa + leve) — o write invalida a ficha toda. */
 export function derrubarLeadDetalheMem(leadTaskId: string): void {
   memoria.delete(leadTaskId);
   emVoo.delete(leadTaskId);
+  memoriaLeve.delete(leadTaskId);
+  emVooLeve.delete(leadTaskId);
 }

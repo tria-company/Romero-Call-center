@@ -64,12 +64,14 @@ export type EstadoAudiosReais = {
    *  sinal de novidade usa isto pra refletir mensagem nova na hora. */
   recarregarSilencioso: () => void;
   /**
-   * Estado REAL da instância dedicada (D-08). Começa `false` (nunca finge
-   * conectado enquanto a primeira consulta está em voo) — mesmo racional do
-   * backend: uma falha de consulta também vira `false`, nunca um `true`
-   * mascarado.
+   * Estado REAL da instância dedicada (D-08), TRI-ESTADO (2026-08-20):
+   * `null` = ainda não CONFIRMADO (primeira consulta em voo, ou a consulta
+   * falhou — nunca finge conectado: envio segue bloqueado), `true`/`false` =
+   * resposta explícita do backend. O banner "desconectado" só aparece com
+   * `false` AFIRMADO — antes, o estado inicial pessimista fazia o aviso
+   * piscar em TODO carregamento de página até o primeiro poll responder.
    */
-  conectado: boolean;
+  conectado: boolean | null;
 };
 
 /**
@@ -87,7 +89,7 @@ export function useAudiosReais(
   const [carregando, setCarregando] = React.useState(true);
   const [erro, setErro] = React.useState(false);
   const [semMapeamento, setSemMapeamento] = React.useState(false);
-  const [conectado, setConectado] = React.useState(false);
+  const [conectado, setConectado] = React.useState<boolean | null>(null);
 
   const geracaoRef = React.useRef(0);
 
@@ -133,17 +135,35 @@ export function useAudiosReais(
     }
   }, [fonte]);
 
+  const retryStatusRef = React.useRef<number | null>(null);
   const consultarStatus = React.useCallback(async () => {
+    // Falha da CONSULTA ≠ chip desconectado (2026-08-20): vira `null`
+    // (desconhecido — envio continua bloqueado, D-08 intacto) e re-checa em
+    // 3s, em vez de afirmar `false` e acender o banner por 18s a cada
+    // carregamento com uma falha transitória da ponte.
+    const falhou = () => {
+      setConectado(null);
+      if (retryStatusRef.current == null) {
+        retryStatusRef.current = window.setTimeout(() => {
+          retryStatusRef.current = null;
+          void consultarStatus();
+        }, 3000);
+      }
+    };
     try {
       const r = await fetch("/api/mobile/audios/status", { cache: "no-store" });
       if (!r.ok) {
-        setConectado(false); // consulta falhou = trata como desconectado (D-08)
+        falhou();
         return;
       }
       const d = (await r.json().catch(() => null)) as { conectado?: boolean } | null;
-      setConectado(d?.conectado === true);
+      if (d == null || typeof d.conectado !== "boolean") {
+        falhou();
+        return;
+      }
+      setConectado(d.conectado); // só resposta EXPLÍCITA liga/desliga o banner
     } catch {
-      setConectado(false);
+      falhou();
     }
   }, []);
 
@@ -162,7 +182,13 @@ export function useAudiosReais(
   React.useEffect(() => {
     void consultarStatus();
     const id = window.setInterval(() => void consultarStatus(), INTERVALO_POLL_STATUS_MS);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearInterval(id);
+      if (retryStatusRef.current != null) {
+        window.clearTimeout(retryStatusRef.current);
+        retryStatusRef.current = null;
+      }
+    };
   }, [consultarStatus]);
 
   const recarregar = React.useCallback(() => {

@@ -303,6 +303,33 @@ export async function listarTasks(
   return { tasks: data?.tasks || [], lastPage: Boolean(data?.last_page) };
 }
 
+/**
+ * `listarTasks` com retry curto — pensada para as consultas de VERIFICAÇÃO
+ * (dedup do inbound, match de lead da avulsa) que precisam distinguir "não
+ * achou" de "não consegui verificar" quando o ClickUp está instável
+ * ("This operation was aborted" em horário de operação). Tenta `tentativas+1`
+ * vezes com backoff linear; se TODAS falharem, RE-LANÇA o último erro (WR-03)
+ * — o caller decide se adia/cria. Não engole falha (diferente de degradar
+ * para lista vazia, que faria um abort parecer "não existe" e criar duplicata).
+ */
+export async function listarTasksComRetry(
+  listId: string,
+  opts: Parameters<typeof listarTasks>[1] = {},
+  tentativas = 2,
+  esperaMs = 1500,
+): Promise<{ tasks: TaskClickUp[]; lastPage: boolean }> {
+  let ultimoErro: unknown;
+  for (let i = 0; i <= tentativas; i++) {
+    try {
+      return await listarTasks(listId, opts);
+    } catch (e) {
+      ultimoErro = e;
+      if (i < tentativas) await new Promise((r) => setTimeout(r, esperaMs * (i + 1)));
+    }
+  }
+  throw ultimoErro instanceof Error ? ultimoErro : new Error(String(ultimoErro));
+}
+
 /** Le uma task por ID (com custom_fields). */
 export async function lerTask(taskId: string): Promise<TaskClickUp | null> {
   // Token ausente e falha de infra/HTTP LANCAM (WR-03) — `null` fica reservado
@@ -786,13 +813,98 @@ export interface MotivoNaoAtendida {
   numero?: string;
 }
 
+/**
+ * RECONCILIAÇÃO DE DUPLICATAS (2026-08-20, ordem do gestor: "se ligou, é para
+ * sair da lista e concluir a task"): quando uma Ligação ganha desfecho
+ * TERMINAL, as OUTRAS Ligações ABERTAS da mesma pessoa (mesmo lead via
+ * LEAD_REL e/ou mesmo telefone ±nono) são FECHADAS com comentário — senão o
+ * lead já contatado continua aparecendo na fila por uma task duplicada
+ * (avulsa de inbound, resto de lote etc.). Só fecha task VIRGEM (sem INICIO):
+ * uma aberta com INICIO tem história própria de tentativa e não é engolida.
+ * Best-effort: NUNCA lança (a conclusão da principal não pode falhar por
+ * causa da limpeza). Retorna quantas fechou. LGPD: nada de telefone em log.
+ */
+export async function fecharLigacoesDuplicadas(
+  taskIdPrincipal: string,
+  leadId: string | null,
+  telefone: string,
+): Promise<number> {
+  try {
+    const candidatos = new Map<string, TaskClickUp>();
+    const consultas: Array<Promise<TaskClickUp[]>> = [];
+    if (leadId) {
+      consultas.push(
+        listarTasksComRetry(CLICKUP_LIST_LIGACOES, {
+          includeClosed: false,
+          customFields: [{ field_id: CAMPOS_LIGACOES.LEAD_REL, operator: 'ANY', value: [leadId] }],
+        })
+          .then((r) => r.tasks)
+          .catch(() => [] as TaskClickUp[]),
+      );
+    }
+    const d = telefone.replace(/\D/g, '');
+    if (d.length >= 10) {
+      const comPais = d.length >= 12 ? d : `55${d}`;
+      const tels = new Set<string>([`+${comPais}`]);
+      if (comPais.length === 12) tels.add(`+${comPais.slice(0, 4)}9${comPais.slice(4)}`);
+      if (comPais.length === 13 && comPais[4] === '9') tels.add(`+${comPais.slice(0, 4)}${comPais.slice(5)}`);
+      for (const v of tels) {
+        consultas.push(
+          listarTasksComRetry(CLICKUP_LIST_LIGACOES, {
+            includeClosed: false,
+            customFields: [{ field_id: CAMPOS_LIGACOES.TELEFONE, operator: '=', value: v }],
+          })
+            .then((r) => r.tasks)
+            .catch(() => [] as TaskClickUp[]),
+        );
+      }
+    }
+    for (const lista of await Promise.all(consultas)) {
+      for (const t of lista) candidatos.set(t.id, t);
+    }
+    let fechadas = 0;
+    for (const t of candidatos.values()) {
+      if (t.id === taskIdPrincipal) continue;
+      if (tarefaConcluida(t)) continue;
+      const inicio = Number(t.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.INICIO)?.value);
+      if (Number.isFinite(inicio) && inicio > 0) continue; // tentativa própria — não engole
+      try {
+        await comentarTask(
+          t.id,
+          `🧹 Concluída automaticamente — o contato desta pessoa já foi realizado (Ligação ${taskIdPrincipal}). Duplicata sai da fila.`,
+        ).catch(() => {});
+        await fecharLigacao(t.id);
+        fechadas++;
+      } catch (e) {
+        console.warn(
+          `[clickup] reconciliação: não consegui fechar a duplicata ${t.id}:`,
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+    }
+    if (fechadas > 0) console.log(`[clickup] reconciliação: ${fechadas} Ligação(ões) duplicada(s) fechada(s) (principal ${taskIdPrincipal})`);
+    return fechadas;
+  } catch (e) {
+    console.warn('[clickup] reconciliação de duplicatas falhou (segue):', e instanceof Error ? e.message : String(e));
+    return 0;
+  }
+}
+
+/** Lê lead (LEAD_REL) e telefone de uma task de Ligação já carregada. */
+export function identidadeDaLigacao(task: TaskClickUp): { leadId: string | null; telefone: string } {
+  const rel = task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.LEAD_REL)?.value;
+  const leadId = Array.isArray(rel) && rel[0] ? String((rel[0] as { id?: unknown })?.id ?? rel[0]) : null;
+  const telefone = String(task.custom_fields?.find((c) => c.id === CAMPOS_LIGACOES.TELEFONE)?.value ?? '');
+  return { leadId, telefone };
+}
+
 export async function registrarDesfecho(
   taskId: string,
   assigneeIdEsperado: string,
   resultado: ResultadoDesfecho,
   motivo?: MotivoNaoAtendida,
 ): Promise<void> {
-  await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  const taskValidada = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
   if (resultado === 'atendida') {
     if (OPER_STATUS_EM_PROCESSAMENTO) {
       await atualizarTask(taskId, { status: OPER_STATUS_EM_PROCESSAMENTO });
@@ -834,6 +946,10 @@ export async function registrarDesfecho(
         );
       }
       await fecharLigacao(taskId);
+      {
+        const { leadId, telefone } = identidadeDaLigacao(taskValidada);
+        void fecharLigacoesDuplicadas(taskId, leadId, telefone);
+      }
       return;
     }
     await setCustomField(taskId, CAMPOS_LIGACOES.INICIO, Date.now());
@@ -842,6 +958,10 @@ export async function registrarDesfecho(
   // resultado === 'recusou'
   await gravarMetadadosLigacao(taskId, { atendeu: false, motivoFalha: 'Recusada pelo lead' });
   await fecharLigacao(taskId);
+  {
+    const { leadId, telefone } = identidadeDaLigacao(taskValidada);
+    void fecharLigacoesDuplicadas(taskId, leadId, telefone);
+  }
 }
 
 /**
@@ -1082,9 +1202,13 @@ export async function criarLigacaoAvulsa(telefone: string, assigneeId?: string):
     const candidatos = new Set<string>([`+${comPais}`]);
     if (comPais.length === 12) candidatos.add(`+${comPais.slice(0, 4)}9${comPais.slice(4)}`);
     if (comPais.length === 13 && comPais[4] === '9') candidatos.add(`+${comPais.slice(0, 4)}${comPais.slice(5)}`);
+    // Retry curto por candidato (listarTasksComRetry): sob carga o ClickUp
+    // aborta e a query voltava vazia, deixando a avulsa SEM lead (o "Sem lead
+    // vinculado" observado). O retry recupera a maioria dos aborts transitórios;
+    // se ainda assim falhar, degrada p/ [] (best-effort — a task já existe).
     const resultados = await Promise.all(
       [...candidatos].map((v) =>
-        listarTasks(CLICKUP_LIST_LEADS, {
+        listarTasksComRetry(CLICKUP_LIST_LEADS, {
           customFields: [{ field_id: CAMPOS_LEADS.TELEFONE, operator: '=', value: v }],
         })
           .then((r) => r.tasks)
@@ -2243,6 +2367,7 @@ export interface LeadDetalhe {
  */
 export async function lerLeadDetalhe(
   leadTaskId: string,
+  opts: { comTimeline?: boolean } = {},
 ): Promise<{ lead: LeadDetalhe; dossie: string; timeline: ItemTimeline[] }> {
   const task = await validarLeadDaLista01(leadTaskId);
   const parsed = parseLeadDaTask(task, CAMPOS_LEADS);
@@ -2266,7 +2391,11 @@ export async function lerLeadDetalhe(
   // autenticado pode ver tudo (o gate de papel gestor na rota autoriza). LGPD:
   // exibir ao dono ≠ logar; nenhum PII vai pra log aqui.
   const dossie = task.description ?? task.text_content ?? '';
-  const timeline = await buscarLigacoesDoLead(leadTaskId, parsed.telefone);
+  // comTimeline:false (variante LEVE, 2026-08-20): pula a timeline — ela é
+  // quase todo o custo da ficha (queries filtradas no ClickUp, 10s+ no pico)
+  // e o card da conversa/modo fast só renderizam o dossiê (a description, que
+  // já veio de graça na leitura da task acima).
+  const timeline = opts.comTimeline === false ? [] : await buscarLigacoesDoLead(leadTaskId, parsed.telefone);
   return { lead, dossie, timeline };
 }
 

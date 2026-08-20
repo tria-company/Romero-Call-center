@@ -199,12 +199,19 @@ export type EstadoLeadReal = {
 type ResultadoLeadReal = { tipo: "ok"; ficha: LeadFichaReal } | { tipo: "semAcesso" } | { tipo: "erro" };
 
 const TTL_FICHA_MS = 30_000;
+/* Variante LEVE (2026-08-20): ficha SEM a timeline (`?leve=1`) — o custo da
+ * ficha completa é quase todo a timeline (ClickUp, 10s+ em horário de pico),
+ * e o card da conversa/modo fast só mostram o DOSSIÊ. TTL maior (3min): o
+ * dossiê muda raro e o backend invalida nos writes. */
+const TTL_DOSSIE_MS = 180_000;
 const cacheFicha = new Map<string, { ficha: LeadFichaReal; em: number }>();
 const emVooFicha = new Map<string, Promise<ResultadoLeadReal>>();
+const cacheDossie = new Map<string, { ficha: LeadFichaReal; em: number }>();
+const emVooDossie = new Map<string, Promise<ResultadoLeadReal>>();
 
-async function buscarFicha(id: string): Promise<ResultadoLeadReal> {
+async function buscarFicha(id: string, leve: boolean): Promise<ResultadoLeadReal> {
   try {
-    const r = await fetch(`/api/mobile/lead/${encodeURIComponent(id)}`, { cache: "no-store" });
+    const r = await fetch(`/api/mobile/lead/${encodeURIComponent(id)}${leve ? "?leve=1" : ""}`, { cache: "no-store" });
     if (r.status === 403) return { tipo: "semAcesso" };
     if (!r.ok) return { tipo: "erro" };
     const d = (await r.json().catch(() => null)) as LeadFichaReal | null;
@@ -215,30 +222,43 @@ async function buscarFicha(id: string): Promise<ResultadoLeadReal> {
   }
 }
 
-/** Hit fresco resolve sem fetch; senão dedupa via `emVooFicha` (1 fetch para
- * N instâncias concorrentes do hook); 403/erro NÃO entram em `cacheFicha`. */
-function carregarCompartilhado(id: string): Promise<ResultadoLeadReal> {
-  const copia = cacheFicha.get(id);
-  if (copia && Date.now() - copia.em < TTL_FICHA_MS) {
+/** Hit fresco resolve sem fetch; senão dedupa via `emVoo*` (1 fetch para
+ * N instâncias concorrentes do hook); 403/erro NÃO entram no cache. A
+ * variante leve usa mapas PRÓPRIOS — a ficha completa (com timeline) nunca é
+ * substituída por uma cópia sem timeline, e vice-versa. */
+function carregarCompartilhado(id: string, leve = false): Promise<ResultadoLeadReal> {
+  const cache = leve ? cacheDossie : cacheFicha;
+  const emVoo = leve ? emVooDossie : emVooFicha;
+  const ttl = leve ? TTL_DOSSIE_MS : TTL_FICHA_MS;
+  const copia = cache.get(id);
+  if (copia && Date.now() - copia.em < ttl) {
     return Promise.resolve({ tipo: "ok", ficha: copia.ficha });
   }
-  const jaEmVoo = emVooFicha.get(id);
+  const jaEmVoo = emVoo.get(id);
   if (jaEmVoo) return jaEmVoo;
 
-  const p = buscarFicha(id)
+  const p = buscarFicha(id, leve)
     .then((resultado) => {
-      if (resultado.tipo === "ok") cacheFicha.set(id, { ficha: resultado.ficha, em: Date.now() });
+      if (resultado.tipo === "ok") cache.set(id, { ficha: resultado.ficha, em: Date.now() });
       return resultado;
     })
     .finally(() => {
-      emVooFicha.delete(id);
+      emVoo.delete(id);
     });
-  emVooFicha.set(id, p);
+  emVoo.set(id, p);
   return p;
 }
 
+/** Pré-aquece o DOSSIÊ de um lead (modo fast): dispara o mesmo caminho
+ * cacheado do hook leve, fire-and-forget — quando a esteira avançar, o
+ * dossiê do próximo resolve em milésimos. */
+export function preaquecerDossieLead(leadTaskId: string): void {
+  void carregarCompartilhado(leadTaskId, true);
+}
+
 /** Carrega a ficha completa de um lead. `id` null → não busca (estado ocioso). */
-export function useLeadReal(leadTaskId: string | null): EstadoLeadReal {
+export function useLeadReal(leadTaskId: string | null, opts?: { leve?: boolean }): EstadoLeadReal {
+  const leve = opts?.leve === true;
   const [ficha, setFicha] = React.useState<LeadFichaReal | null>(null);
   const [carregando, setCarregando] = React.useState(leadTaskId !== null);
   const [erro, setErro] = React.useState(false);
@@ -250,30 +270,33 @@ export function useLeadReal(leadTaskId: string | null): EstadoLeadReal {
   // aguardando a MESMA busca.
   const vivoRef = React.useRef(true);
 
-  const carregar = React.useCallback(async (id: string | null) => {
-    if (!id) {
-      setFicha(null);
-      setCarregando(false);
+  const carregar = React.useCallback(
+    async (id: string | null) => {
+      if (!id) {
+        setFicha(null);
+        setCarregando(false);
+        setErro(false);
+        setSemAcesso(false);
+        return;
+      }
+      setCarregando(true);
       setErro(false);
       setSemAcesso(false);
-      return;
-    }
-    setCarregando(true);
-    setErro(false);
-    setSemAcesso(false);
-    const resultado = await carregarCompartilhado(id);
-    if (!vivoRef.current) return;
-    if (resultado.tipo === "semAcesso") {
-      setSemAcesso(true);
-      setFicha(null);
-    } else if (resultado.tipo === "erro") {
-      setErro(true);
-      setFicha(null);
-    } else {
-      setFicha(resultado.ficha);
-    }
-    setCarregando(false);
-  }, []);
+      const resultado = await carregarCompartilhado(id, leve);
+      if (!vivoRef.current) return;
+      if (resultado.tipo === "semAcesso") {
+        setSemAcesso(true);
+        setFicha(null);
+      } else if (resultado.tipo === "erro") {
+        setErro(true);
+        setFicha(null);
+      } else {
+        setFicha(resultado.ficha);
+      }
+      setCarregando(false);
+    },
+    [leve],
+  );
 
   React.useEffect(() => {
     vivoRef.current = true;
@@ -287,11 +310,11 @@ export function useLeadReal(leadTaskId: string | null): EstadoLeadReal {
   // re-chamar `carregar` (invalidate + refetch, nunca serve stale aqui).
   const recarregar = React.useCallback(() => {
     if (leadTaskId) {
-      cacheFicha.delete(leadTaskId);
-      emVooFicha.delete(leadTaskId);
+      (leve ? cacheDossie : cacheFicha).delete(leadTaskId);
+      (leve ? emVooDossie : emVooFicha).delete(leadTaskId);
     }
     void carregar(leadTaskId);
-  }, [leadTaskId, carregar]);
+  }, [leadTaskId, carregar, leve]);
 
   return { ficha, carregando, erro, semAcesso, recarregar };
 }

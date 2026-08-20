@@ -55,6 +55,7 @@ import {
   resolverVotoAtualLead,
   definirVotoLeadCampo,
   fecharLigacao,
+  fecharLigacoesDuplicadas,
   tarefaConcluida,
   type EscolhaVoto,
 } from './clickup.ts';
@@ -603,6 +604,11 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     analiseIaBase: resultadoAnalise?.resumoAnalise,
   });
 
+  // Reconciliação (2026-08-20, "se ligou, sai da lista"): a chamada desta
+  // pessoa aconteceu e a Ligação principal fechou — outras Ligações ABERTAS
+  // dela (duplicata de inbound, resto de lote) saem da fila também.
+  void fecharLigacoesDuplicadas(taskId, null, telefone);
+
   // CR-02: limpa a entrada telefone->task apos consolidar/fechar — uma
   // ligacao futura ao mesmo telefone nunca re-consolida sobre esta task ja
   // fechada. CR-01 (Fase 07): passa o mesmo deviceId usado na leitura acima
@@ -737,9 +743,14 @@ export async function finalizarRecordSemTranscricao(dados: DadosJobRecord): Prom
     retorno: { necessario: false, data: null },
   });
 
+  // Reconciliação (2026-08-20): mesma regra do record normal — ligou, as
+  // outras Ligações abertas desta pessoa saem da fila.
+  void fecharLigacoesDuplicadas(taskId, null, telefone);
+
   // CR-01/CR-02: simetria com a leitura acima — limpa tambem a chave COMPOSTA
   // (deviceId|telefone) escrita por guardarTaskAtiva, senao ela vaza ate o TTL.
-  await limparTaskAtiva(telefone, dados.deviceId);
+  // Compare-and-delete (taskId): mesma proteção de rediscagem dos outros paths.
+  await limparTaskAtiva(telefone, dados.deviceId, taskId);
 
   // Fecha o desfecho duravel do evento cru (Fase 2 — durabilidade).
   try {

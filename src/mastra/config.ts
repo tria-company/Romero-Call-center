@@ -121,11 +121,14 @@ if (!DEEPGRAM_API_KEY) {
 
 // ===== Provider de IA (LLM) — abstracao plugavel para os 3 agentes =====
 //
-// LLM_PROVIDER escolhe entre OpenAI direto (default, D-08a) e Azure OpenAI
+// LLM_PROVIDER escolhe entre OpenAI direto (D-08a) e Azure OpenAI
 // (D-08b, quando houver chaves). Ver src/mastra/llm.ts para a selecao do
 // modelo. Um provider unico para os 3 agentes (Contexto/Script/Analise).
 
-export const LLM_PROVIDER = process.env.LLM_PROVIDER || 'openai';
+// Default AZURE (2026-08-20, ordem do gestor "sempre use Azure" — e a
+// constraint do projeto já dizia: os 3 agentes usam Azure OpenAI). OpenAI
+// direto continua selecionável com LLM_PROVIDER=openai explícito.
+export const LLM_PROVIDER = process.env.LLM_PROVIDER || 'azure';
 
 // OpenAI direto (D-08a) — usado enquanto LLM_PROVIDER=openai (default).
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';

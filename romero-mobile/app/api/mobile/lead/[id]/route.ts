@@ -14,15 +14,18 @@ import { chamarDiscador } from "@/lib/discador-servidor";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const gate = await exigirSessao();
   if (!gate.ok) return gate.resposta;
 
   const { id } = await params;
+  // ?leve=1 (2026-08-20): repassa a variante SEM timeline (card da conversa /
+  // modo fast só usam o dossiê — corta ~10s do frio).
+  const leve = new URL(req.url).searchParams.get("leve") === "1" ? "?leve=1" : "";
   // 30s: a timeline agora é filtrada no servidor do ClickUp (~2-3s típicos),
   // mas o limiter manso pode espaçar as queries — 8s default ficava no limite.
   const r = await chamarDiscador(
-    `/api/discador/lead/${encodeURIComponent(id)}`,
+    `/api/discador/lead/${encodeURIComponent(id)}${leve}`,
     gate.sessao.dToken,
     { timeoutMs: 30_000 },
   );

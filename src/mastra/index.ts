@@ -82,6 +82,9 @@ import {
   // usa listarTasks com filtro server-side por TELEFONE.
   CAMPOS_LIGACOES,
   listarTasks,
+  listarTasksComRetry,
+  fecharLigacoesDuplicadas,
+  identidadeDaLigacao,
   // quick-260815-r3: "Ligar" na ficha cria uma Ligação avulsa ATRIBUÍDA ao
   // operador (deep-link do discador). valorCampoLead/CAMPOS_LEADS leem o
   // telefone do lead pra criar a avulsa (choke point de leitura de campo).
@@ -118,7 +121,8 @@ import {
 // invalidar sem criar ciclo de import com este arquivo. `lerLeadDetalhe`
 // (importado acima, de './clickup') continua sendo o reader default por
 // dentro do novo módulo.
-import { lerLeadDetalheResiliente, derrubarLeadDetalheMem } from './lead-detalhe-cache.ts';
+import { lerLeadDetalheResiliente, lerLeadDossieResiliente, derrubarLeadDetalheMem } from './lead-detalhe-cache.ts';
+import { regenerarDossieDoLead } from './gerar-dossie.ts';
 // Client Evolution API (Fase 12 Plano 01, D-06/D-08): choke-point único de
 // envio/status — enviarAudio LANÇA em falha (nunca 200 silencioso).
 // numeroExisteNoWhatsapp (quick 260818-mv2): pré-check ANTES de enviarAudio.
@@ -203,10 +207,25 @@ const estadoAlertaDevice = new Map<string, EstadoDeviceAlerta>();
 const criandoInbound = new Set<string>();
 const ultimoInboundTs = new Map<string, number>();
 const COOLDOWN_INBOUND_MS = 10 * 60_000;
-async function garantirLigacaoInbound(telefoneCanon: string, telefoneBruto: string): Promise<void> {
+/** Telefones com uma re-tentativa de inbound AGENDADA (dedup ficou inconclusivo
+ *  porque o ClickUp abortou). Serve de guard single-flight: enquanto houver um
+ *  retry pendente, novos inbounds do mesmo número não abrem uma segunda cadeia
+ *  (que poderia criar uma 2ª avulsa). Valor = nº da próxima tentativa. */
+const inboundAdiados = new Map<string, number>();
+const INBOUND_MAX_TENTATIVAS = 3;
+const INBOUND_RETRY_DELAY_MS = 90_000;
+async function garantirLigacaoInbound(
+  telefoneCanon: string,
+  telefoneBruto: string,
+  tentativa = 0,
+): Promise<void> {
   if (!telefoneCanon || !telefoneBruto) return;
   const agora = Date.now();
   if (criandoInbound.has(telefoneCanon)) return;
+  // Já há um retry AGENDADO pra este número? Deixa a cadeia pendente resolver —
+  // não abre uma segunda (que poderia criar uma 2ª avulsa). O próprio retry
+  // (setTimeout) limpa este guard antes de reexecutar, então não trava pra sempre.
+  if (tentativa === 0 && inboundAdiados.has(telefoneCanon)) return;
   if (agora - (ultimoInboundTs.get(telefoneCanon) ?? 0) < COOLDOWN_INBOUND_MS) return;
   criandoInbound.add(telefoneCanon);
   try {
@@ -214,30 +233,58 @@ async function garantirLigacaoInbound(telefoneCanon: string, telefoneBruto: stri
     if (!assignee) return;
     // dedupe: alguma Ligação ABERTA com esse telefone? Filtro SERVER-SIDE por
     // TELEFONE (± nono dígito) — barato e independente do tamanho da fila.
-    // Falha do dedupe NÃO bloqueia a criação: melhor arriscar uma duplicata
-    // rara do que perder a pessoa (o abort de rede do ClickUp derrubava tudo).
-    let jaTem = false;
-    try {
-      const d = telefoneBruto.replace(/\D/g, '');
-      const comPais = d.length >= 12 ? d : `55${d}`;
-      const cands = new Set<string>([`+${comPais}`]);
-      if (comPais.length === 12) cands.add(`+${comPais.slice(0, 4)}9${comPais.slice(4)}`);
-      if (comPais.length === 13 && comPais[4] === '9') cands.add(`+${comPais.slice(0, 4)}${comPais.slice(5)}`);
-      const rs = await Promise.all(
-        [...cands].map((v) =>
-          listarTasks(CLICKUP_LIST_LIGACOES, {
-            includeClosed: false,
-            customFields: [{ field_id: CAMPOS_LIGACOES.TELEFONE, operator: '=', value: v }],
-          }).then((r) => r.tasks),
-        ),
-      );
-      jaTem = rs.flat().length > 0;
-    } catch (e) {
-      console.warn('[webhook] inbound: dedupe falhou (segue criando):', e instanceof Error ? e.message : String(e));
-    }
-    if (jaTem) {
+    // CRÍTICO (2026-08-20, caso Maria do Monte): distinguir "não achou" de "não
+    // consegui verificar". Antes, um abort do ClickUp caía no mesmo caminho de
+    // "não existe" e criava uma avulsa DUPLICADA da mesma pessoa. Agora:
+    //  - achou            → já tem Ligação, não cria (dedup positivo);
+    //  - conclusivo+vazio → verificou e não existe, cria com segurança;
+    //  - inconclusivo     → o ClickUp não respondeu; ADIA e tenta de novo (a
+    //                       mensagem já está persistida — ninguém se perde),
+    //                       só criando como último recurso após esgotar.
+    const d = telefoneBruto.replace(/\D/g, '');
+    const comPais = d.length >= 12 ? d : `55${d}`;
+    const cands = new Set<string>([`+${comPais}`]);
+    if (comPais.length === 12) cands.add(`+${comPais.slice(0, 4)}9${comPais.slice(4)}`);
+    if (comPais.length === 13 && comPais[4] === '9') cands.add(`+${comPais.slice(0, 4)}${comPais.slice(5)}`);
+    // Retry por candidato + tolerância por candidato: se UM aborta e o outro
+    // responde, o que respondeu ainda conta (antes o Promise.all inteiro rejeitava).
+    // null = este candidato não pôde ser verificado nem após o retry.
+    const rs = await Promise.all(
+      [...cands].map((v) =>
+        listarTasksComRetry(CLICKUP_LIST_LIGACOES, {
+          includeClosed: false,
+          customFields: [{ field_id: CAMPOS_LIGACOES.TELEFONE, operator: '=', value: v }],
+        })
+          .then((r) => r.tasks)
+          .catch(() => null),
+      ),
+    );
+    const achou = rs.some((r) => r !== null && r.length > 0);
+    const conclusivo = rs.every((r) => r !== null); // todos os candidatos responderam
+    if (achou) {
       ultimoInboundTs.set(telefoneCanon, agora);
+      inboundAdiados.delete(telefoneCanon);
       return;
+    }
+    if (!conclusivo) {
+      // O ClickUp não confirmou "não existe" — não cria às cegas.
+      if (tentativa < INBOUND_MAX_TENTATIVAS) {
+        inboundAdiados.set(telefoneCanon, tentativa + 1);
+        console.warn(
+          `[webhook] inbound: dedupe inconclusivo (ClickUp instável) — adiando ${Math.round(INBOUND_RETRY_DELAY_MS / 1000)}s, tentativa ${tentativa + 1}/${INBOUND_MAX_TENTATIVAS}`,
+        );
+        setTimeout(() => {
+          inboundAdiados.delete(telefoneCanon);
+          void garantirLigacaoInbound(telefoneCanon, telefoneBruto, tentativa + 1);
+        }, INBOUND_RETRY_DELAY_MS);
+        return; // NÃO cria, NÃO seta cooldown (a cadeia adiada decide)
+      }
+      // Esgotou: cria mesmo assim (fail-open de ÚLTIMO recurso, agora após um
+      // atraso real — não na primeira falha). Preserva "nunca perder a pessoa".
+      console.warn(
+        `[webhook] inbound: dedupe seguiu inconclusivo após ${INBOUND_MAX_TENTATIVAS} tentativas — criando (fail-open de último recurso)`,
+      );
+      inboundAdiados.delete(telefoneCanon);
     }
     const { id } = await criarLigacaoAvulsa(telefoneBruto, assignee);
     ultimoInboundTs.set(telefoneCanon, agora);
@@ -437,6 +484,95 @@ function statusConversaDe(leadId: string, resumo?: ResumoConversaLead): StatusCo
     motivo: resumo.respostaTexto ? `"${resumo.respostaTexto.slice(0, 90)}"` : 'Respondeu — Romero decide',
   };
 }
+/* ===== DOSSIÊ GARANTIDO NA FILA (2026-08-20) =====
+   Pedido do gestor: "todo lead do Romero tem que ter dossiê quando ele for
+   ligar". Três peças:
+   1. `temDossiePorLead` — conhecimento em memória (classificado pela varredura
+      e pelas leituras de ficha) que alimenta a ORDENAÇÃO da fila: quem TEM
+      dossiê vai pro topo; quem não tem afunda enquanto o dossiê é gerado.
+   2. `varrerDossiesDaFila` — background: classifica a fila (leitura leve,
+      cacheada) e gera os que faltam UM POR VEZ, na ordem em que o operador
+      vai chegar neles, com pausa entre gerações — invisível pra quem opera
+      (nada de rajada no ClickUp/LLM).
+   3. `gerarDossieSobDemanda` — abriu uma ficha sem dossiê → gera fire-and-
+      forget (single-flight + cooldown), pro caso de lead fora da fila.
+   LGPD: só leadTaskId/contagens em log — nunca nome/telefone/CPF. */
+const temDossiePorLead = new Map<string, boolean>();
+const dossieEmGeracao = new Set<string>();
+const dossieUltimaTentativa = new Map<string, number>();
+const DOSSIE_COOLDOWN_MS = 30 * 60_000;
+const DOSSIE_PAUSA_ENTRE_GERACOES_MS = 5_000;
+let varreduraDossieAtiva = false;
+let ultimaVarreduraDossieTs = 0;
+
+function podeTentarDossie(leadTaskId: string): boolean {
+  if (!leadTaskId || dossieEmGeracao.has(leadTaskId)) return false;
+  return Date.now() - (dossieUltimaTentativa.get(leadTaskId) ?? 0) >= DOSSIE_COOLDOWN_MS;
+}
+
+async function gerarDossieDoLeadGuardado(leadTaskId: string): Promise<boolean> {
+  dossieEmGeracao.add(leadTaskId);
+  dossieUltimaTentativa.set(leadTaskId, Date.now());
+  try {
+    const md = await regenerarDossieDoLead(leadTaskId);
+    if (md && md.trim() !== '') {
+      temDossiePorLead.set(leadTaskId, true);
+      console.log(`[dossie] gerado em background: lead ${leadTaskId} (${md.length} chars)`);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.warn(`[dossie] geração falhou (lead ${leadTaskId}):`, e instanceof Error ? e.message : String(e));
+    return false;
+  } finally {
+    dossieEmGeracao.delete(leadTaskId);
+  }
+}
+
+function gerarDossieSobDemanda(leadTaskId: string): void {
+  if (!podeTentarDossie(leadTaskId)) return;
+  void gerarDossieDoLeadGuardado(leadTaskId);
+}
+
+async function varrerDossiesDaFila(leadIds: string[]): Promise<void> {
+  if (varreduraDossieAtiva || Date.now() - ultimaVarreduraDossieTs < 60_000) return;
+  varreduraDossieAtiva = true;
+  ultimaVarreduraDossieTs = Date.now();
+  try {
+    // Passo 1 — classifica (leitura LEVE, cacheada 3min): alimenta a ordenação.
+    console.log(`[dossie] varredura: classificando ${leadIds.length} lead(s) da fila…`);
+    const sem: string[] = [];
+    let erros = 0;
+    for (const id of leadIds) {
+      if (!id || temDossiePorLead.get(id) === true) continue;
+      try {
+        const det = await lerLeadDossieResiliente(id);
+        const tem = (det.dossie ?? '').trim() !== '';
+        temDossiePorLead.set(id, tem);
+        if (!tem) sem.push(id);
+      } catch {
+        erros++; // lead problemático não trava a varredura — mas CONTA no resumo
+      }
+    }
+    // resumo SEMPRE (2026-08-20): sem isto, uma varredura 100% falha terminava
+    // muda e ninguém sabia se rodou, travou ou abortou.
+    console.log(`[dossie] varredura: ${sem.length} sem dossiê, ${erros} erro(s) de leitura`);
+    if (sem.length === 0) return;
+    console.log(`[dossie] gerando 1 por vez na ordem da fila (pausa ${DOSSIE_PAUSA_ENTRE_GERACOES_MS / 1000}s)`);
+    // Passo 2 — gera DEVAGAR, na ordem em que o operador vai chegar neles.
+    let gerados = 0;
+    for (const id of sem) {
+      if (!podeTentarDossie(id)) continue;
+      if (await gerarDossieDoLeadGuardado(id)) gerados++;
+      await new Promise((r) => setTimeout(r, DOSSIE_PAUSA_ENTRE_GERACOES_MS));
+    }
+    // fim SEMPRE logado (mesmo racional do resumo da classificação).
+    console.log(`[dossie] varredura concluída: ${gerados}/${sem.length} gerado(s)`);
+  } finally {
+    varreduraDossieAtiva = false;
+  }
+}
+
 let cacheStatusConversa: { mapa: Map<string, ResumoConversaLead>; em: number } | null = null;
 async function mapaConversaCacheado(): Promise<Map<string, ResumoConversaLead> | null> {
   // 60s→5min (2026-08-19): mesmo racional do TTL do lote — menos varreduras da
@@ -1080,7 +1216,7 @@ export const mastra = new Mastra({
           if (!taskId) return c.json({ erro: 'taskId obrigatório' }, 400);
           if (!motivo) return c.json({ erro: 'motivo obrigatório' }, 400);
           try {
-            await validarLigacaoDoOperador(taskId, assignee);
+            const taskPulada = await validarLigacaoDoOperador(taskId, assignee);
             await gravarMetadadosLigacao(taskId, { atendeu: false, motivoFalha: 'Pulado' });
             // LGPD: só a frase do operador + login — nunca telefone/CPF.
             try {
@@ -1089,6 +1225,12 @@ export const mastra = new Mastra({
               console.warn('[discador] pular: comentário falhou (segue fechando):', e instanceof Error ? e.message : String(e));
             }
             await fecharLigacao(taskId);
+            // reconciliação (2026-08-20): pulou = decisão terminal sobre a
+            // PESSOA — outras Ligações abertas dela saem da fila também.
+            {
+              const { leadId, telefone } = identidadeDaLigacao(taskPulada);
+              void fecharLigacoesDuplicadas(taskId, leadId, telefone);
+            }
             // mesma eviction do desfecho (D-04/D-03): a linha some da fila no
             // próximo fetch, sem esperar TTL. No-op sem Redis, nunca lança.
             await removerDaFilaCache(assignee, taskId);
@@ -1444,7 +1586,17 @@ export const mastra = new Mastra({
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const leadTaskId = c.req.param('leadTaskId');
           try {
-            const detalhe = await lerLeadDetalheResiliente(leadTaskId);
+            // ?leve=1 (2026-08-20): ficha SEM timeline — o card da conversa e o
+            // modo fast só usam o dossiê; pular a timeline corta ~10s no frio.
+            const detalhe =
+              c.req.query('leve') === '1'
+                ? await lerLeadDossieResiliente(leadTaskId)
+                : await lerLeadDetalheResiliente(leadTaskId);
+            // conhecimento pra ordenação da fila + geração sob demanda:
+            // abriu ficha sem dossiê → gera em background (single-flight).
+            const temDossie = (detalhe.dossie ?? '').trim() !== '';
+            temDossiePorLead.set(leadTaskId, temDossie);
+            if (!temDossie) gerarDossieSobDemanda(leadTaskId);
             return c.json(detalhe);
           } catch (e) {
             console.error('[discador] erro ao ler detalhe do lead:', e instanceof Error ? e.message : String(e));
@@ -1781,7 +1933,7 @@ export const mastra = new Mastra({
                   // era o bug de 2026-08-19) e vira ligação direta no toque.
                   conversa: leadTaskId
                     ? statusConversaDe(leadTaskId, mapa?.get(leadTaskId))
-                    : { status: 'enviar_audio' as const, motivo: 'Sem lead vinculado — toque para ligar' },
+                    : { status: 'enviar_audio' as const, motivo: 'Sem lead vinculado' },
                   ultima: leadTaskId
                     ? (ultimas?.porLead.get(leadTaskId) ??
                        ultimas?.porTelefone.get(telefoneCanonico(i.telefone)) ??
@@ -1793,6 +1945,18 @@ export const mastra = new Mastra({
             // mesma régua da lista de áudios: quem falou por último no topo;
             // sem mensagem, mantém a prioridade da fila (sort estável).
             leads.sort((a, b) => (b.ultima?.ts ?? 0) - (a.ultima?.ts ?? 0));
+            // DOSSIÊ PRIMEIRO (pedido 2026-08-20): quem TEM dossiê sobe — o
+            // Romero liga com contexto; quem não tem afunda enquanto a
+            // varredura gera em background. Sort ESTÁVEL: dentro de cada
+            // grupo vale a ordem acima (quem falou por último). Lead ainda
+            // não classificado conta como "sem" até a varredura aprender.
+            leads.sort(
+              (a, b) =>
+                Number(temDossiePorLead.get(b.leadTaskId) === true) -
+                Number(temDossiePorLead.get(a.leadTaskId) === true),
+            );
+            // dispara a varredura (no-op se já rodou há <60s ou está ativa)
+            void varrerDossiesDaFila(leads.map((l) => l.leadTaskId).filter(Boolean));
             return c.json({ leads, origens: [] });
           } catch (e) {
             console.error('[discador] erro na fila de áudios:', e instanceof Error ? e.message : String(e));
