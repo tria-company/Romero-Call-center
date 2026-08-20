@@ -62,6 +62,7 @@ services:
     command: node worker.mjs
     env_file: [homolog.env]
     networks: [homolog_net]
+    stop_grace_period: 120s ## drena o job em andamento no SIGTERM (dedup é crash-safe)
     deploy:
       mode: replicated
       replicas: 1
@@ -69,7 +70,6 @@ services:
         constraints: [node.role == manager]
       resources:
         limits: { cpus: "1", memory: 768M }
-      stop_grace_period: 120s ## drena o job em andamento no SIGTERM (dedup é crash-safe)
 
   ## ------------------------------- REDIS -------------------------------- ##
   ## Redis DEDICADO do homolog — isolado do discador_redis de produção.
