@@ -18,6 +18,12 @@ import {
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
 import { verificarCredenciais, emitirToken, verificarToken, tokenDoHeader } from './discador-auth';
+// Fase A espelho (17-03, MODELO-06/PORTAO-03): validação do mapa de field-ids
+// ClickUp no boot (uma única autoridade, R8) + healthcheck de boot das
+// tabelas novas do espelho (SELECT+escrita, R11) — disparados 1x no boot
+// abaixo, mesmo molde fire-and-forget não-fatal de semearUsuariosSeVazio.
+import { carregarEValidarCampoMapa, DivergenciaCampoMapa } from './campo-mapa.ts';
+import { healthcheckEspelho } from './boot-espelho.ts';
 // Seed idempotente (USER-05) + snapshot em memoria de discador_usuarios
 // (Fase 11 D-01/D-02) — disparados 1x no boot abaixo; verificarCredenciais
 // (discador-auth.ts) e assigneeDoOperador/resolverConfigDoUsuario
@@ -801,6 +807,34 @@ console.log(
 // usado por operadores.ts/dispositivos.ts. Fire-and-forget nao-fatal — nunca
 // derruba o boot do processo; usuarios.ts ja loga sucesso/falha internamente.
 void semearUsuariosSeVazio().then(() => recarregarUsuarios()).catch(() => {});
+
+// Boot (Fase A espelho, 17-03/MODELO-06): valida as constantes CAMPOS_*/
+// OPCOES_* (clickup.ts) contra `get_custom_fields` do ClickUp — uma única
+// autoridade (R8). ClickUp inalcançável já degrada (warn+skip) DENTRO de
+// carregarEValidarCampoMapa — só chega aqui uma DivergenciaCampoMapa
+// GENUÍNA (campo/opção reamente divergente), que FALHA ALTO o processo
+// (MODELO-06: nunca segue silencioso, o caminho reverso futuro derrubaria
+// valor). Qualquer outro erro inesperado é só-log, não derruba o boot.
+void carregarEValidarCampoMapa().catch((e) => {
+  if (e instanceof DivergenciaCampoMapa) {
+    console.error('[boot] DIVERGÊNCIA no mapa de field-ids ClickUp — falha alto (MODELO-06):', e.message);
+    process.exit(1);
+  }
+  console.error(
+    '[boot] erro inesperado ao carregar/validar o mapa de field-ids (nao-fatal):',
+    e instanceof Error ? e.message : String(e),
+  );
+});
+
+// Boot (Fase A espelho, 17-03/PORTAO-03): healthcheck SELECT+escrita das
+// tabelas novas do espelho (ligacoes/audios_envios/clickup_outbox/
+// clickup_campo_mapa/notas) — NUNCA derruba o boot (degradação graciosa);
+// só registra o resultado. Enquanto uma tabela não estiver visível+
+// escrevível, o fallback 404->ClickUp já existente no código segue intacto
+// (nenhuma rota muda nesta fase).
+void healthcheckEspelho().catch((e) => {
+  console.error('[boot-espelho] healthcheck falhou (nao-fatal):', e instanceof Error ? e.message : String(e));
+});
 
 /**
  * Gate de gestor (Fase 11 Plano 04, USER-03 — a peca de seguranca central da
