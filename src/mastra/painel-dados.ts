@@ -33,7 +33,7 @@ import {
   PAINEL_TTL_CLICKUP_MS,
   PAINEL_MAX_PAGINAS,
 } from './config.ts';
-import { CAMPOS_LEADS, OPCOES_LEADS, CAMPOS_LIGACOES, listarTasks, lerAtendeu, type TaskClickUp } from './clickup.ts';
+import { CAMPOS_LEADS, OPCOES_LEADS, CAMPOS_LIGACOES, listarTasks, lerAtendeu, contarTasksDaLista, type TaskClickUp } from './clickup.ts';
 import { contarVotosPorOperador } from './supabase.ts';
 import { fetchTimeout } from './http.ts';
 
@@ -183,9 +183,22 @@ async function contarPorCustomField(
   let ultima = false;
   while (!ultima && page < PAINEL_MAX_PAGINAS) {
     const url = `${CLICKUP_BASE_URL}/list/${CLICKUP_LIST_LEADS}/task?page=${page}&include_closed=true&custom_fields=${filtro}`;
-    const res = await fetchTimeout(url, { headers: { Authorization: CLICKUP_API_TOKEN } });
-    if (!res.ok) throw new Error(`[painel] HTTP ${res.status} ao contar custom field na Lista 01`);
-    const data = await res.json();
+    // Mesmo teto e mesmo retry das varreduras: medido em 20/08, ESTA consulta também
+    // abortava nos 15s do default e deixava o card "Intenção de voto" vazio — a Lista 01
+    // tem 100 mil tasks e o filtro por custom field passa dos 15s com o ClickUp lento.
+    let data: { tasks?: unknown[]; last_page?: boolean } | null = null;
+    let ultimoErro: unknown = null;
+    for (let tentativa = 1; tentativa <= 3 && !data; tentativa += 1) {
+      try {
+        const res = await fetchTimeout(url, { headers: { Authorization: CLICKUP_API_TOKEN } }, PAINEL_TIMEOUT_PAGINA_MS);
+        if (!res.ok) throw new Error(`[painel] HTTP ${res.status} ao contar custom field na Lista 01`);
+        data = await res.json();
+      } catch (e) {
+        ultimoErro = e;
+        if (tentativa < 3) await new Promise((s) => setTimeout(s, 2000 * tentativa));
+      }
+    }
+    if (!data) throw ultimoErro instanceof Error ? ultimoErro : new Error(String(ultimoErro));
     for (const t of data?.tasks || []) {
       if (!t?.id) continue;
       const cidade = String(
@@ -339,6 +352,65 @@ function ligacaoDiscada(t: TaskClickUp): boolean {
 }
 
 /**
+ * Só as DISCADAS, filtradas NO SERVIDOR do ClickUp.
+ *
+ * A varredura completa da Lista 02 deixou de ser viável: 2.710 tasks em 28 páginas, e o
+ * gateway do ClickUp devolvendo 500 (timeout interno dele) em ~55s por página — medido em
+ * 20/08, uma varredura inteira levaria ~23 minutos. Com os 15s do `fetchTimeout` toda
+ * tentativa abortava e a Central ficava EM BRANCO, sem distinguir erro de "sem dados".
+ *
+ * `INICIO IS NOT NULL` é a mesma prova de discagem que `ligacaoDiscada` usa, só que
+ * aplicada antes de os dados saírem do ClickUp: 326 tasks em 4 páginas em vez de 2.710 em
+ * 28. Verificado que o filtro é REAL (nenhuma task voltou sem INICIO), não ignorado.
+ *
+ * O que se perde: a task que nunca foi discada não vem, então a fila não sai desta
+ * varredura — ela vem do `task_count` da lista, por subtração.
+ */
+const FILTRO_DISCADAS = [{ field_id: CAMPOS_LIGACOES.INICIO, operator: 'IS NOT NULL' }];
+
+/** Teto por página para as varreduras do painel. Não confundir com o default de 15s do
+ *  `fetchTimeout`, que existe para o webhook do GHL e continua intocado. */
+const PAINEL_TIMEOUT_PAGINA_MS = Number(process.env.PAINEL_TIMEOUT_PAGINA_MS) || 90000;
+
+/**
+ * Varre as ligações DISCADAS com retry por página.
+ *
+ * O 500 do ClickUp aqui é transitório e do lado DELES (o corpo é o proxy interno deles
+ * dizendo "timeout awaiting response headers"): medido em 19/08, três páginas seguidas
+ * falharam e as MESMAS três voltaram 200 nas 9 tentativas seguintes. Sem retry, uma página
+ * ruim mata a varredura inteira — que era o que fazia o painel apagar.
+ */
+async function varrerDiscadas(): Promise<{ tasks: TaskClickUp[]; parcial: boolean }> {
+  const todas: TaskClickUp[] = [];
+  let page = 0;
+  let ultima = false;
+  while (!ultima && page < PAINEL_MAX_PAGINAS) {
+    let r: { tasks: TaskClickUp[]; lastPage: boolean } | null = null;
+    let ultimoErro: unknown = null;
+    for (let tentativa = 1; tentativa <= 3 && !r; tentativa += 1) {
+      try {
+        r = await listarTasks(CLICKUP_LIST_LIGACOES, {
+          page,
+          includeClosed: true,
+          customFields: FILTRO_DISCADAS,
+          timeoutMs: PAINEL_TIMEOUT_PAGINA_MS,
+        });
+      } catch (e) {
+        ultimoErro = e;
+        if (tentativa < 3) await new Promise((s) => setTimeout(s, 2000 * tentativa));
+      }
+    }
+    // Esgotadas as tentativas, PROPAGA (WR-03) — o cache mantém o valor anterior e a rota
+    // devolve 502. Devolver o que já veio seria publicar um total pela metade sem aviso.
+    if (!r) throw ultimoErro instanceof Error ? ultimoErro : new Error(String(ultimoErro));
+    todas.push(...r.tasks);
+    ultima = r.lastPage;
+    page += 1;
+  }
+  return { tasks: todas, parcial: !ultima };
+}
+
+/**
  * Dia da ligação = dia em que foi DISCADA (INICIO), não em que a task foi criada. O lote do
  * dia seguinte nasce de madrugada; usar `date_created` jogava a produção para o dia da
  * criação do lote, não para o dia em que a telefonista trabalhou. Sem INICIO (inbound),
@@ -365,15 +437,9 @@ function diaDaLigacao(t: TaskClickUp): string {
  */
 export async function resumoLigacoesAoVivo(): Promise<ResumoLigacoes> {
   const hoje = diaOperacionalStr();
-  let page = 0;
-  let ultima = false;
-  const todas: TaskClickUp[] = [];
-  while (!ultima && page < PAINEL_MAX_PAGINAS) {
-    const r = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
-    todas.push(...r.tasks);
-    ultima = r.lastPage;
-    page += 1;
-  }
+  // Só as DISCADAS, filtradas no servidor: este bloco só publica número de chamada, e a
+  // task nunca discada não entra em nenhum deles.
+  const { tasks: todas, parcial } = await varrerDiscadas();
 
   // DISCADAS, e pelo dia da DISCAGEM — mesma definição que a Central usa (`ligacaoDiscada`).
   // Antes contava toda task criada no dia: o lote nasce de madrugada já com o nome da
@@ -403,7 +469,7 @@ export async function resumoLigacoesAoVivo(): Promise<ResumoLigacoes> {
     comTranscricao: todas.filter((t) => preenchido(t, CAMPOS_LIGACOES.TRANSCRICAO)).length,
     comAnaliseIa: todas.filter((t) => preenchido(t, CAMPOS_LIGACOES.ANALISE_IA)).length,
     ultimaEm: ultimaEm ? new Date(Number(ultimaEm)).toISOString() : null,
-    parcial: !ultima,
+    parcial,
   };
 }
 
@@ -696,14 +762,17 @@ function aderenciaEmPct(notas: number[]): number {
  * commit u26). Nenhum telefone/CPF sai daqui.
  */
 export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
-  let page = 0;
-  let ultima = false;
-  const todas: TaskClickUp[] = [];
-  while (!ultima && page < PAINEL_MAX_PAGINAS) {
-    const r = await listarTasks(CLICKUP_LIST_LIGACOES, { page, includeClosed: true });
-    todas.push(...r.tasks);
-    ultima = r.lastPage;
-    page += 1;
+  const { tasks: todas, parcial } = await varrerDiscadas();
+
+  // Total da lista pelo `task_count` — UMA requisição, em vez das 24 páginas que a fila
+  // custaria para ser varrida. `fila = total − discadas`. Se falhar, a fila fica em 0 e a
+  // tela simplesmente não mostra a linha (ela é condicional): melhor omitir do que
+  // publicar um tamanho de fila errado ao lado de números certos.
+  let totalNaLista = 0;
+  try {
+    totalNaLista = await contarTasksDaLista(CLICKUP_LIST_LIGACOES);
+  } catch (e) {
+    console.error('[painel] task_count da Lista 02 indisponivel (fila fica em 0):', e instanceof Error ? e.message : String(e));
   }
 
   const temDesfecho = (t: TaskClickUp) => preenchido(t, CAMPOS_LIGACOES.ATENDEU);
@@ -768,8 +837,7 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     if (bruto) a.variantes.set(bruto, (a.variantes.get(bruto) ?? 0) + 1);
     // Os dois contadores são exclusivos e somam o total de tasks do operador — quem
     // conferir a conta consegue reconstruir o número antigo somando as duas colunas.
-    if (discada(t)) a.lig += 1;
-    else a.fila += 1;
+    a.lig += 1; // a varredura ja vem filtrada por INICIO — tudo aqui foi discado
     if (contato(t)) a.cont += 1;
     const seg = duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO));
     if (seg) a.segs.push(seg);
@@ -842,13 +910,15 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     telefonistas,
     motivosNaoContato: motivos,
     falhasTecnicas: tecnicas,
-    // DISCADAS, não tasks. Era `todas.length` e publicava 4,4x o real (1.449 contra 328).
-    totalLigacoes: todas.filter(discada).length,
-    totalNaFila: todas.filter((t) => !discada(t)).length,
+    // DISCADAS, não tasks. Era `todas.length` sobre a lista inteira e publicava 4,4x o
+    // real (2.710 contra 355) — hoje a varredura já chega filtrada.
+    totalLigacoes: todas.length,
+    // Por subtração: o `task_count` da lista menos o que foi discado. Zero quando o
+    // task_count falhou — a tela omite a linha em vez de mostrar fila errada.
+    totalNaFila: totalNaLista > 0 ? Math.max(0, totalNaLista - todas.length) : 0,
     totalContatos: todas.filter(contato).length,
-    // Sobre as DISCADAS: task que nunca foi discada não tem desfecho por definição, e
-    // contá-la aqui inflaria a lacuna com fila parada em vez de registro faltando.
-    semDesfecho: todas.filter((t) => discada(t) && !temDesfecho(t)).length,
+    // Sobre as DISCADAS — e agora todas são, por construção da varredura.
+    semDesfecho: todas.filter((t) => !temDesfecho(t)).length,
     semOperador,
     desfechoDeApp: {
       comOperador: todas.filter(comOperador).length,
@@ -862,7 +932,7 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
       max: segs[segs.length - 1] ?? 0,
       amostra: segs.length,
     },
-    parcial: !ultima,
+    parcial,
   };
 }
 

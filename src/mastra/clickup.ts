@@ -262,8 +262,17 @@ export async function listarTasks(
     assignees?: string[];
     /** Filtro de custom fields NO SERVIDOR (2026-08-19) — ex. timeline por
      *  LEAD_REL: 1 request em vez de paginar a lista inteira. Shape da API v2:
-     *  [{ field_id, operator, value }]. */
-    customFields?: Array<{ field_id: string; operator: string; value: unknown }>;
+     *  [{ field_id, operator, value }]. `value` é OPCIONAL: operadores como
+     *  `IS NOT NULL` não levam valor, e mandar um faz a API responder 400. */
+    customFields?: Array<{ field_id: string; operator: string; value?: unknown }>;
+    /** Teto desta chamada em ms. Ausente = o default de `fetchTimeout` (15s), que existe
+     *  para caber no orçamento de 30s do webhook do GHL e NÃO deve mudar.
+     *
+     *  Quem varre lista grande precisa de mais: medido em 20/08, uma página da Lista 02
+     *  (2.710 tasks) levou de 19s a 55s com o gateway do ClickUp degradado — os 15s
+     *  abortavam TODA tentativa e o painel ficava em branco. Passar um teto maior aqui
+     *  afeta só o chamador que pede, sem tocar no caminho do webhook. */
+    timeoutMs?: number;
   } = {},
 ): Promise<{ tasks: TaskClickUp[]; lastPage: boolean }> {
   // Token ausente e falha de infra/HTTP LANCAM (WR-03): o caller decide
@@ -288,9 +297,11 @@ export async function listarTasks(
   }
   let res: Response;
   try {
-    res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${listId}/task?${params.toString()}`, {
-      headers: headers(),
-    });
+    res = await fetchClickUp(
+      `${CLICKUP_BASE_URL}/list/${listId}/task?${params.toString()}`,
+      { headers: headers() },
+      opts.timeoutMs,
+    );
   } catch (e) {
     throw new Error(
       `[clickup] falha de rede ao listar tasks da lista ${listId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -2201,6 +2212,27 @@ export async function listarLeadsResumo(
  * páginas. Usado só pro cabeçalho da Base mostrar o valor real (não o "100+").
  * LANÇA em infra/HTTP (WR-03) — o caller trata como opcional.
  */
+/**
+ * Total de tasks de uma lista pelo `task_count` que o próprio ClickUp já mantém — UMA
+ * requisição barata, sem paginar nada.
+ *
+ * Existe para o painel poder dizer "N leads na fila" sem varrer a Lista 02 inteira: a
+ * varredura completa custava 28 páginas e ~23 minutos com o gateway degradado (medido em
+ * 20/08), enquanto as ligações DISCADAS cabem em 4 páginas via filtro no servidor. A fila
+ * vira uma subtração: total − discadas.
+ */
+export async function contarTasksDaLista(listId: string): Promise<number> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para contar tasks');
+  }
+  const res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${listId}`, { headers: headers() });
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /list/${listId} falhou (${res.status})`);
+  }
+  const data = await res.json();
+  return Number(data?.task_count) || 0;
+}
+
 export async function contarLeadsDaLista(): Promise<number> {
   if (!CLICKUP_API_TOKEN) {
     throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para contar leads');
