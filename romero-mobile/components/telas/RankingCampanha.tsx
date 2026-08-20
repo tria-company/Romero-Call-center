@@ -144,7 +144,17 @@ function LinhaRanking({
           <span className="rstat" style={{ background: COR[tomAderencia(o.ader, o.aderAmostra)] }} />
           {o.nome}
         </div>
-        <div className="rs">{o.turno || `${o.lig} lig. · ${o.cont} contatos`}</div>
+        {/* "na fila" é o que sobrou do lote sem ser discado. Fica ao lado das discadas de
+            propósito: as duas juntas são o número que o painel publicava sozinho como
+            "ligações", e mostrá-las separadas é o que deixa a diferença auditável. */}
+        <div className="rs">
+          {o.turno || (
+            <>
+              {fmtInt(o.lig)} lig. · {fmtInt(o.cont)} contatos
+              {o.fila > 0 ? ` · ${fmtInt(o.fila)} na fila` : ""}
+            </>
+          )}
+        </div>
       </div>
       <div className="rmet">
         <div className="rsm">

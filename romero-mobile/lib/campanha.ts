@@ -103,7 +103,10 @@ export type Telefonista = {
   nome: string;
   /** "Recife · manhã" */
   turno: string;
+  /** ligações DISCADAS — não é o total de leads que caiu na mão dela */
   lig: number;
+  /** leads atribuídos e ainda não discados; `lig + fila` = o lote inteiro do operador */
+  fila: number;
   cont: number;
   /** conversão e tempo mediano (segundos) */
   conv: number;
@@ -209,6 +212,7 @@ export type CampanhaReal = {
     nome: string;
     turno: string;
     lig: number;
+    fila: number;
     cont: number;
     conv: number;
     ader: number;
@@ -222,7 +226,10 @@ export type CampanhaReal = {
   votosPorCidade: { rotulo: string; n: number }[];
   intencao: { rotulo: string; sim: number; nao: number; naoDeclarou: number; base: number }[];
   cobertura: { feita: number; total: number };
+  /** ligações DISCADAS (o backend não manda mais o total de tasks aqui) */
   totalLigacoes: number;
+  /** leads atribuídos e ainda não discados — o tamanho da fila parada */
+  totalNaFila: number;
   totalContatos: number;
   aderenciaMedia: number;
 };
@@ -237,6 +244,7 @@ export const CAMPANHA_REAL_VAZIO: CampanhaReal = {
   intencao: [],
   cobertura: { feita: 0, total: 0 },
   totalLigacoes: 0,
+  totalNaFila: 0,
   totalContatos: 0,
   aderenciaMedia: 0,
 };
