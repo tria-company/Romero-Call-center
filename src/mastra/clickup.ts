@@ -524,6 +524,57 @@ export async function listarStatusLista(listId: string): Promise<string[]> {
   return statuses.map((s) => String(s?.status || '')).filter(Boolean);
 }
 
+/** Definicao de um custom field devolvida por `GET /list/:id/field` — shape util
+ *  pra validacao (17-03/MODELO-06): id+name+type + as opcoes de dropdown com
+ *  id+name (necessarias pra detectar UUID de opcao desconhecido, R8). */
+export interface CampoClickUpDefinicao {
+  id: string;
+  name: string;
+  type: string;
+  type_config?: { options?: Array<{ id?: string; name?: string }> };
+}
+
+/**
+ * Lista as DEFINICOES de custom field de uma lista (`GET /list/:id/field`) —
+ * usada pelo boot pra VALIDAR os mapas hardcoded CAMPOS_ e OPCOES_ (clickup.ts)
+ * contra o ClickUp real: uma unica autoridade validada (MODELO-06/D-07), nao
+ * duas copias que podem divergir. Mesmo molde EXATO de `listarStatusLista`
+ * (thin wrapper GET por lista via `fetchClickUp`): token ausente/HTTP falho
+ * LANÇAM (WR-03), nunca mascara com array vazio. NUNCA loga token/valor de
+ * campo — so estrutura (id/name/type/opcoes), que nao e PII.
+ */
+export async function getCustomFields(listId: string): Promise<CampoClickUpDefinicao[]> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para listar custom fields da lista');
+  }
+  let res: Response;
+  try {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${listId}/field`, { headers: headers() });
+  } catch (e) {
+    throw new Error(
+      `[clickup] falha de rede ao listar custom fields da lista ${listId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /list/${listId}/field falhou (${res.status})`);
+  }
+  const data = await res.json();
+  const fields: Array<{
+    id?: string;
+    name?: string;
+    type?: string;
+    type_config?: { options?: Array<{ id?: string; name?: string }> };
+  }> = data?.fields || [];
+  return fields
+    .filter((f) => f && f.id)
+    .map((f) => ({
+      id: String(f.id),
+      name: String(f.name || ''),
+      type: String(f.type || ''),
+      type_config: f.type_config,
+    }));
+}
+
 /** Membro da workspace ClickUp (D-03) — id sempre String (a API devolve numero). */
 export interface MembroClickUp {
   id: string;
