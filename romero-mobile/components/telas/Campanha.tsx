@@ -49,6 +49,10 @@ export function SecaoCampanha() {
   const c = campanha.dados;
   /* Sem série de votos datada, o gráfico de acumulado não tem o que plotar. */
   const temAcumulado = c.serie.some((d) => d.acumulado > 0);
+  /* SLA e cobertura não são zero: são AUSENTES (a rota não os devolve). Um contador
+     qualquer acima de zero é o sinal de que a fonte passou a existir. */
+  const temSla = c.sla.agendados > 0 || c.sla.cumpridos > 0 || c.sla.vencidos > 0;
+  const temCobertura = c.cobertura.total > 0;
 
   return (
     <section className="cc" aria-labelledby="secao-campanha">
@@ -205,29 +209,54 @@ export function SecaoCampanha() {
         )}
       </div>
 
+      {/* Os dois blocos abaixo NÃO têm fonte hoje: a rota /api/discador/campanha agrega a
+          Lista 02 e não devolve `sla` nem `cobertura`, então os dois caem no fallback
+          zerado de CAMPANHA_REAL_VAZIO. Sem guarda, o SLA publicava "0% no prazo" — que
+          se lê como medição catastrófica, não como ausência — e a cobertura calculava
+          0 ÷ 0 e imprimia literalmente "0 de 0 · NaN%" na tela. Mesma regra do resto do
+          painel: cartão no lugar, `eyebrow` no lugar, e uma frase dizendo POR QUE não há
+          número. */}
       <div className="card">
         <p className="eyebrow">Retornos / SLA</p>
-        <div className="valrow">
-          <div className="val tabnum">{c.sla.pct}%</div>
-          <span className="lab">no prazo</span>
-        </div>
-        <div className="progress g">
-          <span style={{ width: `${c.sla.pct}%` }} />
-        </div>
-        <div className="metrow">
-          <Met valor={fmtInt(c.sla.agendados)} label="agendados" />
-          <Met valor={fmtInt(c.sla.cumpridos)} label="cumpridos" tom="up" />
-          <Met valor={fmtInt(c.sla.vencidos)} label="vencidos" tom="down" />
-        </div>
+        {temSla ? (
+          <>
+            <div className="valrow">
+              <div className="val tabnum">{c.sla.pct}%</div>
+              <span className="lab">no prazo</span>
+            </div>
+            <div className="progress g">
+              <span style={{ width: `${c.sla.pct}%` }} />
+            </div>
+            <div className="metrow">
+              <Met valor={fmtInt(c.sla.agendados)} label="agendados" />
+              <Met valor={fmtInt(c.sla.cumpridos)} label="cumpridos" tom="up" />
+              <Met valor={fmtInt(c.sla.vencidos)} label="vencidos" tom="down" />
+            </div>
+          </>
+        ) : (
+          <SemDados>
+            Nenhum retorno agendado foi medido ainda — a agregação da campanha ainda não
+            lê a data de retorno das ligações.
+          </SemDados>
+        )}
         <div className="gap8" />
         <p className="eyebrow">Cobertura da base</p>
-        <div className="lab">
-          {fmtInt(c.cobertura.feita)} de {fmtInt(c.cobertura.total)} ·{" "}
-          {Math.round((c.cobertura.feita / c.cobertura.total) * 100)}%
-        </div>
-        <div className="progress">
-          <span style={{ width: `${(c.cobertura.feita / c.cobertura.total) * 100}%` }} />
-        </div>
+        {temCobertura ? (
+          <>
+            <div className="lab">
+              {fmtInt(c.cobertura.feita)} de {fmtInt(c.cobertura.total)} ·{" "}
+              {Math.round((c.cobertura.feita / c.cobertura.total) * 100)}%
+            </div>
+            <div className="progress">
+              <span style={{ width: `${(c.cobertura.feita / c.cobertura.total) * 100}%` }} />
+            </div>
+          </>
+        ) : (
+          <SemDados>
+            A agregação da campanha ainda não cruza as ligações feitas com o tamanho da
+            base, então não há percentual de cobertura para mostrar.
+          </SemDados>
+        )}
       </div>
     </section>
   );

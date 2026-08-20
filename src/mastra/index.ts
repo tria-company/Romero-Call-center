@@ -1644,7 +1644,10 @@ export const mastra = new Mastra({
             // gravacao sincrona de hoje (processarSyncClickupJob propaga o
             // throw de salvarVotoLead, WR-03 — o catch abaixo mapeia
             // autz/infra em qualquer um dos dois caminhos).
-            const dados = { taskId, assigneeId: assignee, voto };
+            // `operador` viaja junto pro job poder ATRIBUIR a declaração a quem a colheu
+            // (votos_ligacao). Esta rota sempre soube quem marcou — usava `sess.usuario` só
+            // para autorizar e descartava, e era por isso que o ranking publicava 0 votos.
+            const dados = { taskId, assigneeId: assignee, voto, operador: sess.usuario };
             const { enfileirado } = await enfileirarSyncClickup(dados);
             if (!enfileirado) {
               await processarSyncClickupJob(dados);

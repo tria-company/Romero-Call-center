@@ -34,6 +34,7 @@ import {
   PAINEL_MAX_PAGINAS,
 } from './config.ts';
 import { CAMPOS_LEADS, OPCOES_LEADS, CAMPOS_LIGACOES, listarTasks, lerAtendeu, type TaskClickUp } from './clickup.ts';
+import { contarVotosPorOperador } from './supabase.ts';
 import { fetchTimeout } from './http.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
@@ -311,6 +312,43 @@ function preenchido(task: TaskClickUp, fieldId: string): boolean {
 }
 
 /**
+ * A task foi DISCADA, ou só está na fila esperando?
+ *
+ * Esta é a distinção que faltava e que fazia o painel publicar 4,4x o número real. Task da
+ * Lista 02 NÃO é ligação: ela nasce quando o lead entra na fila do dia, já com o campo
+ * OPERADOR preenchido pelo processo que cria o lote — e o painel contava cada uma como uma
+ * ligação feita. Medido em 20/08: 1.449 tasks, das quais só 328 tinham INICIO. O caso
+ * extremo era uma telefonista com 80 tasks e ZERO discagens, publicada como "80 ligações".
+ *
+ * `INICIO` é o carimbo que `iniciarLigacao` grava no clique em "Ligar" (clickup.ts) — a
+ * prova de discagem. Aceitamos TAMBÉM desfecho ou duração porque existe chamada que não
+ * passou por essa rota (a inbound do WhatsApp nasce já atendida): medido, 25 das 89
+ * atendidas não têm INICIO. Sem esses dois, a conta perderia atendimento real e
+ * `contatos` passaria de `ligacoes`.
+ *
+ * MORA NO MÓDULO, não dentro de uma das funções, porque o Início e a Central precisam da
+ * MESMA definição — foi exatamente por terem contas diferentes com o mesmo nome que as
+ * duas telas publicaram "taxa de atendimento" a 23x de distância.
+ */
+function ligacaoDiscada(t: TaskClickUp): boolean {
+  return (
+    preenchido(t, CAMPOS_LIGACOES.INICIO) ||
+    preenchido(t, CAMPOS_LIGACOES.ATENDEU) ||
+    preenchido(t, CAMPOS_LIGACOES.DURACAO)
+  );
+}
+
+/**
+ * Dia da ligação = dia em que foi DISCADA (INICIO), não em que a task foi criada. O lote do
+ * dia seguinte nasce de madrugada; usar `date_created` jogava a produção para o dia da
+ * criação do lote, não para o dia em que a telefonista trabalhou. Sem INICIO (inbound),
+ * cai no `date_created`, que ali é o instante da chamada.
+ */
+function diaDaLigacao(t: TaskClickUp): string {
+  return diaDaTask(valorCampo(t, CAMPOS_LIGACOES.INICIO) ?? t.date_created) || diaDaTask(t.date_created);
+}
+
+/**
  * Lê a Lista 02 LIGAÇÕES inteira e resume. Hoje são 167 tasks = 2 páginas (~3,8s medidos),
  * então varrer é barato — e o cache absorve o custo. `PAINEL_MAX_PAGINAS` protege o dia em
  * que a lista crescer: acima do teto o retorno vem marcado `parcial`.
@@ -337,18 +375,25 @@ export async function resumoLigacoesAoVivo(): Promise<ResumoLigacoes> {
     page += 1;
   }
 
-  const deHoje = todas.filter((t) => diaDaTask(t.date_created) === hoje);
+  // DISCADAS, e pelo dia da DISCAGEM — mesma definição que a Central usa (`ligacaoDiscada`).
+  // Antes contava toda task criada no dia: o lote nasce de madrugada já com o nome da
+  // telefonista no campo Operador, então "Ligações hoje" publicava o TAMANHO DA FILA, não
+  // a produção. Medido em 20/08: 94 tasks criadas contra um punhado de fato discado.
+  const deHoje = todas.filter((t) => ligacaoDiscada(t) && diaDaLigacao(t) === hoje);
   const temDesfecho = (t: TaskClickUp) => preenchido(t, CAMPOS_LIGACOES.ATENDEU);
   const atendeuSim = (t: TaskClickUp) => temDesfecho(t) && lerAtendeu(t);
 
+  // "última às HH:MM" é a última DISCAGEM, não a última task criada pelo lote — senão o
+  // horário mostrado é o da geração do lote de madrugada.
   let ultimaEm: string | null = null;
   for (const t of todas) {
-    const n = Number(t.date_created);
+    if (!ligacaoDiscada(t)) continue;
+    const n = Number(valorCampo(t, CAMPOS_LIGACOES.INICIO) ?? t.date_created);
     if (n && (!ultimaEm || n > Number(ultimaEm))) ultimaEm = String(n);
   }
 
   return {
-    total: todas.length,
+    total: todas.filter(ligacaoDiscada).length,
     hoje: deHoje.length,
     atendidasHoje: deHoje.filter(atendeuSim).length,
     naoAtendidasHoje: deHoje.filter((t) => temDesfecho(t) && !lerAtendeu(t)).length,
@@ -404,9 +449,12 @@ export interface TelefonistaCampanha {
   id: number;
   nome: string;
   turno: string;
+  /** Ligações DISCADAS (com prova de chamada). NÃO é o total de tasks do operador. */
   lig: number;
+  /** Leads atribuídos e ainda não discados. `lig + fila` = tudo que caiu na mão dele. */
+  fila: number;
   cont: number;
-  conv: number;   // % de conversão = contatos / ligações
+  conv: number;   // % de conversão = contatos / ligações DISCADAS
   /** Aderência ao script em PERCENTUAL (0–100), convertida da nota 0–10 do Agente de
    *  Análise. Vale 0 tanto para "avaliada com nota 0" quanto para "nunca avaliada" —
    *  quem separa os dois casos é `aderAmostra`, e a tela precisa olhar os dois. */
@@ -438,9 +486,12 @@ export interface ResumoCampanha {
    * número não sumir sem registro.
    */
   falhasTecnicas: { rotulo: string; n: number }[];
+  /** Ligações DISCADAS — com prova de chamada (INICIO, desfecho ou duração). */
   totalLigacoes: number;
+  /** Leads atribuídos e ainda NÃO discados. `totalLigacoes + totalNaFila` = tasks da Lista 02. */
+  totalNaFila: number;
   totalContatos: number;
-  /** Sem desfecho gravado: o denominador honesto da taxa depende disto. */
+  /** Sem desfecho gravado, entre as DISCADAS: o denominador honesto da taxa depende disto. */
   semDesfecho: number;
   /** Ligações sem OPERADOR — fora do ranking, mas dentro dos totais (ver nota). */
   semOperador: { lig: number; cont: number };
@@ -659,10 +710,13 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
   const contato = (t: TaskClickUp) => temDesfecho(t) && lerAtendeu(t);
   const comOperador = (t: TaskClickUp) => preenchido(t, CAMPOS_LIGACOES.OPERADOR);
 
-  // --- série diária ---
+  const discada = ligacaoDiscada; // fonte única, compartilhada com o Início
+
+  // --- série diária (só o que foi discado) ---
   const porDia = new Map<string, { ligacoes: number; contatos: number }>();
   for (const t of todas) {
-    const d = diaDaTask(t.date_created);
+    if (!discada(t)) continue;
+    const d = diaDaLigacao(t);
     if (!d) continue;
     const e = porDia.get(d) ?? { ligacoes: 0, contatos: 0 };
     e.ligacoes += 1;
@@ -673,6 +727,18 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([dia, v]) => ({ dia, ligacoes: v.ligacoes, contatos: v.contatos }));
 
+  // --- votos atribuídos ao operador que os colheu (Supabase, votos_ligacao) ---
+  //
+  // Fora do try/catch da varredura DE PROPÓSITO: voto fora do ar não pode derrubar a
+  // Central inteira, que é majoritariamente feita de ligação. Falhou (ou a migração 05
+  // ainda não foi aplicada) → mapa vazio → a coluna mostra 0 e o resto da tela vive.
+  let votosPorOperador = new Map<string, number>();
+  try {
+    votosPorOperador = await contarVotosPorOperador();
+  } catch (e) {
+    console.error('[painel] votos por operador indisponiveis (coluna fica zerada):', e instanceof Error ? e.message : String(e));
+  }
+
   // --- ranking por telefonista ---
   //
   // A chave do grupo é o login em MINÚSCULA, não o texto cru: medido em 19/08, o campo
@@ -682,7 +748,10 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
   // então a tela mostra como a operação escreve, sem inventar caixa.
   const SEM_OP = 'sem operador';
   interface Acc {
+    /** DISCADAS — as que têm prova de chamada. É isto que a tela chama de "ligações". */
     lig: number;
+    /** atribuídas e ainda NÃO discadas: o que sobrou da fila do dia. */
+    fila: number;
     cont: number;
     segs: number[];
     aders: number[];
@@ -695,9 +764,12 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
   for (const t of todas) {
     const bruto = String(valorCampo(t, CAMPOS_LIGACOES.OPERADOR) ?? '').trim();
     const chave = bruto.toLowerCase() || SEM_OP;
-    const a = porOp.get(chave) ?? { lig: 0, cont: 0, segs: [], aders: [], variantes: new Map<string, number>(), ini: Infinity, fim: 0 };
+    const a = porOp.get(chave) ?? { lig: 0, fila: 0, cont: 0, segs: [], aders: [], variantes: new Map<string, number>(), ini: Infinity, fim: 0 };
     if (bruto) a.variantes.set(bruto, (a.variantes.get(bruto) ?? 0) + 1);
-    a.lig += 1;
+    // Os dois contadores são exclusivos e somam o total de tasks do operador — quem
+    // conferir a conta consegue reconstruir o número antigo somando as duas colunas.
+    if (discada(t)) a.lig += 1;
+    else a.fila += 1;
     if (contato(t)) a.cont += 1;
     const seg = duracaoEmSegundos(valorCampo(t, CAMPOS_LIGACOES.DURACAO));
     if (seg) a.segs.push(seg);
@@ -710,8 +782,14 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
       const nota = Number(valorCampo(t, CAMPOS_LIGACOES.ADERENCIA_SCRIPT));
       if (Number.isFinite(nota)) a.aders.push(nota);
     }
-    const ts = Number(t.date_created);
-    if (ts) { a.ini = Math.min(a.ini, ts); a.fim = Math.max(a.fim, ts); }
+    // Janela de trabalho para `ligh`: só as DISCADAS, e pelo instante da DISCAGEM.
+    // Com `date_created` de todas, a janela virava o instante de criação do lote — as ~80
+    // tasks do dia nascem no mesmo segundo — e "ligações por hora" saía absurdo (medido:
+    // 23/h para quem tinha zero discagens).
+    if (discada(t)) {
+      const ts = Number(valorCampo(t, CAMPOS_LIGACOES.INICIO) ?? t.date_created);
+      if (ts) { a.ini = Math.min(a.ini, ts); a.fim = Math.max(a.fim, ts); }
+    }
     porOp.set(chave, a);
   }
   const balde = porOp.get(SEM_OP);
@@ -726,6 +804,7 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
         nome: nomeDeOperador(grafia),
         turno: '',
         lig: a.lig,
+        fila: a.fila,
         cont: a.cont,
         conv: a.lig ? Math.round((a.cont / a.lig) * 100) : 0,
         ader: aderenciaEmPct(a.aders),
@@ -736,7 +815,13 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
         // conjunto. A média ainda leva o outlier de 12.217s (3h23, ligação que nunca gravou
         // FIM) e publicava 47min de "tempo médio" para quem fez 9 ligações.
         tsec: mediana([...a.segs].sort((x, y) => x - y)),
-        votos: 0, // voto não é atribuível ao operador: o ClickUp não guarda quem o registrou
+        // Votos ATRIBUÍDOS (votos_ligacao): pessoas distintas que declararam "sim" na
+        // ligação deste operador. Antes era 0 fixo, com a nota "o ClickUp não guarda quem
+        // registrou" — verdade só para leitura direta: a rota /api/discador/voto SEMPRE
+        // soube quem marcou (sessão) e de qual ligação veio, e descartava os dois depois de
+        // autorizar. Agora grava, e o número vira medição em vez de lacuna.
+        // Zero aqui = "ninguém confirmou voto com este operador", não "não dá para saber".
+        votos: votosPorOperador.get(chave) ?? 0,
         ligh: Math.round((a.lig / horas) * 10) / 10,
       };
     })
@@ -757,9 +842,13 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     telefonistas,
     motivosNaoContato: motivos,
     falhasTecnicas: tecnicas,
-    totalLigacoes: todas.length,
+    // DISCADAS, não tasks. Era `todas.length` e publicava 4,4x o real (1.449 contra 328).
+    totalLigacoes: todas.filter(discada).length,
+    totalNaFila: todas.filter((t) => !discada(t)).length,
     totalContatos: todas.filter(contato).length,
-    semDesfecho: todas.filter((t) => !temDesfecho(t)).length,
+    // Sobre as DISCADAS: task que nunca foi discada não tem desfecho por definição, e
+    // contá-la aqui inflaria a lacuna com fila parada em vez de registro faltando.
+    semDesfecho: todas.filter((t) => discada(t) && !temDesfecho(t)).length,
     semOperador,
     desfechoDeApp: {
       comOperador: todas.filter(comOperador).length,

@@ -27,6 +27,7 @@ import {
   SUPABASE_TABLE_WEBHOOK_EVENTOS,
   SUPABASE_TABLE_LEADS_ESPELHO,
   SUPABASE_TABLE_MENSAGENS_WHATSAPP,
+  SUPABASE_TABLE_VOTOS_LIGACAO,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -1011,4 +1012,123 @@ export async function atualizarVotoEspelho(
   if (!res.ok && res.status !== 404) {
     throw new Error(`[supabase] HTTP ${res.status} ao atualizar voto no espelho`);
   }
+}
+
+// ===== Atribuição da declaração de voto ao operador (sql/escala/05_votos_ligacao.sql) =====
+//
+// O ClickUp guarda o voto na task do LEAD, que não tem operador nem data — por isso o
+// ranking publicava "0 votos" para todo mundo e o gráfico de acumulado ficava em branco.
+// A informação existe no instante da marcação (a rota sabe quem é o closer e de qual
+// ligação veio) e era descartada depois de autorizar. Estas duas funções a preservam.
+//
+// Mesma DIVERGÊNCIA CONSCIENTE do bloco de webhook acima: sem Supabase configurado é
+// no-op / vazio, nunca lança — a gravação do voto no ClickUp não pode falhar porque a
+// atribuição está indisponível. Erro de rede/HTTP com Supabase configurado LANÇA (WR-03),
+// e o chamador loga-e-segue.
+
+/** Uma declaração colhida: qual ligação, de quem, sobre qual candidato. */
+export interface VotoDeLigacao {
+  ligacaoTaskId: string;
+  leadTaskId: string;
+  /** login do closer que marcou (infraestrutura da campanha, não dado do lead) */
+  operador: string;
+  candidato: 'romero' | 'andressa';
+  escolha: 'sim' | 'nao' | 'naoDeclarou';
+  /** 'ligacao' = medido na hora; 'backfill' = reconstruído por regra (ver o script). */
+  origem?: 'ligacao' | 'backfill';
+}
+
+/**
+ * Grava (ou corrige) a atribuição de uma declaração de voto.
+ *
+ * UPSERT na chave (ligacao_task_id, candidato) via `resolution=merge-duplicates`: o closer
+ * corrigir a marcação na MESMA ligação atualiza a linha em vez de criar uma segunda —
+ * senão um lead com voto corrigido contaria duas vezes no ranking.
+ *
+ * LGPD: só login de operador e ids de task. Nenhum telefone, CPF ou nome sai daqui.
+ */
+export async function registrarVotoLigacao(v: VotoDeLigacao): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  const corpo = [{
+    ligacao_task_id: v.ligacaoTaskId,
+    lead_task_id: v.leadTaskId || '',
+    operador: v.operador,
+    candidato: v.candidato,
+    escolha: v.escolha,
+    origem: v.origem ?? 'ligacao',
+    registrado_em: new Date().toISOString(),
+  }];
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_VOTOS_LIGACAO}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(corpo),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao registrar voto da ligacao: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao registrar voto em ${SUPABASE_TABLE_VOTOS_LIGACAO}`);
+  }
+}
+
+/**
+ * Votos conquistados por operador — PESSOAS distintas que declararam 'sim'.
+ *
+ * Duas decisões que mudam o número, escritas aqui porque a tela não tem como adivinhá-las:
+ *
+ *  1. Só `escolha = 'sim'` conta. A coluna se chama "Votos": 'nao' e 'naoDeclarou' são
+ *     esforço de coleta, não voto conquistado. As três ficam gravadas — quem quiser medir
+ *     coleta lê a tabela inteira.
+ *
+ *  2. Um lead vale UM voto, creditado à declaração MAIS RECENTE. Sem isso, um lead
+ *     trabalhado por duas telefonistas somaria dois na tela e a coluna deixaria de fechar
+ *     com o total de apoiadores. "Mais recente" é o mesmo critério da fonte da verdade: no
+ *     ClickUp o voto atual do lead é o último gravado.
+ *
+ * Devolve mapa `operador (minúsculo) -> votos`. Vazio quando o Supabase não está
+ * configurado ou a tabela ainda não foi criada — a tela cai em "sem dados", não em zero.
+ */
+export async function contarVotosPorOperador(): Promise<Map<string, number>> {
+  const vazio = new Map<string, number>();
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return vazio;
+  const params = new URLSearchParams({
+    escolha: 'eq.sim',
+    select: 'lead_task_id,operador,registrado_em',
+    order: 'registrado_em.desc',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_VOTOS_LIGACAO}?${params.toString()}`, {
+      headers: { ...headers(), Range: '0-9999' },
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao contar votos por operador: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  // 404 = migração 05 ainda não aplicada. Degrada para vazio: o painel mostra "sem dados"
+  // na coluna em vez de derrubar a Central inteira por causa de uma tabela que falta.
+  if (res.status === 404) return vazio;
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao contar votos em ${SUPABASE_TABLE_VOTOS_LIGACAO}`);
+  }
+  const linhas = (await res.json()) as Array<{ lead_task_id?: string; operador?: string }>;
+  // `order=registrado_em.desc` + "primeiro que aparece vence" = a declaração mais recente
+  // de cada lead. Lead sem id (backfill que não resolveu) cai numa chave própria por linha,
+  // para não colapsar leads distintos num só.
+  const vistos = new Set<string>();
+  const contagem = new Map<string, number>();
+  for (let i = 0; i < linhas.length; i += 1) {
+    const lead = String(linhas[i].lead_task_id ?? '').trim() || `__sem_lead_${i}`;
+    if (vistos.has(lead)) continue;
+    vistos.add(lead);
+    const op = String(linhas[i].operador ?? '').trim().toLowerCase();
+    if (!op) continue;
+    contagem.set(op, (contagem.get(op) ?? 0) + 1);
+  }
+  return contagem;
 }

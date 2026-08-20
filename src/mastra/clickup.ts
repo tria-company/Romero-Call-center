@@ -1945,7 +1945,7 @@ export async function salvarVotoLead(
   taskId: string,
   assigneeIdEsperado: string,
   voto: { romero?: EscolhaVoto; andressa?: EscolhaVoto },
-): Promise<{ temLead: boolean }> {
+): Promise<{ temLead: boolean; leadId?: string }> {
   const task = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
   const leadId = await resolverLeadPelaTask(task);
   if (!leadId) return { temLead: false };
@@ -1955,7 +1955,10 @@ export async function salvarVotoLead(
   if (voto.andressa) {
     await setCustomField(leadId, CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA, OPCOES_LEADS[CAMPOS_LEADS.CONFIRMOU_VOTO_ANDRESSA][voto.andressa]);
   }
-  return { temLead: true };
+  // `leadId` sai junto para o chamador poder ATRIBUIR a declaração a quem a colheu
+  // (sync-clickup.ts → votos_ligacao). Aqui ele já foi resolvido e pago; devolvê-lo evita
+  // uma segunda resolução do mesmo lead só para registrar o crédito.
+  return { temLead: true, leadId };
 }
 
 /** Voto atual (manual) do lead por candidato — alimenta a validação humano×IA no processador (OPER-04b). */
