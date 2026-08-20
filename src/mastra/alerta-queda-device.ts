@@ -20,8 +20,16 @@
 export interface EstadoDeviceAlerta {
   /** true quando o device está atualmente considerado caído (não-'open'). */
   caido: boolean;
-  /** epoch ms do último alerta efetivamente disparado para este device (0 = nunca). */
+  /** epoch ms do último alerta de QUEDA efetivamente disparado (0 = nunca). Só
+   *  a queda atualiza este carimbo — a volta não mexe nele (o cooldown mede a
+   *  janela entre QUEDAS consecutivas). */
   ultimoAlertaTs: number;
+  /** true quando a queda DESTE episódio (caído em aberto) foi efetivamente
+   *  anunciada no grupo. Vira false quando o device está estável 'open' ou
+   *  quando a queda foi suprimida pelo cooldown (CASO 2b). A volta só é
+   *  anunciada se a queda correspondente foi — evita "🟢 reconectou" sem o
+   *  "🔴 caiu" anterior. */
+  quedaAnunciada: boolean;
 }
 
 /** Decisão retornada pela função pura de edge-trigger. */
@@ -34,7 +42,7 @@ export interface DecisaoAlertaDevice {
   novoEstado: EstadoDeviceAlerta;
 }
 
-const ESTADO_INICIAL: EstadoDeviceAlerta = { caido: false, ultimoAlertaTs: 0 };
+const ESTADO_INICIAL: EstadoDeviceAlerta = { caido: false, ultimoAlertaTs: 0, quedaAnunciada: false };
 
 /**
  * Decide se a transição de conectividade de um device deve disparar alerta
@@ -43,7 +51,7 @@ const ESTADO_INICIAL: EstadoDeviceAlerta = { caido: false, ultimoAlertaTs: 0 };
  * da janela).
  *
  * @param estadoAtual Estado anterior deste device (undefined = device nunca
- *   visto antes; tratado como { caido:false, ultimoAlertaTs:0 }).
+ *   visto antes; tratado como { caido:false, ultimoAlertaTs:0, quedaAnunciada:false }).
  * @param conectado true quando o evento atual reporta o device 'open';
  *   false para qualquer outro status (hibernating/close/connecting/etc).
  * @param agora epoch ms do evento atual (injetado pelo caller — sem Date.now() aqui).
@@ -59,8 +67,9 @@ export function decidirAlertaQuedaDevice(
 
   if (!estado.caido && conectado) {
     // CASO 1 (1º 'open' de device novo) / CASO 5 (heartbeat 'open' repetido,
-    // já conectado): nunca dispara — não há transição.
-    return { disparar: false, tipo: null, novoEstado: { caido: false, ultimoAlertaTs: estado.ultimoAlertaTs } };
+    // já conectado): nunca dispara — não há transição. Device estável 'open'
+    // reseta quedaAnunciada (o próximo episódio de queda começa do zero).
+    return { disparar: false, tipo: null, novoEstado: { caido: false, ultimoAlertaTs: estado.ultimoAlertaTs, quedaAnunciada: false } };
   }
 
   if (!estado.caido && !conectado) {
@@ -68,18 +77,27 @@ export function decidirAlertaQuedaDevice(
     const dentroDoCooldown = agora - estado.ultimoAlertaTs < cooldownMs;
     if (dentroDoCooldown) {
       // CASO 2b: marca caído mas NÃO dispara (ainda dentro do cooldown do
-      // alerta anterior — mesmo racional do anti-flap do chip).
-      return { disparar: false, tipo: null, novoEstado: { caido: true, ultimoAlertaTs: estado.ultimoAlertaTs } };
+      // alerta anterior — mesmo racional do anti-flap do chip). Como a queda
+      // NÃO foi anunciada, quedaAnunciada=false: a volta futura também não
+      // anuncia (evita "🟢 reconectou" órfão).
+      return { disparar: false, tipo: null, novoEstado: { caido: true, ultimoAlertaTs: estado.ultimoAlertaTs, quedaAnunciada: false } };
     }
-    // CASO 2: fora do cooldown — dispara queda.
-    return { disparar: true, tipo: 'queda', novoEstado: { caido: true, ultimoAlertaTs: agora } };
+    // CASO 2: fora do cooldown — dispara queda e marca como anunciada.
+    return { disparar: true, tipo: 'queda', novoEstado: { caido: true, ultimoAlertaTs: agora, quedaAnunciada: true } };
   }
 
   if (estado.caido && !conectado) {
-    // CASO 3 (heartbeat caído repetido): não re-dispara.
-    return { disparar: false, tipo: null, novoEstado: { caido: true, ultimoAlertaTs: estado.ultimoAlertaTs } };
+    // CASO 3 (heartbeat caído repetido): não re-dispara — preserva tudo
+    // (inclusive quedaAnunciada, pra a volta saber se deve anunciar).
+    return { disparar: false, tipo: null, novoEstado: { caido: true, ultimoAlertaTs: estado.ultimoAlertaTs, quedaAnunciada: estado.quedaAnunciada } };
   }
 
-  // estado.caido && conectado — CASO 4 (reconexão): dispara volta e reseta.
-  return { disparar: true, tipo: 'volta', novoEstado: { caido: false, ultimoAlertaTs: agora } };
+  // estado.caido && conectado — CASO 4 (reconexão): só anuncia a volta se a
+  // queda DESTE episódio foi efetivamente anunciada; senão reseta em silêncio.
+  // ultimoAlertaTs é preservado nos dois casos (o cooldown mede só entre
+  // QUEDAS — a volta não mexe nele).
+  if (estado.quedaAnunciada) {
+    return { disparar: true, tipo: 'volta', novoEstado: { caido: false, ultimoAlertaTs: estado.ultimoAlertaTs, quedaAnunciada: false } };
+  }
+  return { disparar: false, tipo: null, novoEstado: { caido: false, ultimoAlertaTs: estado.ultimoAlertaTs, quedaAnunciada: false } };
 }
