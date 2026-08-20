@@ -436,6 +436,25 @@ export const SUPABASE_TABLE_MENSAGENS_WHATSAPP =
 export const SUPABASE_TABLE_VOTOS_LIGACAO =
   process.env.SUPABASE_TABLE_VOTOS_LIGACAO || 'votos_ligacao';
 
+// ===== Fase 17-A — inversão Supabase-fonte-da-verdade: espelho p/ LEITURA futura =====
+//
+// Tabelas novas de sql/escala/06..11 (.planning/arquitetura/
+// inversao-supabase-fonte-da-verdade.md §2). Mesmo padrão de
+// SUPABASE_TABLE_LEADS_ESPELHO: default SEM prefixo (produção); homolog
+// sobrescreve com o prefixo hml_ via deploy/homolog.env. NADA lê estas
+// tabelas ainda nesta fase — defaults sensatos, sem console.warn.
+export const SUPABASE_TABLE_LIGACOES = process.env.SUPABASE_TABLE_LIGACOES || 'ligacoes';
+export const SUPABASE_TABLE_AUDIOS_ENVIOS = process.env.SUPABASE_TABLE_AUDIOS_ENVIOS || 'audios_envios';
+export const SUPABASE_TABLE_CLICKUP_OUTBOX = process.env.SUPABASE_TABLE_CLICKUP_OUTBOX || 'clickup_outbox';
+export const SUPABASE_TABLE_CLICKUP_CAMPO_MAPA =
+  process.env.SUPABASE_TABLE_CLICKUP_CAMPO_MAPA || 'clickup_campo_mapa';
+export const SUPABASE_TABLE_NOTAS = process.env.SUPABASE_TABLE_NOTAS || 'notas';
+
+// Bucket do Supabase Storage p/ o store canônico de gravações (§2.6) —
+// consumido a partir do plano 17-05. Default sensato ('gravacoes').
+export const SUPABASE_STORAGE_BUCKET_GRAVACOES =
+  process.env.SUPABASE_STORAGE_BUCKET_GRAVACOES || 'gravacoes';
+
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook
