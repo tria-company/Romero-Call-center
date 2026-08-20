@@ -34,6 +34,7 @@ import {
   PAINEL_MAX_PAGINAS,
 } from './config.ts';
 import { CAMPOS_LEADS, OPCOES_LEADS, CAMPOS_LIGACOES, listarTasks, lerAtendeu, type TaskClickUp } from './clickup.ts';
+import { contarVotosPorOperador } from './supabase.ts';
 import { fetchTimeout } from './http.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
@@ -726,6 +727,18 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([dia, v]) => ({ dia, ligacoes: v.ligacoes, contatos: v.contatos }));
 
+  // --- votos atribuídos ao operador que os colheu (Supabase, votos_ligacao) ---
+  //
+  // Fora do try/catch da varredura DE PROPÓSITO: voto fora do ar não pode derrubar a
+  // Central inteira, que é majoritariamente feita de ligação. Falhou (ou a migração 05
+  // ainda não foi aplicada) → mapa vazio → a coluna mostra 0 e o resto da tela vive.
+  let votosPorOperador = new Map<string, number>();
+  try {
+    votosPorOperador = await contarVotosPorOperador();
+  } catch (e) {
+    console.error('[painel] votos por operador indisponiveis (coluna fica zerada):', e instanceof Error ? e.message : String(e));
+  }
+
   // --- ranking por telefonista ---
   //
   // A chave do grupo é o login em MINÚSCULA, não o texto cru: medido em 19/08, o campo
@@ -802,7 +815,13 @@ export async function resumoCampanhaAoVivo(): Promise<ResumoCampanha> {
         // conjunto. A média ainda leva o outlier de 12.217s (3h23, ligação que nunca gravou
         // FIM) e publicava 47min de "tempo médio" para quem fez 9 ligações.
         tsec: mediana([...a.segs].sort((x, y) => x - y)),
-        votos: 0, // voto não é atribuível ao operador: o ClickUp não guarda quem o registrou
+        // Votos ATRIBUÍDOS (votos_ligacao): pessoas distintas que declararam "sim" na
+        // ligação deste operador. Antes era 0 fixo, com a nota "o ClickUp não guarda quem
+        // registrou" — verdade só para leitura direta: a rota /api/discador/voto SEMPRE
+        // soube quem marcou (sessão) e de qual ligação veio, e descartava os dois depois de
+        // autorizar. Agora grava, e o número vira medição em vez de lacuna.
+        // Zero aqui = "ninguém confirmou voto com este operador", não "não dá para saber".
+        votos: votosPorOperador.get(chave) ?? 0,
         ligh: Math.round((a.lig / horas) * 10) / 10,
       };
     })

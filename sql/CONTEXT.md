@@ -16,6 +16,7 @@ Escala** em [escala/](escala/).
 |---|---|
 | [escala/01_webhook_eventos.sql](escala/01_webhook_eventos.sql) | Tabela `webhook_eventos` (uuid pk, payload jsonb, status, índices) — durabilidade do evento cru do webhook Wavoip antes de processar (FILA-01). |
 | [escala/03_mensagens_whatsapp.sql](escala/03_mensagens_whatsapp.sql) | Tabela `mensagens_whatsapp` (id text pk, lead_task_id, telefone_canonico, dois índices) — conversa WhatsApp por lead (Fase 13): read-model rápido da UI + durabilidade das mensagens do webhook Evolution. |
+| [escala/05_votos_ligacao.sql](escala/05_votos_ligacao.sql) | Tabela `votos_ligacao` (pk ligacao_task_id+candidato, três índices) — atribui a declaração de voto ao operador que a colheu, com data. O ClickUp guarda o voto no LEAD, sem operador e sem data; por isso o ranking publicava "0 votos". Nada muda no ClickUp. `origem` separa o que foi medido na hora (`ligacao`) do que foi reconstruído por regra (`backfill`, via [scripts/backfill-votos-ligacao.mjs](../scripts/backfill-votos-ligacao.mjs)). |
 
 ## Como aplicar
 

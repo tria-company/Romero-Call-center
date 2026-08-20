@@ -21,6 +21,7 @@
 
 import type { DadosJobSyncClickup } from './fila.ts';
 import { salvarVotoLead } from './clickup.ts';
+import { registrarVotoLigacao } from './supabase.ts';
 import { registrarErroEtapa, registrarSucessoEtapa } from './metricas.ts';
 
 /**
@@ -35,10 +36,49 @@ export async function processarSyncClickupJob(dados: DadosJobSyncClickup): Promi
   // engolir o throw que o BullMQ usa pro retry/DLQ (ver cabecalho do
   // arquivo). Nenhum voto/telefone e passado ao coletor, so a etapa literal.
   try {
-    await salvarVotoLead(dados.taskId, dados.assigneeId, dados.voto);
+    const { leadId } = await salvarVotoLead(dados.taskId, dados.assigneeId, dados.voto);
     registrarSucessoEtapa('sync');
+    // ATRIBUIÇÃO (votos_ligacao): quem colheu a declaração e quando. Só aqui a informação
+    // existe — o campo de voto no ClickUp fica no LEAD, que não tem operador nem data.
+    //
+    // DEPOIS do registrarSucessoEtapa e num try/catch próprio DE PROPÓSITO: o voto no
+    // ClickUp já está gravado neste ponto, e ele é a fonte da verdade. Deixar um erro do
+    // Supabase escapar daqui faria o BullMQ reprocessar o job e regravar o voto por causa
+    // de uma falha na CONTABILIDADE — troca um dado certo por um retry inútil. Loga-e-
+    // segue, mesmo critério do write-through do espelho na rota de voto.
+    await atribuirVoto(dados, leadId);
   } catch (e) {
     registrarErroEtapa('sync');
     throw e;
+  }
+}
+
+/**
+ * Grava uma linha em `votos_ligacao` por candidato marcado. Never-throws: sem operador no
+ * job (job antigo, enfileirado antes do campo existir) é no-op silencioso; erro de
+ * Supabase vira log. LGPD: só login e ids de task, nunca telefone/CPF/nome.
+ */
+async function atribuirVoto(dados: DadosJobSyncClickup, leadId: string | undefined): Promise<void> {
+  if (!dados.operador) return;
+  const candidatos: Array<['romero' | 'andressa', 'sim' | 'nao' | 'naoDeclarou' | undefined]> = [
+    ['romero', dados.voto.romero],
+    ['andressa', dados.voto.andressa],
+  ];
+  for (const [candidato, escolha] of candidatos) {
+    if (!escolha) continue;
+    try {
+      await registrarVotoLigacao({
+        ligacaoTaskId: dados.taskId,
+        leadTaskId: leadId ?? '',
+        operador: dados.operador,
+        candidato,
+        escolha,
+      });
+    } catch (e) {
+      console.error(
+        `[sync] atribuicao do voto (${candidato}) falhou — o voto no ClickUp esta gravado:`,
+        e instanceof Error ? e.message : String(e),
+      );
+    }
   }
 }

@@ -55,6 +55,10 @@ export interface DadosJobSyncClickup {
   taskId: string;
   assigneeId: string;
   voto: { romero?: 'sim' | 'nao' | 'naoDeclarou'; andressa?: 'sim' | 'nao' | 'naoDeclarou' };
+  /** Login do closer que marcou — vira o crédito da declaração em `votos_ligacao`.
+   *  OPCIONAL de propósito: job já enfileirado ANTES deste campo existir continua
+   *  parseável e grava o voto igual, só sem atribuição. */
+  operador?: string;
 }
 
 export type NomeJob = 'record' | 'falha-terminal' | 'sync-clickup';

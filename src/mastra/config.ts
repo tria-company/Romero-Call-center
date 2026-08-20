@@ -412,6 +412,11 @@ export const SUPABASE_TABLE_LEADS_ESPELHO =
 export const SUPABASE_TABLE_MENSAGENS_WHATSAPP =
   process.env.SUPABASE_TABLE_MENSAGENS_WHATSAPP || 'mensagens_whatsapp';
 
+// Atribuição da declaração de voto ao operador que a colheu (sql/escala/05_votos_ligacao.sql).
+// O ClickUp guarda o voto no LEAD, sem operador e sem data; esta tabela guarda o EVENTO.
+export const SUPABASE_TABLE_VOTOS_LIGACAO =
+  process.env.SUPABASE_TABLE_VOTOS_LIGACAO || 'votos_ligacao';
+
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook
