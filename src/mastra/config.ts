@@ -192,6 +192,14 @@ export const CLICKUP_LIST_AUDIOS = process.env.CLICKUP_LIST_AUDIOS || '100032000
 // continuam nos 15s globais.
 export const CLICKUP_TIMEOUT_MS = Number(process.env.CLICKUP_TIMEOUT_MS) || 60000;
 
+// Trava de ESCRITA no ClickUp. Default `true` = comportamento de produção
+// (escreve normalmente). O ambiente de HOMOLOG aponta para o ClickUp de
+// produção só-leitura: setar CLICKUP_ESCRITA_HABILITADA=false faz o choke
+// point fetchClickUp (clickup.ts) BLOQUEAR todo verbo mutante (POST/PUT/DELETE)
+// antes de sair — nenhum voto/desfecho/task de homolog toca uma task real.
+// Prod-safe por design: só desativa quando explicitamente setado como 'false'.
+export const CLICKUP_ESCRITA_HABILITADA = process.env.CLICKUP_ESCRITA_HABILITADA !== 'false';
+
 // Workspace (team) cujos MEMBROS aparecem no painel de admin (dropdown do
 // vínculo clickup_member_id). Default = Gabinete 509 (9014971829, a mesma das
 // listas). O token enxerga várias workspaces; sem esse filtro o painel mistura
@@ -548,6 +556,18 @@ export const METRICAS_PRESENCA_TTL_MS = Number(process.env.METRICAS_PRESENCA_TTL
 export const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
 export const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 export const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
+
+// ===== Reservas de envio — FAILOVER de instância (2026-08-20) =====
+// Ordem do gestor: "se o número cair, outro que não está conectado com
+// ninguém vai pro lugar; se não tiver nenhum, aí manda mensagem no WhatsApp".
+// Lista em ORDEM DE PRIORIDADE, ex.: "reserva-1,reserva-2" (mesma apikey
+// global da Evolution). Vazio = sem reserva → comportamento atual (queda da
+// principal alerta o grupo direto). As instâncias reserva precisam estar
+// CRIADAS na Evolution e com o chip conectado (QR) pra assumirem.
+export const EVOLUTION_INSTANCES_RESERVA = (process.env.EVOLUTION_INSTANCES_RESERVA || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // Fail-closed (mesmo espírito de WAVOIP_WEBHOOK_TOKEN): D-08 exige que o envio
 // falhe alto quando mal-configurado, nunca desabilite silencioso.
