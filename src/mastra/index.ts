@@ -112,6 +112,13 @@ import {
   mapaConversaPorLead,
   type ResumoConversaLead,
 } from './clickup';
+// Cache resiliente do detalhe do lead (quick 260819-v2a, espelho de
+// filaMem/buscarFilaResiliente acima): stale-while-revalidate + dedup em-voo
+// num módulo folha próprio (não em index.ts) para `gerar-dossie.ts` poder
+// invalidar sem criar ciclo de import com este arquivo. `lerLeadDetalhe`
+// (importado acima, de './clickup') continua sendo o reader default por
+// dentro do novo módulo.
+import { lerLeadDetalheResiliente, derrubarLeadDetalheMem } from './lead-detalhe-cache.ts';
 // Client Evolution API (Fase 12 Plano 01, D-06/D-08): choke-point único de
 // envio/status — enviarAudio LANÇA em falha (nunca 200 silencioso).
 // numeroExisteNoWhatsapp (quick 260818-mv2): pré-check ANTES de enviarAudio.
@@ -1437,7 +1444,7 @@ export const mastra = new Mastra({
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const leadTaskId = c.req.param('leadTaskId');
           try {
-            const detalhe = await lerLeadDetalhe(leadTaskId);
+            const detalhe = await lerLeadDetalheResiliente(leadTaskId);
             return c.json(detalhe);
           } catch (e) {
             console.error('[discador] erro ao ler detalhe do lead:', e instanceof Error ? e.message : String(e));
@@ -1484,6 +1491,8 @@ export const mastra = new Mastra({
             } catch (e) {
               console.error('[espelho] write-through do voto falhou (segue):', e instanceof Error ? e.message : String(e));
             }
+            // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
+            derrubarLeadDetalheMem(leadTaskId);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao gravar voto do lead:', e instanceof Error ? e.message : String(e));
@@ -1514,6 +1523,8 @@ export const mastra = new Mastra({
             // por taskId cru, sem validar a lista).
             await validarLeadDaLista01(leadTaskId);
             await comentarTask(leadTaskId, texto);
+            // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
+            derrubarLeadDetalheMem(leadTaskId);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao anotar no lead:', e instanceof Error ? e.message : String(e));

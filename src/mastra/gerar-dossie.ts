@@ -46,6 +46,11 @@ import {
 import { montarPromptDossie } from './dossie.ts';
 import { chamarLLM } from './llm.ts';
 import { SUPABASE_COL_ID } from './config.ts';
+// Cache resiliente do detalhe do lead (quick 260819-v2a): invalida a cópia em
+// memória após gravar o dossiê (read-your-writes, D-2/T-v2a-02). Módulo folha
+// próprio — não importa nada de `index.ts`, então importar daqui não cria
+// ciclo (index → ... → processador → gerar-dossie → index).
+import { derrubarLeadDetalheMem } from './lead-detalhe-cache.ts';
 
 /**
  * Lê um custom field bruto da própria task do lead por field-id (D-07). Usado
@@ -185,5 +190,9 @@ export async function regenerarDossieDoLead(
 
   // D-P4-01/05: grava as 6 seções na description — sempre sobrescreve.
   await atualizarTask(leadTaskId, { description: dossieMarkdown });
+  // D-2/T-v2a-02: invalida a cópia em memória do detalhe do lead — a próxima
+  // leitura vem fresca (read-your-writes). O dryRun já retornou acima
+  // (linha ~184), então nunca invalida em dryRun.
+  derrubarLeadDetalheMem(leadTaskId);
   return dossieMarkdown;
 }
