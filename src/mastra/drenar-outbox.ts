@@ -20,19 +20,31 @@
 // 19-07/08, quando `enfileirarDrenoOutbox` retorna `{ enfileirado:false }` —
 // sem Redis, dev/homolog).
 //
-// Erro numa op propaga (throw) — NÃO segue para as próximas ops daquele
-// aggregate (preserva ordem); o caller (BullMQ ou o fallback inline) decide
-// o retry/backoff (D-08). Adiar (taskId ainda null) NÃO é erro — é
-// backpressure de ordem, contado em `adiadas`.
+// Erro numa op BLOQUEANTE propaga (throw) — NÃO segue para as próximas ops
+// daquele aggregate (preserva ordem); o caller (BullMQ ou o fallback inline)
+// decide o retry/backoff (D-08). Erro numa op NÃO-bloqueante
+// (`bloqueante=false`, `comentar`/`anexar`) NÃO propaga — cai em DLQ por-linha
+// (`marcarDlqLinha`, 19-06/R6) e o loop CONTINUA para a próxima linha, sem
+// travar o `seq` das ops bloqueantes. Adiar (taskId ainda null OU rate
+// limiter do dreno bloqueado) NÃO é erro — é backpressure (de ordem ou de
+// teto global), contado em `adiadas`, e INTERROMPE o loop (break) — nunca
+// pula a linha bloqueada para preservar a ordem.
+//
+// Rate limiter GLOBAL fail-CLOSED (19-06/R9, `rate-limiter-dreno.ts`): ANTES
+// de cada saída ao ClickUp (cada primitiva por-ID dentro de `processarLinha`)
+// o dreno adquire um token do balde central; sem token (Redis fora ou balde
+// vazio além do teto de espera) a linha ADIA — nunca deixa passar sem o teto
+// global, ao contrário do rate-limiter-clickup.ts (fail-open) que continua na
+// frente de `fetchClickUp` como segunda camada.
 //
 // LGPD/WR-01: NUNCA loga payload/telefone/URL — só `aggregateId`, `linha.op`,
 // `linha.dedup_key`, `linha.status` e a classe/mensagem do erro (propagada
 // pelas primitivas de clickup.ts, que já seguem essa disciplina).
 //
-// FORA DE ESCOPO deste plano (débitos documentados, não implementados aqui):
-// head-of-line (alarme de idade + `marcar_orphan` + DLQ por-linha) é 19-06;
-// rate limiter fail-CLOSED com teto global é 19-06; o `op='anexar'` (áudios)
-// é Phase 20 — tratado abaixo como não-bloqueante/pulado para não travar.
+// FORA DE ESCOPO deste plano (débito documentado, não implementado aqui): o
+// `op='anexar'` (áudios) segue como não-bloqueante/pulada — o store canônico
+// de mídia é Phase 20; hoje não faz I/O nenhum ao ClickUp (não passa pelo
+// rate limiter nem pode cair em DLQ, porque não lança).
 
 import { CAMPOS_LIGACOES, CLICKUP_LIST_LIGACOES } from './clickup.ts';
 import { criarTask, atualizarTask, setCustomField, comentarTask, fecharLigacao } from './clickup.ts';
@@ -41,8 +53,10 @@ import {
   resolverClickupTaskId,
   backfillClickupTaskId,
   marcarEnviado,
+  marcarDlqLinha,
   type LinhaOutbox,
 } from './outbox-repo.ts';
+import { adquirirTokenDreno } from './rate-limiter-dreno.ts';
 
 /**
  * Monta o body de `criarTask` a partir do payload de uma linha
@@ -78,18 +92,20 @@ function montarBodyDaTask(payload: Record<string, unknown>): {
 
 /**
  * Drena o `clickup_outbox` de UM `aggregate_id`, em ordem de `seq`. Retorna
- * quantas linhas foram enviadas e quantas ficaram adiadas (backpressure de
- * ordem, não erro). LANÇA quando uma op BLOQUEANTE falha (a linha continua
- * `pendente`/`erro` — o retry/backoff fica a cargo do BullMQ, D-08, ou do
- * fallback inline do caller).
+ * quantas linhas foram enviadas, quantas ficaram adiadas (backpressure de
+ * ordem OU de rate limiter, não erro) e quantas caíram em DLQ por-linha
+ * (op não-bloqueante que falhou, 19-06/R6). LANÇA quando uma op BLOQUEANTE
+ * falha (a linha continua `pendente`/`erro` — o retry/backoff fica a cargo
+ * do BullMQ, D-08, ou do fallback inline do caller).
  */
 export async function processarDrenoOutboxJob(
   aggregateId: number,
-): Promise<{ enviadas: number; adiadas: number }> {
+): Promise<{ enviadas: number; adiadas: number; emDlq: number }> {
   const linhas = await proximasPendentes(aggregateId);
   let enviadas = 0;
   let adiadas = 0;
-  if (linhas.length === 0) return { enviadas, adiadas };
+  let emDlq = 0;
+  if (linhas.length === 0) return { enviadas, adiadas, emDlq };
 
   const aggregate = linhas[0].aggregate;
   // O clickup_task_id já resolvido (se `criar_task` já rodou numa passada
@@ -98,22 +114,60 @@ export async function processarDrenoOutboxJob(
   let taskId: string | null = aggregate === 'ligacao' ? await resolverClickupTaskId(aggregate, aggregateId) : null;
 
   for (const linha of linhas) {
-    if (!(await processarLinha(linha, aggregateId, taskId, (novoTaskId) => (taskId = novoTaskId)))) {
+    let executada: boolean;
+    try {
+      executada = await processarLinha(linha, aggregateId, taskId, (novoTaskId) => (taskId = novoTaskId));
+    } catch (e) {
+      if (linha.bloqueante === false) {
+        // DLQ por-linha (R6): op NÃO-bloqueante falhou — não trava o
+        // aggregate, o seq das ops bloqueantes segue na próxima iteração.
+        const msg = e instanceof Error ? e.message : String(e);
+        await marcarDlqLinha(linha.id, msg);
+        console.warn(
+          `[drenar-outbox] op não-bloqueante '${linha.op}' falhou — DLQ por-linha (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
+        );
+        emDlq++;
+        continue;
+      }
+      throw e; // op bloqueante: propaga (BullMQ conta a tentativa/backoff), como no 19-03
+    }
+
+    if (!executada) {
       adiadas++;
-      break; // preserva ordem: nunca pula a linha bloqueada para a próxima
+      break; // preserva ordem: taskId ainda não resolvido OU rate limiter do dreno bloqueado (fail-CLOSED)
     }
     await marcarEnviado(linha.id);
     enviadas++;
   }
 
-  return { enviadas, adiadas };
+  return { enviadas, adiadas, emDlq };
+}
+
+/**
+ * Adquire o token do dreno (`rate-limiter-dreno.ts`, fail-CLOSED, 19-06/R9)
+ * ANTES de uma saída ao ClickUp. `false` = BLOQUEADO (Redis fora ou balde
+ * global esgotado) — o caller (`processarLinha`) trata exatamente como o
+ * adiar por ordem (`taskIdAtual` ainda null): retorna `false`, o loop de
+ * `processarDrenoOutboxJob` interrompe (break) e a linha permanece pendente.
+ */
+async function garantirTokenDreno(linha: LinhaOutbox): Promise<boolean> {
+  const permitido = await adquirirTokenDreno();
+  if (!permitido) {
+    console.warn(
+      `[drenar-outbox] rate limiter do dreno bloqueado (fail-CLOSED) — adiando (dedup_key=${linha.dedup_key})`,
+    );
+  }
+  return permitido;
 }
 
 /**
  * Processa UMA linha do outbox. Retorna `true` quando a op foi executada
  * (o caller marca `enviado` em seguida) ou `false` quando a linha precisou
- * ADIAR (taskId ainda null) — o loop do caller para ali (preserva ordem).
- * Erro numa op (bloqueante ou não) PROPAGA (throw) — nunca engole.
+ * ADIAR — `taskId` ainda null (backpressure de ordem) OU o rate limiter do
+ * dreno bloqueou (backpressure de teto global, fail-CLOSED, 19-06/R9) — o
+ * loop do caller para ali (preserva ordem). Erro numa op (bloqueante ou não)
+ * PROPAGA (throw) — nunca engole; `processarDrenoOutboxJob` decide DLQ
+ * vs. propagação conforme `linha.bloqueante`.
  */
 async function processarLinha(
   linha: LinhaOutbox,
@@ -125,6 +179,7 @@ async function processarLinha(
 
   switch (linha.op) {
     case 'criar_task': {
+      if (!(await garantirTokenDreno(linha))) return false;
       const nova = await criarTask(CLICKUP_LIST_LIGACOES, montarBodyDaTask(payload));
       if (!nova?.id) {
         throw new Error(
@@ -145,6 +200,7 @@ async function processarLinha(
           `[drenar-outbox] set_campo com campo lógico desconhecido (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
         );
       }
+      if (!(await garantirTokenDreno(linha))) return false;
       await setCustomField(taskIdAtual, fieldId, payload.valor);
       return true;
     }
@@ -157,6 +213,7 @@ async function processarLinha(
           `[drenar-outbox] set_status sem status no payload (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
         );
       }
+      if (!(await garantirTokenDreno(linha))) return false;
       await atualizarTask(taskIdAtual, { status });
       return true;
     }
@@ -164,12 +221,14 @@ async function processarLinha(
     case 'comentar': {
       if (!taskIdAtual) return false;
       const texto = typeof payload.texto === 'string' ? payload.texto : '';
+      if (!(await garantirTokenDreno(linha))) return false;
       await comentarTask(taskIdAtual, texto);
       return true;
     }
 
     case 'fechar': {
       if (!taskIdAtual) return false;
+      if (!(await garantirTokenDreno(linha))) return false;
       await fecharLigacao(taskIdAtual);
       return true;
     }

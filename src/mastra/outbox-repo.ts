@@ -208,3 +208,155 @@ export async function marcarErro(
     throw new Error(`[outbox-repo] HTTP ${res.status} ao marcarErro id=${id}`);
   }
 }
+
+// ===== Fase B, Phase 19 Plano 06 — head-of-line + DLQ por-linha (ESCRITA-03,
+// design §3.2/Riscos R6) =====
+//
+// Um `criar_task` que falha para sempre (task deletada, lista movida, payload
+// rejeitado) bloqueava indefinidamente TODO `set_campo`/`set_status`/`fechar`
+// posterior daquele aggregate (o `clickup_task_id` nunca resolve) — o espelho
+// ClickUp apodrecia SEM SINAL. As funções abaixo dão o alarme (idade da
+// cabeça) e o escape de operador (orphan) para esse cenário, mais a DLQ
+// por-linha das ops não-bloqueantes (`comentar`/`anexar`).
+
+/** Uma cabeça de aggregate presa no outbox (a linha pendente/erro mais antiga daquele aggregate). */
+export interface CabecaOutbox {
+  aggregate: string;
+  aggregate_id: number;
+  idade_ms: number;
+}
+
+/**
+ * A CABEÇA (linha `pendente`/`erro` mais antiga) de CADA aggregate no
+ * outbox, com sua idade em ms — consumido por `alertas.ts::avaliarThresholdsOutbox`
+ * (monitor de idade da cabeça, `ix_outbox_head_age`, R6). Lê TODAS as linhas
+ * pendentes/erro ordenadas por `criado_em` ascendente e reduz por
+ * `(aggregate, aggregate_id)`: como a lista inteira já vem ordenada, a
+ * PRIMEIRA ocorrência de cada par é, por definição, a mais antiga daquele
+ * grupo — não precisa de agregação no banco (PostgREST não tem GROUP BY na
+ * REST v1). LANÇA em config ausente/erro de rede/HTTP (WR-03).
+ */
+export async function cabecaMaisAntiga(): Promise<CabecaOutbox[]> {
+  checarConfig();
+  const url =
+    `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}` +
+    `?status=in.(pendente,erro)&select=aggregate,aggregate_id,criado_em&order=criado_em.asc`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, { headers: headers() });
+  } catch (e) {
+    throw new Error(
+      `[outbox-repo] falha de rede ao ler cabecaMaisAntiga: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao ler cabecaMaisAntiga`);
+  }
+  const linhas = (await res.json()) as Array<{ aggregate: string; aggregate_id: number; criado_em: string }>;
+  const agora = Date.now();
+  const vistos = new Set<string>();
+  const cabecas: CabecaOutbox[] = [];
+  for (const linha of linhas) {
+    const chave = `${linha.aggregate}:${linha.aggregate_id}`;
+    if (vistos.has(chave)) continue; // a lista vem ordenada por criado_em asc — a 1a ocorrencia JA e a mais antiga do grupo
+    vistos.add(chave);
+    cabecas.push({
+      aggregate: linha.aggregate,
+      aggregate_id: linha.aggregate_id,
+      idade_ms: agora - new Date(linha.criado_em).getTime(),
+    });
+  }
+  return cabecas;
+}
+
+/**
+ * AÇÃO DE OPERADOR (R6/SC4) — descarta as ops PRESAS (`pendente`/`erro`) de
+ * um aggregate: viram `status='orphan'`, nunca mais retentadas. O Supabase
+ * segue como SoT; o espelho ClickUp fica reconhecidamente incompleto para
+ * aquele item (é isso ou o aggregate travado para sempre bloqueando as ops
+ * seguintes). Invocada pelo CLI `scripts/outbox-orphan.mjs` — nunca
+ * automática. Retorna quantas linhas foram descartadas (0 = nada preso).
+ * LANÇA em config ausente/erro de rede/HTTP (WR-03).
+ */
+export async function marcarOrphan(aggregate: string, aggregateId: number): Promise<number> {
+  checarConfig();
+  const url =
+    `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}` +
+    `?aggregate=eq.${encodeURIComponent(aggregate)}&aggregate_id=eq.${aggregateId}&status=in.(pendente,erro)`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: { ...headers(), Prefer: 'return=representation' },
+      body: JSON.stringify({ status: 'orphan' }),
+    });
+  } catch (e) {
+    throw new Error(
+      `[outbox-repo] falha de rede ao marcarOrphan (aggregate=${aggregate}, aggregateId=${aggregateId}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao marcarOrphan (aggregate=${aggregate}, aggregateId=${aggregateId})`);
+  }
+  const linhas = (await res.json()) as unknown[];
+  return Array.isArray(linhas) ? linhas.length : 0;
+}
+
+/**
+ * DLQ por-linha (R6) — marca a linha `id` como `dlq` com o erro truncado
+ * (sem PII, mesmo contrato de `marcarErro`). Usada pelo worker de dreno
+ * (`drenar-outbox.ts`) SÓ para ops NÃO-bloqueantes (`bloqueante=false`,
+ * `comentar`/`anexar`) que falharam: a linha some da lista de pendentes sem
+ * travar o `seq` das ops bloqueantes daquele aggregate. LANÇA em config
+ * ausente/erro de rede/HTTP (WR-03) — o caller decide como reagir a essa
+ * falha secundária.
+ */
+export async function marcarDlqLinha(id: number, erroTruncado: string): Promise<void> {
+  checarConfig();
+  const url = `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}?id=eq.${id}`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: { ...headers(), Prefer: 'return=minimal' },
+      body: JSON.stringify({ status: 'dlq', ultimo_erro: erroTruncado.slice(0, 500) }),
+    });
+  } catch (e) {
+    throw new Error(`[outbox-repo] falha de rede ao marcarDlqLinha id=${id}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao marcarDlqLinha id=${id}`);
+  }
+}
+
+/**
+ * Contagem total de linhas `pendente`/`erro` no outbox — a métrica de
+ * PROFUNDIDADE consumida por `alertas.ts::avaliarThresholdsOutbox`. Usa
+ * `Prefer: count=exact` + `Range: 0-0` (PostgREST devolve o total em
+ * `Content-Range`, sem baixar as linhas) — mesmo padrão leve de
+ * `profundidadeFila` (fila.ts). LANÇA em config ausente/erro de rede/HTTP ou
+ * `Content-Range` ausente (WR-03) — nunca finge profundidade zero em erro.
+ */
+export async function profundidadeOutbox(): Promise<number> {
+  checarConfig();
+  const url = `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}?status=in.(pendente,erro)&select=id`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, {
+      headers: { ...headers(), Prefer: 'count=exact', Range: '0-0' },
+    });
+  } catch (e) {
+    throw new Error(
+      `[outbox-repo] falha de rede ao ler profundidadeOutbox: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao ler profundidadeOutbox`);
+  }
+  const contentRange = res.headers.get('content-range'); // formato "0-0/123"
+  const total = contentRange?.split('/')[1];
+  if (!total || total === '*') {
+    throw new Error('[outbox-repo] profundidadeOutbox: Content-Range ausente/indeterminado na resposta do PostgREST');
+  }
+  return Number(total);
+}
