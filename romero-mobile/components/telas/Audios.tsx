@@ -5,7 +5,7 @@ import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Searc
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { iniciarLigacaoReal, preaquecerDossieLead, useLeadReal } from "@/lib/leads-real";
-import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
+import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, buscarScriptLigacao, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
 import { Autobox, Vhead } from "./blocos";
 // 2026-08-19: tocar no NOME da conversa abre a ficha (dossiê + histórico) como
@@ -759,13 +759,34 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     [leadsFiltrados, pulados, situacaoPorLead, fastEnviadosIds, fastPuladosSet, audioEnviadoPorLead],
   );
 
-  /* Dossiê do lead em foco no fast — hook próprio (ocioso fora do modo),
-     variante LEVE (sem timeline: só o dossiê importa aqui). */
-  const { ficha: fichaFast, carregando: fastDossieCarregando } = useLeadReal(
-    modoFast ? (fastLead?.leadTaskId ?? null) : null,
-    { leve: true },
-  );
-  const dossieFastTexto = typeof fichaFast?.dossie === "string" ? fichaFast.dossie : "";
+  /* Script (roteiro) do lead em foco no fast — busca por `ligacaoTaskId`
+     (não `leadTaskId`): a rota-ponte espelha `GET /api/discador/ligacao/:taskId`,
+     que serve o script gerado pro Agente Script daquela Ligação. */
+  const [scriptFast, setScriptFast] = React.useState<string | null>(null);
+  const [scriptFastCarregando, setScriptFastCarregando] = React.useState(false);
+  const scriptFastGenRef = React.useRef(0);
+  React.useEffect(() => {
+    if (!modoFast) {
+      setScriptFast(null);
+      setScriptFastCarregando(false);
+      return;
+    }
+    const taskId = fastLead?.ligacaoTaskId;
+    if (!taskId) {
+      setScriptFast(null);
+      setScriptFastCarregando(false);
+      return;
+    }
+    const g = ++scriptFastGenRef.current;
+    setScriptFastCarregando(true);
+    setScriptFast(null);
+    void (async () => {
+      const s = await buscarScriptLigacao(taskId);
+      if (scriptFastGenRef.current !== g) return;
+      setScriptFast(s);
+      setScriptFastCarregando(false);
+    })();
+  }, [modoFast, fastLead?.ligacaoTaskId]);
 
   /* PRÉ-AQUECIMENTO (a estratégia dos "milésimos"): enquanto o Romero grava
      pro lead atual, os dossiês dos 2 PRÓXIMOS da esteira já são buscados —
@@ -893,7 +914,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             </div>
             <div className="au-fast-sub">
               {fastSessao > 0
-                ? `${fastSessao} áudio${fastSessao === 1 ? "" : "s"} nesta sessão — todo mundo com contexto do dossiê.`
+                ? `${fastSessao} áudio${fastSessao === 1 ? "" : "s"} nesta sessão — todo mundo abordado com o roteiro em mãos.`
                 : fastPulados > 0
                   ? "Nenhum áudio enviado nesta sessão."
                   : "Todo mundo da lista já recebeu áudio hoje."}
@@ -936,12 +957,12 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
               <div className="au-fast-tel">{fmtTelefone(fastLead?.telefone ?? "")}</div>
             </div>
             <div className="au-fast-dossie">
-              {fastDossieCarregando && !dossieFastTexto ? (
-                <div className="au-fast-dossie-vazio">📋 carregando o dossiê…</div>
-              ) : dossieFastTexto ? (
-                <DossieMarkdown texto={dossieFastTexto} />
+              {scriptFastCarregando && !scriptFast ? (
+                <div className="au-fast-dossie-vazio">📋 carregando o script…</div>
+              ) : scriptFast ? (
+                <div style={{ whiteSpace: "pre-wrap" }}>{scriptFast}</div>
               ) : (
-                <div className="au-fast-dossie-vazio">Sem dossiê deste lead — vale usar o nome e a cidade.</div>
+                <div className="au-fast-dossie-vazio">Sem script deste lead — use o nome e a cidade.</div>
               )}
             </div>
             {(fastAviso || erroMic) && <div className="au-fast-aviso">{fastAviso ?? erroMic}</div>}
