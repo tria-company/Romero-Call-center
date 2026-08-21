@@ -37,6 +37,7 @@ import {
 import { CAMPOS_LEADS, OPCOES_LEADS, CAMPOS_LIGACOES, listarTasks, lerAtendeu, type TaskClickUp } from './clickup.ts';
 import { contarVotosPorOperador } from './supabase.ts';
 import { fetchTimeout } from './http.ts';
+import { comOutboxRpc } from './outbox-rpc.ts';
 
 const CLICKUP_BASE_URL = 'https://api.clickup.com/api/v2';
 
@@ -875,4 +876,163 @@ export const CHAVE_CAMPANHA = 'campanha';
 /** Resumo da Central de Campanha, com cache (varre a Lista 02, mesmo custo do resumo). */
 export function campanhaComCache(): Promise<ResumoCampanha> {
   return comCache(CHAVE_CAMPANHA, PAINEL_TTL_CLICKUP_MS, resumoCampanhaAoVivo);
+}
+
+// ===== 5. Campanha/painel-números servidos de agregados SQL (LEITURA-02, Phase 19, plano 19-04) =====
+//
+// `resumoLigacoesSupabase`/`resumoCampanhaSupabase` produzem o MESMO shape que
+// resumoLigacoesAoVivo/resumoCampanhaAoVivo, mas vêm de UM agregado SQL sobre
+// `ligacoes` (+ `votos_ligacao` para o ranking) — nenhuma paginação da Lista 02.
+// Isto tira campanha/painel do caminho crítico do ClickUp (SC1: um incidente de
+// listagem — como o de 2026-08-20 — deixa de derrubar o painel do gestor).
+//
+// ESCOPO (19-04): só as FUNÇÕES + a RPC existem aqui. O wiring das rotas
+// /campanha e /painel-numeros atrás da flag FONTE_LIGACOES é o plano 19-09 —
+// nada aqui é chamado por rota ainda.
+//
+// Nomes das RPCs lidos direto de `process.env` (não via config.ts, que é
+// território do 19-01/19-02..19-09 — evita conflito de edição concorrente no
+// mesmo arquivo). Mesmo padrão de isolamento homolog das demais
+// SUPABASE_RPC_* (config.ts): default SEM prefixo (produção); homolog
+// sobrescreve para 'hml_painel_*' via deploy/homolog.env — sem isso, o
+// homolog leria os agregados de PRODUÇÃO (mesma lição do 17-02).
+const RPC_PAINEL_LIGACOES = process.env.SUPABASE_RPC_PAINEL_LIGACOES || 'painel_ligacoes_agregado';
+const RPC_PAINEL_CAMPANHA = process.env.SUPABASE_RPC_PAINEL_CAMPANHA || 'painel_campanha_agregado';
+
+/**
+ * Monta o objeto `ResumoLigacoes` a partir do jsonb devolvido por
+ * `painel_ligacoes_agregado` (sql/escala/19_rpc_painel_agregados.sql). Função
+ * PURA (sem I/O) — testável offline com um jsonb sintético (mesmo molde de
+ * `montarChamadaRpc` em outbox-rpc.ts).
+ *
+ * `parcial` fica travado em `false`: o agregado SQL não pagina, então o
+ * número nunca é um "piso" (ao contrário da versão ClickUp, que bate no teto
+ * de `PAINEL_MAX_PAGINAS`).
+ */
+export function montarResumoLigacoes(agregado: Record<string, unknown>): ResumoLigacoes {
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v ?? 0) || 0);
+  return {
+    total: num(agregado.total),
+    hoje: num(agregado.hoje),
+    atendidasHoje: num(agregado.atendidasHoje),
+    naoAtendidasHoje: num(agregado.naoAtendidasHoje),
+    semDesfechoHoje: num(agregado.semDesfechoHoje),
+    atendidasTotal: num(agregado.atendidasTotal),
+    comGravacao: num(agregado.comGravacao),
+    comTranscricao: num(agregado.comTranscricao),
+    comAnaliseIa: num(agregado.comAnaliseIa),
+    ultimaEm: agregado.ultimaEm ? new Date(String(agregado.ultimaEm)).toISOString() : null,
+    parcial: false,
+  };
+}
+
+/** Ligações servidas do agregado SQL (Supabase) — mesmo shape de `resumoLigacoesAoVivo`. */
+export async function resumoLigacoesSupabase(): Promise<ResumoLigacoes> {
+  const agregado = await comOutboxRpc<Record<string, unknown>>(RPC_PAINEL_LIGACOES, {});
+  return montarResumoLigacoes(agregado ?? {});
+}
+
+/** Linha bruta do ranking devolvida por `painel_campanha_agregado` — um item por operador. */
+interface RankingOperadorBruto {
+  operador: string;
+  opChave: string;
+  lig: number;
+  fila: number;
+  cont: number;
+  tsec: number;
+  ini: string | null;
+  fim: string | null;
+}
+
+/**
+ * Monta o objeto `ResumoCampanha` a partir do jsonb devolvido por
+ * `painel_campanha_agregado`. Função PURA (sem I/O) — testável offline.
+ *
+ * Reusa as duas funções puras que JÁ existem neste módulo em vez de duplicar
+ * a lógica em SQL: `agruparMotivos` (sinônimos de motivo_falha, texto livre
+ * PT-BR) sobre `motivosBrutos`, e `nomeDeOperador` (grafia de e-mail → nome
+ * legível) sobre a grafia mais frequente de cada login.
+ *
+ * `ader`/`aderAmostra` ficam em 0 (mesma semântica de "nunca avaliada" que a
+ * UI trata) — débito documentado no cabeçalho da migração 19 e no
+ * 19-04-SUMMARY.md: o espelho ainda grava `analise_ia` como `{ texto }` bruto,
+ * não uma nota estruturada extraível por SQL.
+ */
+export function montarResumoCampanha(agregado: Record<string, unknown>): ResumoCampanha {
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v ?? 0) || 0);
+
+  const serie = Array.isArray(agregado.serie) ? (agregado.serie as DiaCampanha[]) : [];
+  const rankingBruto = Array.isArray(agregado.ranking) ? (agregado.ranking as RankingOperadorBruto[]) : [];
+  const votosPorOperador = (agregado.votosPorOperador ?? {}) as Record<string, number>;
+  const motivosBrutos = Array.isArray(agregado.motivosBrutos) ? (agregado.motivosBrutos as string[]) : [];
+  const { motivos, tecnicas } = agruparMotivos(motivosBrutos);
+
+  const semId = rankingBruto
+    .map((r) => {
+      const iniMs = r.ini ? new Date(r.ini).getTime() : 0;
+      const fimMs = r.fim ? new Date(r.fim).getTime() : 0;
+      const horas = Math.max(1, (fimMs - iniMs) / 3600000);
+      const lig = num(r.lig);
+      const cont = num(r.cont);
+      return {
+        nome: nomeDeOperador(r.operador ?? ''),
+        turno: '',
+        lig,
+        fila: num(r.fila),
+        cont,
+        conv: lig ? Math.round((cont / lig) * 100) : 0,
+        ader: 0,
+        aderAmostra: 0,
+        tsec: num(r.tsec),
+        votos: votosPorOperador[r.opChave] ?? 0,
+        ligh: Math.round((lig / horas) * 10) / 10,
+      };
+    })
+    .sort((a, b) => b.lig - a.lig);
+  const telefonistas: TelefonistaCampanha[] = semId.map((t, i) => ({ id: i + 1, ...t }));
+
+  const semOperador = (agregado.semOperador ?? {}) as { lig?: unknown; cont?: unknown };
+  const desfechoDeApp = (agregado.desfechoDeApp ?? {}) as {
+    comOperador?: unknown;
+    atendidas?: unknown;
+    semDesfecho?: unknown;
+  };
+  const tempoMedio = (agregado.tempoMedio ?? {}) as {
+    min?: unknown;
+    mediana?: unknown;
+    max?: unknown;
+    amostra?: unknown;
+  };
+
+  return {
+    serie,
+    telefonistas,
+    motivosNaoContato: motivos,
+    falhasTecnicas: tecnicas,
+    totalLigacoes: num(agregado.totalLigacoes),
+    totalNaFila: num(agregado.totalNaFila),
+    totalContatos: num(agregado.totalContatos),
+    semDesfecho: num(agregado.semDesfecho),
+    semOperador: { lig: num(semOperador.lig), cont: num(semOperador.cont) },
+    desfechoDeApp: {
+      comOperador: num(desfechoDeApp.comOperador),
+      atendidas: num(desfechoDeApp.atendidas),
+      semDesfecho: num(desfechoDeApp.semDesfecho),
+    },
+    tempoMedio: {
+      atual: num(tempoMedio.mediana),
+      min: num(tempoMedio.min),
+      mediana: num(tempoMedio.mediana),
+      max: num(tempoMedio.max),
+      amostra: num(tempoMedio.amostra),
+    },
+    // Sem paginação — o agregado SQL nunca é um piso.
+    parcial: false,
+  };
+}
+
+/** Central de Campanha servida do agregado SQL (Supabase) — mesmo shape de `resumoCampanhaAoVivo`. */
+export async function resumoCampanhaSupabase(): Promise<ResumoCampanha> {
+  const agregado = await comOutboxRpc<Record<string, unknown>>(RPC_PAINEL_CAMPANHA, {});
+  return montarResumoCampanha(agregado ?? {});
 }
