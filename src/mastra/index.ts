@@ -1417,6 +1417,25 @@ export const mastra = new Mastra({
           if (!taskId) return c.json({ erro: 'taskId obrigatório' }, 400);
           if (!motivo) return c.json({ erro: 'motivo obrigatório' }, 400);
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) return c.json({ erro: 'Ligação não encontrada' }, 404);
+              // A RPC faz TUDO na mesma tx: fecha a principal (resultado
+              // 'pulado') + fecha duplicatas do lead + outbox ('fechar'
+              // bloqueante + 'comentar' não-bloqueante com o motivo,
+              // sql/escala/15_rpc_pular_ligacao.sql) — não chamar
+              // fecharLigacoesDuplicadas aqui (T-19-07-Ti).
+              await comOutboxRpc(SUPABASE_RPC_PULAR_LIGACAO, {
+                p_ligacao_id: ligacaoId,
+                p_operador: sess.usuario,
+                p_motivo: motivo,
+              });
+              // posCommitLigacao já faz a MESMA eviction (removerDaFilaCache/
+              // invalidarFilaCache/derrubarFilaMem) + o kick do dreno
+              // checado (fallback inline).
+              await posCommitLigacao(assignee, ligacaoId);
+              return c.json({ status: 'ok' });
+            }
             const taskPulada = await validarLigacaoDoOperador(taskId, assignee);
             await gravarMetadadosLigacao(taskId, { atendeu: false, motivoFalha: 'Pulado' });
             // LGPD: só a frase do operador + login — nunca telefone/CPF.
@@ -1444,7 +1463,8 @@ export const mastra = new Mastra({
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
-              msg.includes('nao pertence ao operador');
+              msg.includes('nao pertence ao operador') ||
+              ehErroRpcNaoAutorizado(e);
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao pular o contato' }, 502);
@@ -1910,16 +1930,55 @@ export const mastra = new Mastra({
           try {
             // validarLeadDaLista01 é o guard anti-IDOR E devolve a task já lida —
             // reaproveita pra ler o telefone sem um segundo GET ao ClickUp.
+            // Continua ClickUp-autoritativo nesta fase (o lead vive na Lista
+            // 01 — a inversão da Lista 01 é fora de escopo, Phase 20).
             const task = await validarLeadDaLista01(leadTaskId);
             const telefone = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
             if (!telefone) return c.json({ erro: 'Lead sem telefone' }, 422);
+            if (FONTE_LIGACOES === 'supabase') {
+              const canonico = canonizarTelefone(telefone);
+              if (!canonico) return c.json({ erro: 'Lead com telefone inválido' }, 422);
+              const variantes = variantesTelefone(telefone);
+              // DEDUP AUTORITATIVO por rowcount (MODELO-02/R3, 19-02): a RPC
+              // decide criada-vs-existia pelo UNIQUE parcial
+              // (telefone_canonico, status='aberta') — nunca por guarda em
+              // memória de processo.
+              const r = await comOutboxRpc<{ ligacao_id: number; criada: boolean; outbox_inseridos: number }>(
+                SUPABASE_RPC_CRIAR_LIGACAO_AVULSA,
+                {
+                  p_telefone_canonico: canonico,
+                  p_telefone_variantes: variantes,
+                  p_operador: sess.usuario,
+                  p_assignee_clickup_id: Number(assignee) || undefined,
+                  p_lead_id: null,
+                  p_lead_clickup_task_id: leadTaskId,
+                },
+              );
+              // Só kicka o dreno quando CRIOU (rowcount=1) — evita
+              // re-enfileirar 'criar_task' (duplicaria a task no ClickUp)
+              // quando a ligação já existia (T-19-07-Ti). Mesmo padrão
+              // checado enfileirado→inline de posCommitLigacao.
+              if (r.criada) {
+                const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: r.ligacao_id });
+                if (!enfileirado) {
+                  await processarDrenoOutboxJob(r.ligacao_id).catch((e) => {
+                    console.error(
+                      '[dreno] inline avulsa pós-commit falhou (best-effort — linha já persistida):',
+                      e instanceof Error ? e.message : String(e),
+                    );
+                  });
+                }
+              }
+              return c.json({ taskId: String(r.ligacao_id) });
+            }
             const { id } = await criarLigacaoAvulsa(telefone, assignee);
             return c.json({ taskId: id });
           } catch (e) {
             // LGPD: nunca logar telefone/CPF — só a mensagem genérica de erro.
             console.error('[discador] erro ao criar ligação para o lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
-            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            const naoEncontrado =
+              msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01') || ehErroRpcNaoAutorizado(e);
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao iniciar a ligação' }, 502);
