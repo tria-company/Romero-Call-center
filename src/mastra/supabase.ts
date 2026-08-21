@@ -35,6 +35,10 @@ import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
 // sentido de outros consumidores (gerar-lote.mjs/montar-dossies.mjs).
 import { variantesTelefoneBr } from './dossie.ts';
+// ItemFila é tipo PURO (lote.ts, zero-import) — reusar aqui não cria ciclo
+// nem acopla este módulo ao client ClickUp (clickup.ts nunca é importado
+// por supabase.ts, ver header do arquivo).
+import type { ItemFila } from './lote.ts';
 
 // Endpoint REST montado do env — instancia self-hosted, nunca hardcoded (D-P4-11).
 export const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
@@ -804,6 +808,283 @@ export async function contarVotosEspelho(): Promise<{
     andressa: andressa ?? 0,
     apoiadores: apoiadores ?? 0,
   };
+}
+
+// ===== Fase B (19-05) — LEITURAS de `ligacoes` do Supabase (design §4) =====
+//
+// Fila, detalhe, timeline e correlação do webhook servidas do Postgres em vez
+// da listagem geral da Lista 02 (que caiu no incidente que motivou a
+// inversão) — `buscarFilaSupabase`/`lerLigacaoSupabase`/
+// `buscarLigacaoAbertaPorTelefoneSupabase`/`resolverLeadDaLigacaoSupabase`/
+// `buscarLigacoesDoLeadSupabase`. NENHUMA rota chama estas funções ainda — o
+// wiring atrás da flag `FONTE_LIGACOES` é 19-07/19-09.
+//
+// CONTRATO DE ID: sob `FONTE_LIGACOES=supabase`, o `taskId` que a fila expõe
+// e que as rotas de escrita repassam às RPCs do Caminho B (19-02,
+// `p_ligacao_id bigint`) é o id LOCAL de `ligacoes` (bigint, aqui como
+// string) — NÃO o `clickup_task_id` (nullable até o dreno do outbox).
+//
+// Guard anti-IDOR (CR-01): toda leitura por id valida `operador` NA PRÓPRIA
+// LINHA (nunca no ClickUp) — mesma régua de clickup.ts::lerLigacao/
+// buscarLigacoesDoLead. Mensagens de erro casam as strings que os catches das
+// rotas já mapeiam (404/409) pra não mudar o tratamento de erro quando o
+// wiring trocar a fonte.
+//
+// Erro de config/rede/HTTP LANÇA (WR-03, `checarConfig()`) — leitura crítica
+// da fila/detalhe não pode degradar silenciosamente pra lista vazia (o
+// operador ficaria sem Ligação pra trabalhar sem saber que é erro de infra).
+// PostgREST puro (sem transação — a escrita transacional são as RPCs do
+// 19-02). NUNCA loga telefone (LGPD).
+
+/** Linha crua de `ligacoes` (colunas comuns às leituras de fila/detalhe). */
+interface LinhaLigacaoBase {
+  id: number;
+  operador?: string | null;
+  status?: string | null;
+  script?: string | null;
+  telefone_canonico?: string | null;
+  lead_clickup_task_id?: string | null;
+  inicio?: string | null; // timestamptz ISO
+  criado_em?: string; // timestamptz ISO
+}
+
+/** Detalhe de uma Ligação lida do Supabase: item da fila + o script (mesmo shape de clickup.ts::DetalheLigacao). */
+export interface DetalheLigacaoSupabase extends ItemFila {
+  script: string;
+}
+
+/** Item da timeline de ligações de um lead (mesmo shape de clickup.ts::ItemTimeline). */
+export interface ItemTimelineSupabase {
+  data: string;
+  atendeu: boolean;
+  aderencia: string;
+  resumoAnalise: string;
+  motivoFalha: string;
+  duracao: string;
+}
+
+/**
+ * `ligacoes` não tem coluna "nome" própria (sql/escala/06_ligacoes.sql) — usa o
+ * telefone como fallback, mesmo racional de clickup.ts::lerLigacao
+ * (`item?.nome ?? task.name ?? telefone`). `idLead`/`leadTaskId` vêm de
+ * `lead_clickup_task_id` (única referência ao lead disponível nesta fase —
+ * `lead_id` numérico é resolvido à parte por `resolverLeadDaLigacaoSupabase`).
+ */
+function linhaParaItemFila(row: LinhaLigacaoBase): ItemFila {
+  const telefone = String(row.telefone_canonico ?? '');
+  const leadClickupTaskId = row.lead_clickup_task_id ? String(row.lead_clickup_task_id) : '';
+  return {
+    taskId: String(row.id),
+    nome: telefone,
+    telefone,
+    idLead: leadClickupTaskId,
+    leadTaskId: leadClickupTaskId || undefined,
+  };
+}
+
+/**
+ * Reproduz a ordenação EXATA de `clickup.ts::buscarFilaLigacoes` (D-P3-07,
+ * quick-260815-w6h, quick-260821): nunca-tentados (`inicio` ausente) primeiro,
+ * ordenados por `criado_em` ASC (prioridade — o lote nasce em ordem de
+ * prioridade); tentados depois, ordenados por `inicio` ASC (o que falhou há
+ * mais tempo primeiro). Sort estável, sobre CÓPIA (não muta `linhas`). Pura.
+ */
+function ordenarFilaLigacoes<T extends { inicio?: string | null; criado_em?: string }>(linhas: T[]): T[] {
+  return [...linhas].sort((a, b) => {
+    const tentadaA = !!a.inicio;
+    const tentadaB = !!b.inicio;
+    if (!tentadaA && !tentadaB) return (Date.parse(a.criado_em ?? '') || 0) - (Date.parse(b.criado_em ?? '') || 0);
+    if (!tentadaA) return -1;
+    if (!tentadaB) return 1;
+    return (Date.parse(a.inicio ?? '') || 0) - (Date.parse(b.inicio ?? '') || 0);
+  });
+}
+
+/**
+ * Fila de Ligações ABERTAS do operador (LEITURA-01, design §4) — troca
+ * `buscarFilaLigacoes` (listagem geral da Lista 02, D-01) por um SELECT
+ * filtrado (`ix_ligacoes_fila`). `taskId` de cada item é o id LOCAL (CONTRATO
+ * DE ID acima). Erro de config/rede/HTTP LANÇA (WR-03) — a fila vazia por
+ * erro de infra não pode se disfarçar de "sem Ligação pra ligar".
+ */
+export async function buscarFilaSupabase(operador: string): Promise<ItemFila[]> {
+  checarConfig();
+  if (!operador) {
+    throw new Error('[supabase] buscarFilaSupabase chamado sem operador');
+  }
+  const params = new URLSearchParams({
+    operador: `eq.${operador}`,
+    status: 'eq.aberta',
+    select: 'id,script,telefone_canonico,lead_clickup_task_id,inicio,criado_em',
+    order: 'inicio.asc.nullsfirst',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar a fila em ${SUPABASE_TABLE_LIGACOES}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar a fila em ${SUPABASE_TABLE_LIGACOES}`);
+  }
+  const data = (await res.json()) as LinhaLigacaoBase[];
+  const linhas = Array.isArray(data) ? data : [];
+  return ordenarFilaLigacoes(linhas).map(linhaParaItemFila);
+}
+
+/**
+ * Detalhe de uma Ligação por id LOCAL (LEITURA-03, design §4) — troca
+ * `lerLigacao` (`GET /task/{id}`) por um SELECT direto + os MESMOS 3 guards
+ * CR-01 de `clickup.ts::lerLigacao`, agora contra a própria linha: não
+ * encontrada, não pertence ao operador (IDOR), já concluída. Mensagens de
+ * erro casam as strings que os catches das rotas já mapeiam (404/409) — não
+ * muda o tratamento de erro quando o wiring (19-07/09) trocar a fonte.
+ */
+export async function lerLigacaoSupabase(id: number, operadorEsperado: string): Promise<DetalheLigacaoSupabase> {
+  checarConfig();
+  const params = new URLSearchParams({
+    id: `eq.${id}`,
+    select: 'id,operador,status,script,telefone_canonico,lead_clickup_task_id',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler a ligação ${id}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler a ligação ${id}`);
+  }
+  const data = (await res.json()) as LinhaLigacaoBase[];
+  const row = Array.isArray(data) ? data[0] : undefined;
+  if (!row) {
+    throw new Error(`[supabase] lerLigacaoSupabase: ligacao ${id} nao encontrada`);
+  }
+  if (String(row.operador ?? '') !== operadorEsperado) {
+    throw new Error(`[supabase] lerLigacaoSupabase: ligacao ${id} nao pertence ao operador`);
+  }
+  if (row.status === 'fechada') {
+    throw new Error(`[supabase] lerLigacaoSupabase: ligacao ${id} ja foi concluida`);
+  }
+  return { ...linhaParaItemFila(row), script: row.script ?? '' };
+}
+
+/** Formata `inicio` (timestamptz ISO) em "DD/MM/AAAA HH:MM" Brasília — mesmo
+ *  resultado visual de clickup.ts::formatarDataLigacao (fonte diferente: ISO
+ *  aqui, epoch-ms lá). Entrada vazia/inválida devolve '' (nunca lança). */
+function formatarDataLigacaoSupabase(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(ms));
+}
+
+/** Duração "humana" e curta ("33s" / "2min" / "2min 5s") — mesmo formato de
+ *  clickup.ts::formatarDuracaoCurta (duplicada de propósito; par pequeno
+ *  demais pra acoplar módulos, mesmo racional de telefone-canonico.ts). */
+function formatarDuracaoCurtaSupabase(segundos: number | null | undefined): string {
+  if (!Number.isFinite(segundos) || (segundos as number) <= 0) return '0s';
+  const total = Math.round(segundos as number);
+  if (total < 60) return `${total}s`;
+  const minutos = Math.floor(total / 60);
+  const restante = total % 60;
+  return restante ? `${minutos}min ${restante}s` : `${minutos}min`;
+}
+
+/**
+ * `analise_ia` (jsonb) hoje é gravado por `espelho.ts::paraAnaliseIa` como
+ * `{ texto }` — texto livre, não estruturado (mesmo débito documentado lá).
+ * Extrai `aderencia`/`resumoAnalise` de forma TOLERANTE: usa os campos
+ * estruturados quando existirem (estruturação futura, fora do escopo desta
+ * fase) e cai pro `texto` cru como `resumoAnalise` caso contrário. Nunca lança.
+ */
+function extrairAnaliseIa(raw: unknown): { aderencia: string; resumoAnalise: string } {
+  if (!raw || typeof raw !== 'object') return { aderencia: '', resumoAnalise: '' };
+  const obj = raw as Record<string, unknown>;
+  const aderencia = typeof obj.aderencia === 'number' || typeof obj.aderencia === 'string' ? String(obj.aderencia) : '';
+  const resumoAnalise =
+    typeof obj.resumoAnalise === 'string' ? obj.resumoAnalise : typeof obj.texto === 'string' ? obj.texto : '';
+  return { aderencia, resumoAnalise };
+}
+
+/** Linha crua de `ligacoes` usada pela timeline (colunas distintas da fila/detalhe). */
+interface LinhaTimelineLigacao {
+  operador?: string | null;
+  inicio?: string | null;
+  atendeu?: boolean | null;
+  motivo_falha?: string | null;
+  duracao_seg?: number | null;
+  analise_ia?: unknown;
+}
+
+function linhaParaItemTimeline(row: LinhaTimelineLigacao): ItemTimelineSupabase {
+  const { aderencia, resumoAnalise } = extrairAnaliseIa(row.analise_ia);
+  return {
+    data: formatarDataLigacaoSupabase(row.inicio),
+    atendeu: Boolean(row.atendeu),
+    aderencia,
+    resumoAnalise,
+    motivoFalha: row.motivo_falha ?? '',
+    duracao: formatarDuracaoCurtaSupabase(row.duracao_seg),
+  };
+}
+
+/**
+ * Timeline de Ligações de um lead pelo id LOCAL do lead (LEITURA-03/`ix_ligacoes_lead`,
+ * design §4) — troca as 2 listagens filtradas de `buscarLigacoesDoLead` por um
+ * SELECT direto (`WHERE lead_id=$1 ORDER BY inicio DESC LIMIT 10`).
+ *
+ * Guard CR-01: só devolve a timeline se ALGUMA Ligação do lead pertence ao
+ * `operadorEsperado` (prova que o operador já trabalhou este lead) — lead sem
+ * NENHUMA ligação (`linhas.length === 0`) é resultado legítimo (timeline
+ * vazia), não guard negado.
+ */
+export async function buscarLigacoesDoLeadSupabase(
+  leadId: number,
+  operadorEsperado: string,
+): Promise<ItemTimelineSupabase[]> {
+  checarConfig();
+  const params = new URLSearchParams({
+    lead_id: `eq.${leadId}`,
+    select: 'operador,inicio,atendeu,motivo_falha,duracao_seg,analise_ia',
+    order: 'inicio.desc',
+    limit: '10',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar as ligacoes do lead ${leadId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar as ligacoes do lead ${leadId}`);
+  }
+  const data = (await res.json()) as LinhaTimelineLigacao[];
+  const linhas = Array.isArray(data) ? data : [];
+  if (linhas.length > 0 && !linhas.some((l) => String(l.operador ?? '') === operadorEsperado)) {
+    throw new Error(`[supabase] buscarLigacoesDoLeadSupabase: lead ${leadId} nao pertence ao operador`);
+  }
+  return linhas.map(linhaParaItemTimeline);
 }
 
 // ===== Conversa WhatsApp por lead (Fase 13 — campanha de áudios, sql/escala/03) =====
