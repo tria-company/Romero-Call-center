@@ -630,7 +630,7 @@ async function buscarFilaResiliente(assignee: string): Promise<Awaited<ReturnTyp
 // /voto enfileira o job (worker espelha no ClickUp em <60s) com fallback
 // inline (processarSyncClickupJob) sem Redis (SC5).
 import { enfileirarSyncClickup } from './fila.ts';
-import { processarSyncClickupJob } from './sync-clickup.ts';
+import { processarSyncClickupJob, atribuirVotoDoLead } from './sync-clickup.ts';
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador, papelDoOperador } from './operadores';
@@ -1643,6 +1643,19 @@ export const mastra = new Mastra({
             } catch (e) {
               console.error('[espelho] write-through do voto falhou (segue):', e instanceof Error ? e.message : String(e));
             }
+            // ATRIBUIÇÃO (votos_ligacao): É POR AQUI QUE O VOTO REALMENTE ENTRA.
+            //
+            // A instrumentação original foi para /api/discador/voto — a rota que recebe o
+            // taskId da Ligação. Só que o app mobile não usa aquela: a tela de perfil do
+            // lead chama `salvarVotoReal` -> /api/mobile/lead/:id/voto -> ESTA rota. Medido
+            // em 21/08: 27 apoiadores no ClickUp, 16 na tabela, e ZERO linhas com
+            // origem='ligacao' — a coluna "Votos" do ranking congelou no backfill enquanto
+            // o foguete subia, porque cada voto novo passava por aqui sem deixar rastro.
+            //
+            // Loga-e-segue, mesmo critério do espelho acima: o voto já está no ClickUp, que
+            // é a fonte da verdade, e uma falha na CONTABILIDADE não pode virar erro para
+            // quem acabou de marcar.
+            void atribuirVotoDoLead(leadTaskId, sess.usuario, { romero, andressa });
             // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
             derrubarLeadDetalheMem(leadTaskId);
             return c.json({ status: 'ok' });
