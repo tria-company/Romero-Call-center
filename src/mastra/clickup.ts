@@ -241,6 +241,11 @@ export interface TaskClickUp {
   // Lista a que a task pertence — usado por `lerLigacao` para provar que a
   // task lida por ID e realmente uma Ligacao da Lista 02 (CR-01, T-02-03-E).
   list?: { id: string };
+  // Epoch ms (string) de criação da task. A API v2 sempre devolve; usado para
+  // ordenar a fila dos nunca-tentados por prioridade (quick-260821): o lote de
+  // áudio foi criado em ordem de prioridade (mais atendimentos primeiro), então
+  // date_created ASC = prioridade desc.
+  date_created?: string;
 }
 
 /** Item da fila de ligações do operador (ver `ItemFila` em lote.ts — módulo puro). */
@@ -636,17 +641,19 @@ export async function buscarFilaLigacoes(
     ? tasks.filter((t) => nomeDoStatus(t.status) !== OPER_STATUS_EM_PROCESSAMENTO)
     : tasks;
   // quick-260815-w6h: ordena por INICIO ascendente (sort ESTÁVEL, sobre cópia
-  // pra não mutar `abertas`) — never-tried (sem INICIO válido) vem PRIMEIRO,
-  // preservando a ordem/prioridade do ClickUp entre eles (comparador 0);
+  // pra não mutar `abertas`) — never-tried (sem INICIO válido) vem PRIMEIRO;
   // já-tentados afundam pro fim, o que falhou há mais tempo primeiro, o que
   // acabou de falhar (INICIO mais recente) por último. Isso é o que faz o
   // lead 'nao_atendida' sumir do topo — a UI renderiza só itens[0].
+  // quick-260821: entre os nunca-tentados, PRIORIDADE = date_created ASC — o
+  // lote de áudio foi criado em ordem de prioridade (mais atendimentos primeiro),
+  // então o mais antigo é o mais prioritário. FIFO sensato p/ os demais casos.
   const ordenadas = [...abertas].sort((a, b) => {
     const inicioA = Number(a.custom_fields?.find((cf) => cf.id === CAMPOS_LIGACOES.INICIO)?.value);
     const inicioB = Number(b.custom_fields?.find((cf) => cf.id === CAMPOS_LIGACOES.INICIO)?.value);
     const tentadaA = Number.isFinite(inicioA);
     const tentadaB = Number.isFinite(inicioB);
-    if (!tentadaA && !tentadaB) return 0;
+    if (!tentadaA && !tentadaB) return Number(a.date_created ?? 0) - Number(b.date_created ?? 0);
     if (!tentadaA) return -1;
     if (!tentadaB) return 1;
     return inicioA - inicioB;
