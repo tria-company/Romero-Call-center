@@ -35,6 +35,10 @@ import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
 // sentido de outros consumidores (gerar-lote.mjs/montar-dossies.mjs).
 import { variantesTelefoneBr } from './dossie.ts';
+// telefone-canonico.ts é módulo PURO/self-contained (19-01) — a MESMA
+// normalização usada pela escrita (espelho.ts) e pelas RPCs do Caminho B,
+// pra 12/13 dígitos do mesmo número casarem a mesma ligação (R4/§5.3).
+import { canonizarTelefone, variantesTelefone } from './telefone-canonico.ts';
 // ItemFila é tipo PURO (lote.ts, zero-import) — reusar aqui não cria ciclo
 // nem acopla este módulo ao client ClickUp (clickup.ts nunca é importado
 // por supabase.ts, ver header do arquivo).
@@ -1085,6 +1089,97 @@ export async function buscarLigacoesDoLeadSupabase(
     throw new Error(`[supabase] buscarLigacoesDoLeadSupabase: lead ${leadId} nao pertence ao operador`);
   }
   return linhas.map(linhaParaItemTimeline);
+}
+
+/**
+ * Monta o filtro PostgREST `or=(telefone_canonico.eq.$canon,telefone_variantes.ov.{...})`
+ * da correlação multi-candidato (LEITURA-05, §5.3, Riscos R4) — PURA/sem I/O,
+ * testável sem rede. `canonizarTelefone`/`variantesTelefone` (19-01) garantem
+ * que 12 e 13 dígitos do MESMO número produzem o MESMO `telefone_canonico` e o
+ * MESMO conjunto de candidatos — por isso o filtro casa a mesma linha
+ * independente do formato de entrada. `null` quando o telefone não é
+ * normalizável (nem canônico nem variante) — resultado legítimo, não erro.
+ */
+export function montarFiltroCorrelacaoTelefone(telefone: string): { or: string } | null {
+  const canon = canonizarTelefone(telefone);
+  const candidatos = variantesTelefone(telefone);
+  const partes: string[] = [];
+  if (canon) partes.push(`telefone_canonico.eq.${canon}`);
+  if (candidatos.length > 0) partes.push(`telefone_variantes.ov.{${candidatos.join(',')}}`);
+  if (partes.length === 0) return null;
+  return { or: `(${partes.join(',')})` };
+}
+
+/**
+ * Busca a Ligação ABERTA cujo telefone casa (LEITURA-05, design §4) — troca
+ * `buscarLigacaoAbertaPorTelefone` (varredura da Lista 02) pelo filtro de
+ * `montarFiltroCorrelacaoTelefone` (`telefone_canonico = $canon OR
+ * telefone_variantes && $candidatos`), preservando o casamento multi-candidato
+ * ±9º dígito (R4). Retorna o id LOCAL (CONTRATO DE ID) ou `null` — sem
+ * Ligação aberta casando é resultado legítimo, não erro. NUNCA loga o
+ * telefone completo.
+ */
+export async function buscarLigacaoAbertaPorTelefoneSupabase(telefone: string): Promise<string | null> {
+  checarConfig();
+  const filtro = montarFiltroCorrelacaoTelefone(telefone);
+  if (!filtro) return null;
+  const params = new URLSearchParams({
+    status: 'eq.aberta',
+    select: 'id',
+    limit: '1',
+  });
+  params.set('or', filtro.or);
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar ligacao aberta por telefone: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar ligacao aberta por telefone`);
+  }
+  const data = (await res.json()) as Array<{ id?: number }>;
+  const row = Array.isArray(data) ? data[0] : undefined;
+  return row?.id !== undefined ? String(row.id) : null;
+}
+
+/**
+ * Resolve o lead (id local + clickup_task_id) de uma Ligação por id LOCAL
+ * (LEITURA-05, design §4) — troca `resolverLeadDaLigacao` (`GET /task` +
+ * fallback de listagem de 100k) por um SELECT direto de `lead_id`/
+ * `lead_clickup_task_id`. `null` quando a Ligação não existe ou não tem lead
+ * vinculado (resultado legítimo).
+ */
+export async function resolverLeadDaLigacaoSupabase(
+  id: number,
+): Promise<{ leadId: number | null; leadClickupTaskId: string | null } | null> {
+  checarConfig();
+  const params = new URLSearchParams({
+    id: `eq.${id}`,
+    select: 'lead_id,lead_clickup_task_id',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o lead da ligacao ${id}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao resolver o lead da ligacao ${id}`);
+  }
+  const data = (await res.json()) as Array<{ lead_id?: number | null; lead_clickup_task_id?: string | null }>;
+  const row = Array.isArray(data) ? data[0] : undefined;
+  if (!row) return null;
+  return { leadId: row.lead_id ?? null, leadClickupTaskId: row.lead_clickup_task_id ?? null };
 }
 
 // ===== Conversa WhatsApp por lead (Fase 13 — campanha de áudios, sql/escala/03) =====
