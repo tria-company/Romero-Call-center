@@ -580,7 +580,11 @@ export async function upsertLigacoesEspelho(rows: LigacaoEspelhoRow[]): Promise<
   if (rows.length === 0) return 0;
   let res: Response;
   try {
-    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}`, {
+    // on_conflict=clickup_task_id: a PK desta tabela é `id` (identity); o merge
+    // precisa resolver pela UNIQUE de clickup_task_id, senão re-runs INSEREM e
+    // violam a unique (HTTP 409). (discador_leads_espelho não precisa: lá a PK
+    // já É clickup_task_id.)
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?on_conflict=clickup_task_id`, {
       method: 'POST',
       headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify(rows),
@@ -616,7 +620,9 @@ export async function upsertAudiosEnvios(rows: AudioEnvioRow[]): Promise<number>
   if (rows.length === 0) return 0;
   let res: Response;
   try {
-    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}`, {
+    // on_conflict=clickup_task_id: PK é `id` (identity); merge resolve pela
+    // UNIQUE de clickup_task_id (senão re-run vira 409). Ver upsertLigacoesEspelho.
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}?on_conflict=clickup_task_id`, {
       method: 'POST',
       headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify(rows),
