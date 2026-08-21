@@ -334,6 +334,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     setEstadoGravacao("preview");
   }, []);
 
+  // Gravação por TOQUE (modo fast): true quando a gravação começou por um
+  // clique (toggle) em vez de segurar — muda só o descarte do clique curto.
+  const porToqueRef = React.useRef(false);
   function iniciarGravacao() {
     setErroMic(null);
     let promessa: Promise<MediaStream>;
@@ -361,10 +364,11 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           stream.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
           if (decorridoMs < 600) {
-            // clique rápido (não segurou): reseta e AVISA que precisa segurar.
+            // clique rápido: reseta. No modo TOQUE (fast) não existe "segurar" —
+            // reseta em silêncio; no modo SEGURAR (conversa), avisa que precisa segurar.
             if (montadoRef.current) {
               setEstadoGravacao("vazio");
-              flashDicaSegurar();
+              if (!porToqueRef.current) flashDicaSegurar();
             }
             return;
           }
@@ -391,12 +395,22 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   function aoApertarMic(e: React.PointerEvent) {
     e.preventDefault();
     if (estadoGravacao !== "vazio") return;
+    porToqueRef.current = false;
     soltarPendenteRef.current = false;
     iniciarGravacao();
   }
   function aoSoltarMic() {
     if (estadoGravacao === "gravando") pararGravacao();
     else soltarPendenteRef.current = true;
+  }
+  /* Modo fast (2026-08-21): gravar por TOQUE (toggle) — 1º toque começa, 2º
+     toque para. Não usa aoSoltarMic (o botão da conversa segue no segurar). */
+  function alternarGravacaoFast() {
+    if (estadoGravacao === "gravando") pararGravacao();
+    else if (estadoGravacao === "vazio") {
+      porToqueRef.current = true;
+      iniciarGravacao();
+    }
   }
   function regravar() {
     setAudioUrl((a) => {
@@ -1003,22 +1017,18 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                 <button
                   type="button"
                   className={"au-fast-mic" + (estadoGravacao === "gravando" ? " gravando" : "")}
-                  onPointerDown={aoApertarMic}
-                  onPointerUp={aoSoltarMic}
-                  onPointerLeave={aoSoltarMic}
-                  aria-label="Segure para gravar o áudio"
+                  onClick={alternarGravacaoFast}
+                  aria-label={estadoGravacao === "gravando" ? "Tocar para parar de gravar" : "Tocar para gravar o áudio"}
                 >
                   <Mic size={30} />
                 </button>
               )}
               <div className={"au-fast-hint" + (dicaSegurar ? " dica" : "")}>
-                {dicaSegurar
-                  ? "✋ Segure o microfone (não solte) para gravar o áudio."
-                  : estadoGravacao === "gravando"
-                    ? `Gravando… ${fmtRelogio(duracaoMs)} — solte para parar`
-                    : audioPronto
-                      ? "Confere o áudio e envia — já caio no próximo."
-                      : "Segure o microfone e grave usando o dossiê aí de cima."}
+                {estadoGravacao === "gravando"
+                  ? `🔴 Gravando… ${fmtRelogio(duracaoMs)} — toque para parar`
+                  : audioPronto
+                    ? "Confere o áudio e envia — já caio no próximo."
+                    : "👆 Toque no microfone e grave usando o script aí de cima."}
               </div>
               {/* PULAR pessoa (2026-08-20): não quer mandar áudio pra esta →
                   cai no próximo sem enviar. Neutro (a ação verde é enviar). */}
