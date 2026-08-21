@@ -340,6 +340,24 @@ export async function buscarConversaLead(leadTaskId: string): Promise<MensagemCo
 }
 
 /**
+ * Script (roteiro de ligação) de uma task da Ligação — ponte
+ * `/api/mobile/ligacao/:taskId` (MODO FAST, no lugar do dossiê). `null` em
+ * qualquer falha (404/409/502 do backend, resposta sem `ligacao.script`, ou
+ * exceção de rede) — best-effort, nunca lança. LGPD: nada logado.
+ */
+export async function buscarScriptLigacao(ligacaoTaskId: string): Promise<string | null> {
+  try {
+    const r = await fetch(`/api/mobile/ligacao/${encodeURIComponent(ligacaoTaskId)}`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const d = (await r.json().catch(() => null)) as { ligacao?: { script?: string } } | null;
+    const s = d?.ligacao?.script;
+    return typeof s === "string" && s.length > 0 ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Mídia (base64→data-URI) de uma mensagem de áudio — o ▶ das bolhas usa isso
  * sob demanda. `null` em falha (o botão simplesmente não toca).
  */
