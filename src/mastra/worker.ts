@@ -30,11 +30,13 @@ import {
   type DadosJobRecord,
   type DadosJobFalhaTerminal,
   type DadosJobSyncClickup,
+  type DadosJobDrenoOutbox,
   type NomeJob,
 } from './fila.ts';
 
 import { processarRecordJob, processarFalhaTerminalJob, finalizarRecordSemTranscricao } from './processador.ts';
 import { processarSyncClickupJob } from './sync-clickup.ts';
+import { processarDrenoOutboxJob } from './drenar-outbox.ts';
 import { marcarEventoWebhook } from './supabase.ts';
 import { fecharEstadoWebhook } from './estado-webhook.ts';
 import { fecharRateLimiter } from './rate-limiter-clickup.ts';
@@ -63,6 +65,12 @@ const worker = new Worker(
         return;
       case 'sync-clickup':
         await processarSyncClickupJob(job.data as DadosJobSyncClickup);
+        return;
+      case 'drenar-outbox':
+        // ESCRITA-02/LGPD-03 (Fase B, Phase 19 Plano 03): drena o
+        // clickup_outbox do aggregate — reusa a MESMA fila/conexão (sem fila
+        // própria), mesmo padrão de sync-clickup acima.
+        await processarDrenoOutboxJob((job.data as DadosJobDrenoOutbox).aggregateId);
         return;
       default:
         // Nome de job desconhecido (schema futuro/engano de enqueue) — loga
@@ -120,8 +128,9 @@ worker.on('failed', async (job, err) => {
   await alertarDLQ({
     job: job.name as NomeJob,
     // O job de sync-clickup nao tem whatsappCallId — correlaciona pelo
-    // taskId da Ligacao no lugar (ambos identificam o "o que" falhou).
-    whatsappCallId: dados.whatsappCallId ?? dados.taskId ?? 'n/a',
+    // taskId da Ligacao no lugar (ambos identificam o "o que" falhou). O job
+    // de drenar-outbox (Fase B, Phase 19 Plano 03) so tem aggregateId.
+    whatsappCallId: dados.whatsappCallId ?? dados.taskId ?? (dados.aggregateId != null ? `aggregate:${dados.aggregateId}` : 'n/a'),
     eventoDuravelId: dados.eventoDuravelId ?? null,
     erro: err?.name || 'erro',
   });
