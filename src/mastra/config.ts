@@ -450,6 +450,17 @@ export const SUPABASE_TABLE_CLICKUP_CAMPO_MAPA =
   process.env.SUPABASE_TABLE_CLICKUP_CAMPO_MAPA || 'clickup_campo_mapa';
 export const SUPABASE_TABLE_NOTAS = process.env.SUPABASE_TABLE_NOTAS || 'notas';
 
+// ===== Fase 18 — Portão 1 (substrato transacional, Caminho B) — nome da RPC =====
+//
+// Nome da RPC plpgsql que src/mastra/outbox-rpc.ts::comOutboxRpc chama
+// (sql/escala/12_rpc_registrar_desfecho.sql). Default SEM prefixo (produção,
+// mesmo padrão de isolamento só-env das SUPABASE_TABLE_* acima); homolog
+// sobrescreve para 'hml_registrar_desfecho' via deploy/homolog.env — sem
+// isso, chamar do homolog escreveria em tabelas de PRODUÇÃO (lição do
+// 17-02). Default sensato -> sem console.warn.
+export const SUPABASE_RPC_REGISTRAR_DESFECHO =
+  process.env.SUPABASE_RPC_REGISTRAR_DESFECHO || 'registrar_desfecho';
+
 // Bucket do Supabase Storage p/ o store canônico de gravações (§2.6) —
 // consumido a partir do plano 17-05. Default sensato ('gravacoes').
 export const SUPABASE_STORAGE_BUCKET_GRAVACOES =
