@@ -392,20 +392,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     pararCronometro();
     recorderRef.current?.stop();
   }
-  function aoApertarMic(e: React.PointerEvent) {
-    e.preventDefault();
-    if (estadoGravacao !== "vazio") return;
-    porToqueRef.current = false;
-    soltarPendenteRef.current = false;
-    iniciarGravacao();
-  }
-  function aoSoltarMic() {
-    if (estadoGravacao === "gravando") pararGravacao();
-    else soltarPendenteRef.current = true;
-  }
-  /* Modo fast (2026-08-21): gravar por TOQUE (toggle) — 1º toque começa, 2º
-     toque para. Não usa aoSoltarMic (o botão da conversa segue no segurar). */
-  function alternarGravacaoFast() {
+  /* Gravar por TOQUE (toggle) — 1º toque começa, 2º toque para. Usado pelos
+     dois botões de microfone (modo fast e conversa). */
+  function alternarGravacao() {
     if (estadoGravacao === "gravando") pararGravacao();
     else if (estadoGravacao === "vazio") {
       porToqueRef.current = true;
@@ -996,7 +985,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                 <button
                   type="button"
                   className={"au-fast-mic" + (estadoGravacao === "gravando" ? " gravando" : "")}
-                  onClick={alternarGravacaoFast}
+                  onClick={alternarGravacao}
                   aria-label={estadoGravacao === "gravando" ? "Tocar para parar de gravar" : "Tocar para gravar o áudio"}
                 >
                   <Mic size={30} />
@@ -1115,7 +1104,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                   <br />
                   {audioPronto
                     ? "Toque em Enviar para mandar o áudio."
-                    : "Segure o microfone e solte para gravar o áudio."}
+                    : "Toque no microfone para gravar o áudio."}
                 </>
               )}
             </div>
@@ -1265,11 +1254,11 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                   <>
                     <span className="au-recdot" />
                     <span className="au-rectime">{fmtMMSS(duracaoMs)}</span>
-                    <span className="au-slide">solte para parar</span>
+                    <span className="au-slide">toque para parar</span>
                   </>
                 ) : (
                   /* chat de verdade (Fase 13 fatia 2): digita = manda TEXTO;
-                     vazio = segura o microfone e manda ÁUDIO (WhatsApp-like) */
+                     vazio = toque no microfone e manda ÁUDIO (WhatsApp-like) */
                   <input
                     className="au-txtin"
                     type="text"
@@ -1301,12 +1290,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                 <button
                   type="button"
                   className={"au-mic" + (gravando ? " recording" : "")}
-                  onPointerDown={aoApertarMic}
-                  onPointerUp={aoSoltarMic}
-                  onPointerCancel={aoSoltarMic}
-                  onPointerLeave={aoSoltarMic}
+                  onClick={alternarGravacao}
                   onContextMenu={(e) => e.preventDefault()}
-                  aria-label="Gravar áudio (segure)"
+                  aria-label={gravando ? "Parar de gravar" : "Gravar áudio (toque)"}
                 >
                   <Mic size={23} />
                 </button>
