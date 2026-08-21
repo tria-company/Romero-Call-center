@@ -132,13 +132,18 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     const vivos = pulados.size === 0 ? leads : leads.filter((l) => !(l.ligacaoTaskId && pulados.has(l.ligacaoTaskId)));
     const porSelo = filtroSelo === "todos" ? vivos : vivos.filter((l) => (l.conversa?.status ?? "enviar_audio") === filtroSelo);
     const q = busca.trim().toLowerCase();
-    if (!q) return porSelo;
     const qDigitos = q.replace(/\D/g, "");
-    return porSelo.filter((l) => {
-      const nomeBate = l.nome.toLowerCase().includes(q);
-      const telBate = qDigitos.length > 0 && l.telefone.replace(/\D/g, "").includes(qDigitos);
-      return nomeBate || telBate;
-    });
+    const base = !q
+      ? porSelo
+      : porSelo.filter((l) => {
+          const nomeBate = l.nome.toLowerCase().includes(q);
+          const telBate = qDigitos.length > 0 && l.telefone.replace(/\D/g, "").includes(qDigitos);
+          return nomeBate || telBate;
+        });
+    // Lead vinculado primeiro (2026-08-21): as linhas com leadTaskId — as que o
+    // modo fast consegue pegar — sobem; avulsas (só-ligação) descem. Sort ESTÁVEL
+    // do V8 preserva a ordem por última mensagem dentro de cada grupo.
+    return [...base].sort((a, b) => (b.leadTaskId ? 1 : 0) - (a.leadTaskId ? 1 : 0));
   }, [leads, filtroSelo, busca, pulados]);
 
   /* Confirma o pular: fecha a Ligação no backend com o motivo; sucesso tira a
