@@ -21,7 +21,6 @@ import {
   resolverVotoAtualLead,
   lerAtendeu,
   tarefaConcluida,
-  normalizarTelefoneE164,
   CAMPOS_LEADS,
   CAMPOS_LIGACOES,
   CAMPOS_AUDIOS,
@@ -29,7 +28,7 @@ import {
   type TaskClickUp,
 } from './clickup.ts';
 import { parseLeadDaTask, derivarRetornoNecessario } from './lote.ts';
-import { variantesTelefoneBr } from './dossie.ts';
+import { canonizarTelefone, variantesTelefone } from './telefone-canonico.ts';
 import { duracaoEmSegundos } from './painel-dados.ts';
 import {
   upsertLeadFullEspelho,
@@ -76,26 +75,13 @@ function campoPreenchido(task: TaskClickUp, fieldId: string): boolean {
   return v !== null && v !== undefined && v !== '';
 }
 
-/** Remove o nono dígito (prefixo móvel BR) quando presente — mesma lógica de
- *  clickup.ts/estado-webhook.ts (duplicada de propósito). Unifica 12↔13 e
- *  10↔11 dígitos ANTES do E.164, pra 2 formatos do MESMO número produzirem o
- *  MESMO telefone_canonico (§5.3 do design — correlação multi-candidato). */
-function semNonoDigito(digitos: string): string {
-  if (digitos.length === 13 && digitos.startsWith('55') && digitos[4] === '9') {
-    return digitos.slice(0, 4) + digitos.slice(5);
-  }
-  if (digitos.length === 11 && digitos[2] === '9') {
-    return digitos.slice(0, 2) + digitos.slice(3);
-  }
-  return digitos;
-}
-
-/** telefone_canonico = E.164 PÓS-normalização do 9º dígito (design §2.1). */
-function telefoneCanonicoE164(raw: string): string | null {
-  if (!raw) return null;
-  const digitos = semNonoDigito(raw.split('@')[0].replace(/\D/g, ''));
-  return normalizarTelefoneE164(digitos);
-}
+// canonizarTelefone/variantesTelefone (semNonoDigito + E.164 pós-normalização
+// do 9º dígito, e o conjunto ±9º dígito) agora vêm de telefone-canonico.ts —
+// fonte ÚNICA da normalização de telefone da Fase B (R4, §5.3): a mesma
+// função usada aqui é a que a correlação do webhook (19-05) e as rotas de
+// escrita (19-07..19-09) vão usar pra casar 12/13 dígitos do mesmo número.
+// As cópias privadas que existiam aqui (semNonoDigito/telefoneCanonicoE164)
+// foram removidas nesta refatoração — ver src/mastra/telefone-canonico.ts.
 
 /** ClickUp entrega datas como epoch string em ms — converte pra timestamptz ISO. */
 function paraTimestampISO(raw: string): string | null {
@@ -194,8 +180,8 @@ export function paraLinhaLigacao(task: TaskClickUp, agora: string): LigacaoEspel
     lead_clickup_task_id: leadClickupTaskIdDaLigacao(task),
     operador: valorCampoLead(task, CAMPOS_LIGACOES.OPERADOR) || null,
     assignee_clickup_id: task.assignees?.[0]?.id ?? null,
-    telefone_canonico: telefoneCanonicoE164(telefoneRaw),
-    telefone_variantes: variantesTelefoneBr(telefoneRaw),
+    telefone_canonico: canonizarTelefone(telefoneRaw),
+    telefone_variantes: variantesTelefone(telefoneRaw),
     script: task.description ?? task.text_content ?? null,
     status: statusLigacao(task),
     // resultado (atendida·recusou·nao_atendida·pulado·sem_whatsapp): a reconstrução fina
