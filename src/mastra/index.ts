@@ -23,6 +23,10 @@ import {
   SUPABASE_RPC_REGISTRAR_DESFECHO,
   SUPABASE_RPC_PULAR_LIGACAO,
   SUPABASE_RPC_CRIAR_LIGACAO_AVULSA,
+  // 19-08: RPC do voto (SoT leads.confirmou_* + ledger votos_ligacao + outbox
+  // na mesma tx) — /voto (caminho ligação) e /lead/:id/voto (caminho lead,
+  // regra determinística p_ligacao_id=null) consomem a MESMA RPC.
+  SUPABASE_RPC_REGISTRAR_VOTO,
 } from './config';
 // Helper transacional único do Caminho B (Portão 1, Fase 18/19): toda
 // mutação de `ligacoes` sob FONTE_LIGACOES='supabase' vira UMA chamada
@@ -1875,6 +1879,26 @@ export const mastra = new Mastra({
             return c.json({ status: 'ok', semAlteracao: true });
           }
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              // REGRA DETERMINÍSTICA TRAVADA (R12, nunca condicional a "se
+              // houver ligação"): esta rota é sobre o LEAD, sem ligação em
+              // curso — SEMPRE p_ligacao_id=null + p_lead_clickup_task_id. A
+              // RPC resolve o lead em discador_leads_espelho, grava a SoT
+              // (leads.confirmou_*) + o ledger (votos_ligacao com
+              // ligacao_task_id='lead:'||lead_id, referência determinística)
+              // + o outbox set_campo, tudo na MESMA tx. /voto (acima) e esta
+              // rota consomem a MESMA RPC — sem ramo condicional.
+              await comOutboxRpc(SUPABASE_RPC_REGISTRAR_VOTO, {
+                p_operador: sess.usuario,
+                p_ligacao_id: null,
+                p_lead_clickup_task_id: leadTaskId,
+                p_romero: romero ?? null,
+                p_andressa: andressa ?? null,
+              });
+              // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
+              derrubarLeadDetalheMem(leadTaskId);
+              return c.json({ status: 'ok' });
+            }
             // Guard anti-IDOR de escrita: a task tem que ser da Lista 01 ANTES
             // de gravar qualquer voto (definirVotoLeadCampo escreve por taskId cru).
             await validarLeadDaLista01(leadTaskId);
@@ -1896,7 +1920,8 @@ export const mastra = new Mastra({
           } catch (e) {
             console.error('[discador] erro ao gravar voto do lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
-            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            const naoEncontrado =
+              msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01') || ehErroRpcNaoAutorizado(e);
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao gravar o voto' }, 502);
@@ -2062,6 +2087,28 @@ export const mastra = new Mastra({
             return c.json({ status: 'ok', semAlteracao: true });
           }
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              // taskId = id LOCAL de `ligacoes` (contrato 19-05/19-09), a
+              // MESMA convenção de /ligando e /desfecho acima. Caminho
+              // LIGAÇÃO — p_ligacao_id não-nulo: registrar_voto resolve
+              // lead/operador pela linha (guard anti-IDOR embutido: RAISE se
+              // a ligação pertence a outro operador) e grava a SoT
+              // (leads.confirmou_*) + o ledger (votos_ligacao, ledger key =
+              // a própria ligação) + o outbox set_campo, tudo na MESMA tx.
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) return c.json({ erro: 'Ligação não encontrada' }, 404);
+              await comOutboxRpc(SUPABASE_RPC_REGISTRAR_VOTO, {
+                p_ligacao_id: ligacaoId,
+                p_operador: sess.usuario,
+                p_romero: voto.romero ?? null,
+                p_andressa: voto.andressa ?? null,
+              });
+              // Read-your-writes no commit local (SC2 — o painel deriva do
+              // commit, não do drain) + kick do dreno checado (fallback
+              // inline sem Redis) — mesmo helper de /ligando/desfecho/pular.
+              await posCommitLigacao(assignee, ligacaoId);
+              return c.json({ status: 'ok' });
+            }
             // Checagem sincrona de autorizacao (CR-01/IDOR) ANTES de
             // enfileirar — Fase 08 Plano 04, follow-up de verificacao. Sem
             // isto, um taskId invalido/de outro operador responderia 200 na
@@ -2116,7 +2163,8 @@ export const mastra = new Mastra({
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
-              msg.includes('nao pertence ao operador');
+              msg.includes('nao pertence ao operador') ||
+              ehErroRpcNaoAutorizado(e);
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao salvar o voto' }, 502);
