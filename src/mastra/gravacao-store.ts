@@ -123,7 +123,21 @@ export async function garantirBucketGravacoes(fetchImpl: FetchLike = fetchPadrao
   }
   if (existente.status === 200) return; // já existe — no-op
 
-  if (existente.status !== 404) {
+  // Bucket ausente: hosted responde 404; o storage-api SELF-HOSTED (quirk
+  // observado em prod 2026-08-22) responde HTTP 400 com corpo
+  // {"statusCode":"404","error":"Bucket not found"}. Sem tratar o 400-com-404,
+  // o caminho de criação nunca roda e TODO job de gravação estaciona.
+  let ausente = existente.status === 404;
+  if (!ausente && existente.status === 400) {
+    let corpoVerificacao = '';
+    try {
+      corpoVerificacao = await existente.text();
+    } catch {
+      // corpo indisponível — segue só com o status (vai lançar abaixo).
+    }
+    ausente = /bucket not found|"statusCode"\s*:\s*"?404"?/i.test(corpoVerificacao);
+  }
+  if (!ausente) {
     throw erroClassificavel(`[gravacao-store] HTTP ${existente.status} ao verificar bucket (${bucket}) origem=supabase`);
   }
 

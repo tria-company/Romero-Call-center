@@ -105,6 +105,38 @@ async function testeBucketToleraCorridaNoPost() {
   checar(chamadas.length === 2, `esperava 2 chamadas (GET+POST), recebeu ${chamadas.length}`);
 }
 
+async function testeBucketAusenteSelfHosted400() {
+  console.log('\n[1d] garantirBucketGravacoes — GET 400 corpo "Bucket not found" (self-hosted) -> POST cria...');
+  // Quirk real de prod (2026-08-22): storage-api self-hosted responde bucket
+  // ausente com HTTP 400 e corpo {"statusCode":"404","error":"Bucket not found"}.
+  const { fetchImpl, chamadas } = criarFetchRoteirizado([
+    {
+      ok: false,
+      status: 400,
+      headers: headersResposta({}),
+      text: async () => '{"statusCode":"404","error":"Bucket not found","message":"Bucket not found"}',
+    },
+    { ok: true, status: 200, headers: headersResposta({}) },
+  ]);
+  await garantirBucketGravacoes(fetchImpl);
+  checar(chamadas.length === 2, `esperava 2 chamadas (GET+POST cria), recebeu ${chamadas.length}`);
+  checar(chamadas[1].init?.method === 'POST', 'apos 400-com-404 no corpo, deveria criar via POST');
+}
+
+async function testeBucket400GenericoAindaLanca() {
+  console.log('\n[1e] garantirBucketGravacoes — GET 400 genérico (sem "not found") -> LANÇA...');
+  const { fetchImpl } = criarFetchRoteirizado([
+    { ok: false, status: 400, headers: headersResposta({}), text: async () => '{"error":"Invalid token"}' },
+  ]);
+  let lancou = false;
+  try {
+    await garantirBucketGravacoes(fetchImpl);
+  } catch {
+    lancou = true;
+  }
+  checar(lancou, '400 sem "Bucket not found" no corpo deveria continuar lançando (erro real)');
+}
+
 // ===== 2) guardarGravacao — idempotência =====
 
 async function testeGuardarIdempotente() {
@@ -185,6 +217,8 @@ async function main() {
   await testeBucketCriaQuandoAusente();
   await testeBucketNoOpQuandoJaExiste();
   await testeBucketToleraCorridaNoPost();
+  await testeBucketAusenteSelfHosted400();
+  await testeBucket400GenericoAindaLanca();
   await testeGuardarIdempotente();
   await testeGuardarShapeUpload();
   await teste411VirouErroClassificavel();
