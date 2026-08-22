@@ -73,8 +73,12 @@ export function urlWhatsApp(bruto: string | undefined | null): string | null {
   return e164 ? `https://wa.me/${e164}` : null;
 }
 
-/** SEM CHAMADOR desde que "Ligar" passou a abrir o call center. Fica porque
- *  devolver a discagem do aparelho é religar esta função. */
+/** RELIGADA (quick-260822-pzh) como FALLBACK plano B: quando o Wavoip falha, o
+ *  botão secundário "Ligar pelo telefone" usa este link pra abrir o discador
+ *  NATIVO do aparelho. Diferente da versão original (desligada porque deixava
+ *  a ligação fora do circuito de desfecho/voto), agora o app COBRA o retorno
+ *  manualmente (fallback-tel.ts) — a ligação sai do circuito automático, mas
+ *  o desfecho ainda é registrado, com o canal marcado. Assinatura preservada. */
 export function linkTelefone(bruto: string | undefined | null): string | null {
   const e164 = paraE164(bruto);
   return e164 ? `tel:+${e164}` : null;
@@ -85,5 +89,43 @@ export function vibrar(ms = 8) {
     navigator.vibrate?.(ms);
   } catch {
     /* aparelho sem motor de vibração */
+  }
+}
+
+/**
+ * Copia o telefone em E.164 (`+55…`) pra área de transferência — ação
+ * "Copiar número" do fallback tel: (D-02). Tenta `navigator.clipboard`
+ * primeiro; sem suporte (ou falha), cai pro fallback `execCommand('copy')`
+ * via `<textarea>` temporário. Retorna `false` sem lançar quando o telefone
+ * não normaliza ou nenhum dos dois caminhos funciona. NUNCA loga o telefone.
+ */
+export async function copiarTelefone(bruto: string | undefined | null): Promise<boolean> {
+  const e164 = paraE164(bruto);
+  if (!e164) return false;
+  const texto = `+${e164}`;
+
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(texto);
+      return true;
+    }
+  } catch {
+    /* clipboard API indisponível/negada — cai pro fallback abaixo */
+  }
+
+  try {
+    if (typeof document === "undefined") return false;
+    const area = document.createElement("textarea");
+    area.value = texto;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
   }
 }
