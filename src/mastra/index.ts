@@ -800,6 +800,13 @@ import {
   // 19-08 em processador.ts).
   lerLigacaoSupabase,
   buscarLigacaoAbertaPorTelefoneSupabase,
+  // Fase B (Phase 19, 19-09): LEITURA de `ligacoes` do Supabase atrás de
+  // FONTE_LIGACOES — fila do operador (id local como taskId, LEITURA-01),
+  // timeline por lead (LEITURA-03) e resolução do lead a partir da ligação
+  // (para a timeline de /timeline). Contrato de resposta idêntico ao ClickUp.
+  buscarFilaSupabase,
+  buscarLigacoesDoLeadSupabase,
+  resolverLeadDaLigacaoSupabase,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -1145,6 +1152,17 @@ export const mastra = new Mastra({
             return c.json({ fila: [], semMapeamento: true });
           }
           try {
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a fila vem de um
+            // SELECT filtrado em `ligacoes` (por `operador` = login, id LOCAL
+            // como taskId — LEITURA-01), NUNCA da listagem geral da Lista 02
+            // (que caiu no incidente que motivou a inversão). A resiliência
+            // (buscarFilaResiliente) era do ClickUp; o Supabase é a própria
+            // fonte, então não passa por ela. Caminho 'clickup' (fallback)
+            // intacto.
+            if (FONTE_LIGACOES === 'supabase') {
+              const fila = await buscarFilaSupabase(sess.usuario);
+              return c.json({ fila });
+            }
             // resiliente: fresca por 20s; ClickUp fora → última cópia boa.
             const fila = await buscarFilaResiliente(assignee);
             return c.json({ fila });
@@ -1173,6 +1191,20 @@ export const mastra = new Mastra({
           }
           const taskId = c.req.param('taskId');
           try {
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' o detalhe/script
+            // vem de um SELECT direto em `ligacoes` por id LOCAL (LEITURA-03),
+            // com os MESMOS 3 guards CR-01 de lerLigacao (não encontrada / não
+            // pertence ao operador / já concluída) — as mensagens de erro de
+            // lerLigacaoSupabase casam os catches abaixo (404/409), então o
+            // tratamento de erro não muda. Caminho 'clickup' (fallback) intacto.
+            if (FONTE_LIGACOES === 'supabase') {
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) {
+                return c.json({ erro: 'Ligação não encontrada' }, 404);
+              }
+              const ligacao = await lerLigacaoSupabase(ligacaoId, sess.usuario);
+              return c.json({ ligacao });
+            }
             const ligacao = await lerLigacao(taskId, assignee);
             return c.json({ ligacao });
           } catch (e) {
