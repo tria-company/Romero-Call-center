@@ -818,6 +818,12 @@ import {
   CHAVE_CADASTROS,
   CHAVE_VOTOS,
   CHAVE_LIGACOES,
+  // Fase B (Phase 19, 19-09): agregados SQL do Supabase (LEITURA-02) — MESMO
+  // shape de campanhaComCache/ligacoesComCache, porém de UM agregado sobre
+  // `ligacoes` (sem paginar a Lista 02). Servem /campanha e /painel-numeros
+  // sob FONTE_LIGACOES='supabase'.
+  resumoCampanhaSupabase,
+  resumoLigacoesSupabase,
 } from './painel-dados.ts';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
 // lida no request) mora na camada Redis-ou-memoria (estado-webhook.ts) —
@@ -1763,7 +1769,15 @@ export const mastra = new Mastra({
             // Dois caches distintos: a Lista 02 (produção/ranking/motivos) e os votos do
             // ClickUp (intenção/cidade). Em paralelo, e cada um degrada sozinho — voto
             // fora do ar não derruba os cards de ligação, que são a maior parte da tela.
-            const [rCamp, rVotos] = await Promise.allSettled([campanhaComCache(), votosComCache()]);
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a fonte de campanha
+            // (produção/ranking/motivos) vira o agregado SQL resumoCampanhaSupabase
+            // (MESMO shape, sem paginar a Lista 02 — LEITURA-02); os votos de
+            // intenção/cidade seguem por votosComCache (inalterado). Caminho
+            // 'clickup' (campanhaComCache) intacto. O degradar-sozinho é preservado.
+            const [rCamp, rVotos] = await Promise.allSettled([
+              FONTE_LIGACOES === 'supabase' ? resumoCampanhaSupabase() : campanhaComCache(),
+              votosComCache(),
+            ]);
             if (rVotos.status === 'rejected') {
               console.error('[painel] votos indisponiveis na campanha:', rVotos.reason instanceof Error ? rVotos.reason.message : String(rVotos.reason));
             }
@@ -1805,10 +1819,15 @@ export const mastra = new Mastra({
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
 
+          // Fase B (19-09): sob FONTE_LIGACOES='supabase' o bloco `ligacoes`
+          // vira o agregado SQL resumoLigacoesSupabase (MESMO shape, sem
+          // paginar a Lista 02 — LEITURA-02). Cadastros (Postgres) e votos
+          // (ClickUp/espelho) seguem inalterados. Caminho 'clickup'
+          // (ligacoesComCache) intacto; cada bloco degrada sozinho.
           const [rCad, rVotos, rLig] = await Promise.allSettled([
             cadastrosComCache(),
             votosComCache(),
-            ligacoesComCache(),
+            FONTE_LIGACOES === 'supabase' ? resumoLigacoesSupabase() : ligacoesComCache(),
           ]);
           if (rCad.status === 'rejected') console.error('[painel] cadastros indisponivel:', rCad.reason instanceof Error ? rCad.reason.message : String(rCad.reason));
           if (rVotos.status === 'rejected') console.error('[painel] votos indisponivel:', rVotos.reason instanceof Error ? rVotos.reason.message : String(rVotos.reason));
