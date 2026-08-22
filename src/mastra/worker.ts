@@ -1,6 +1,7 @@
 // Entrypoint do worker BullMQ em processo separado (Fase 6 Plano 04,
 // escala-150-atendentes; retry/DLQ endurecidos na Fase 19.1 Plano 04,
-// DUR-01/DUR-02).
+// DUR-01/DUR-02; varredura periodica de re-drive da DLQ na Fase 19.1 Plano
+// 05, DUR-03, redrive-dlq.ts).
 //
 // Consome a fila `processamento-ligacao` (fila.ts) fora do caminho da
 // requisicao do webhook Wavoip: despacha cada job por `job.name` para
@@ -51,6 +52,7 @@ import { marcarEventoWebhook } from './supabase.ts';
 import { fecharEstadoWebhook } from './estado-webhook.ts';
 import { fecharRateLimiter } from './rate-limiter-clickup.ts';
 import { iniciarChecagemAlertas, fecharAlertas, alertarEstacionado } from './alertas.ts';
+import { iniciarRedriveDLQ, fecharRedriveDLQ } from './redrive-dlq.ts';
 
 // Degradacao graciosa: sem REDIS_URL, fila.ts roda em modo inline (o
 // webhook processa a request sincrona, 06-03) — nao ha fila para este
@@ -219,6 +221,12 @@ console.log(`[worker] consumindo a fila ${NOME_FILA} (concurrency=${FILA_CONCURR
 // (linhas 46-51 acima) já impede que rode sem fila/Redis para monitorar.
 iniciarChecagemAlertas();
 
+// Fase 19.1 Plano 05 (DUR-03): varredura periódica da DLQ — re-driva failed
+// TRANSITÓRIOS sozinha (rate-spaced, DLQ_REDRIVE_ESPACO_MS entre re-adds) e
+// alarma jobs presos além de DLQ_AGE_ALERTA_MS. Mesmo gate do modo bullmq
+// (redrive-dlq.ts também no-op em modo inline).
+iniciarRedriveDLQ();
+
 // ===== Graceful shutdown (INFRA-05) =====
 //
 // SIGTERM (deploy/scale-down do swarm, dentro do stop_grace_period) ou
@@ -238,6 +246,7 @@ async function encerrar(sinal: NodeJS.Signals): Promise<void> {
     console.error('[worker] falha ao drenar/fechar o worker:', e instanceof Error ? e.message : String(e));
   }
   fecharAlertas();
+  await fecharRedriveDLQ();
   await fecharFila();
   await fecharEstadoWebhook();
   // INFRA-05: o worker abre o cliente Redis do rate limiter ao escrever no
