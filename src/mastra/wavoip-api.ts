@@ -15,8 +15,13 @@ import {
   WAVOIP_API_BASE,
   WAVOIP_WEBHOOK_URL,
   WAVOIP_WEBHOOK_TOKEN,
+  REDIS_URL,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
+// A4 (Pacote A / incidente 2026-08-22): espelho Redis do invCache, molde de
+// estado-webhook.ts — sobrevive a restart do processo web. NUNCA lança pro
+// chamador (mesma convenção): Redis fora do ar degrada pro cache em memória.
+import Redis from 'ioredis';
 
 /** Dispositivo Wavoip normalizado para a UI (sem token — o token nao vai ao painel). */
 export interface DispositivoWavoip {
@@ -143,15 +148,83 @@ export interface DeviceWavoipPublico {
 
 let invCache: { at: number; mapa: Map<string, InvWavoip> } = { at: 0, mapa: new Map() };
 
+// ===== A4 (Pacote A / incidente 2026-08-22) — espelho Redis do invCache =====
+//
+// Casca Redis-ou-memoria, molde de estado-webhook.ts (garantirCliente):
+// backend escolhido UMA vez no boot por REDIS_URL. Sem Redis, o invCache
+// continua só em memória (comportamento de sempre — cold start após restart
+// espera o próximo refresh de rede). Com Redis, o inventário (que CONTÉM
+// tokens de device) sobrevive a restart: o valor vive só server-side, NUNCA
+// vai a log (T-mfp-02).
+const MODO_INV: 'redis' | 'memoria' = REDIS_URL ? 'redis' : 'memoria';
+
+let clienteInv: Redis | null = null;
+
+function garantirClienteInv(): Redis {
+  if (!clienteInv) {
+    clienteInv = new Redis(REDIS_URL, {
+      maxRetriesPerRequest: 2,
+      enableOfflineQueue: false,
+      connectTimeout: 5000,
+    });
+    // So para nao derrubar o processo com unhandled error — mensagem curta,
+    // NUNCA a REDIS_URL (pode embutir credencial) nem o valor do inventario.
+    clienteInv.on('error', (e) => {
+      console.error('[wavoip-api] erro de conexao Redis do inventario (degradando):', e instanceof Error ? e.message : String(e));
+    });
+  }
+  return clienteInv;
+}
+
+const CHAVE_INV = 'wv:inv';
+const INV_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Espelha o inventário vivo no Redis (best-effort, NUNCA lança). O valor contém tokens — nunca logado. */
+async function salvarInventarioRedis(mapa: Map<string, InvWavoip>): Promise<void> {
+  if (MODO_INV !== 'redis') return;
+  try {
+    await garantirClienteInv().set(CHAVE_INV, JSON.stringify(Array.from(mapa.entries())), 'PX', INV_TTL_MS);
+  } catch (e) {
+    console.error('[wavoip-api] falha ao espelhar inventario no Redis (degradando p/ so-memoria):', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * Re-hidrata o invCache a partir do espelho Redis num miss frio (invCache
+ * vazio — ex. logo após restart do processo). Best-effort, NUNCA lança: em
+ * qualquer erro/miss, no-op silencioso (o refresh de rede seguinte cobre).
+ * `invCache.at` NÃO é tocado — fica 0, pra não bloquear o próximo refresh.
+ */
+async function hidratarInventarioDoRedis(): Promise<void> {
+  if (MODO_INV !== 'redis') return;
+  try {
+    const bruto = await garantirClienteInv().get(CHAVE_INV);
+    if (!bruto) return;
+    const entradas = JSON.parse(bruto) as Array<[string, InvWavoip]>;
+    if (Array.isArray(entradas) && entradas.length > 0 && invCache.mapa.size === 0) {
+      invCache = { at: invCache.at, mapa: new Map(entradas) };
+    }
+  } catch (e) {
+    console.error('[wavoip-api] falha ao hidratar inventario do Redis (degradando p/ cache vazio):', e instanceof Error ? e.message : String(e));
+  }
+}
+
 /**
  * Atualiza o inventário vivo respeitando um TTL (default 60s). NUNCA lança: em
  * falha de rede/API, mantém o snapshot anterior (degradação graciosa — o
  * call-routing cai pro device global, o comportamento de sempre).
+ *
+ * A4: num miss frio (cache vazio, ex. logo após restart), tenta re-hidratar
+ * do espelho Redis ANTES de bater na rede — barato (~ms) e deixa tokens
+ * disponíveis mesmo se a API Wavoip estiver lenta/fora nesse instante.
  */
 export async function garantirInventarioWavoip(maxIdadeMs = 60_000): Promise<void> {
   if (!wavoipApiConfigurada()) return;
   const agora = Date.now();
   if (invCache.at && agora - invCache.at < maxIdadeMs) return;
+  if (MODO_INV === 'redis' && invCache.mapa.size === 0) {
+    await hidratarInventarioDoRedis();
+  }
   try {
     const brutos = await buscarDevicesBrutos();
     const mapa = new Map<string, InvWavoip>();
@@ -170,12 +243,79 @@ export async function garantirInventarioWavoip(maxIdadeMs = 60_000): Promise<voi
       });
     }
     invCache = { at: agora, mapa };
+    void salvarInventarioRedis(mapa);
   } catch (e) {
-    // Mantém o snapshot anterior; marca `at` pra não martelar a API em loop.
+    // Mantém o snapshot anterior (que pode ser o hidratado do Redis acima);
+    // marca `at` pra não martelar a API em loop.
     invCache = { at: agora, mapa: invCache.mapa };
     console.error('[wavoip-api] falha ao atualizar inventario (mantendo cache):', e instanceof Error ? e.message : String(e));
   }
 }
+
+/**
+ * A5 (Pacote A / incidente 2026-08-22, T-mfp-04): tira o refresh do inventário
+ * do caminho crítico da discagem (/config, /dispositivo/lease). `Promise.race`
+ * entre o refresh real (que segue em BACKGROUND populando invCache+Redis pra
+ * próxima chamada mesmo se perder a corrida) e um teto de tempo — NUNCA lança,
+ * NUNCA espera além do teto. Sem isso, uma API Wavoip em timeout travava toda
+ * discagem atrás dela (o incidente que originou o Pacote A).
+ */
+export async function aquecerInventarioWavoip(tetoMs = 2500): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let resolvido = false;
+    const finalizar = (): void => {
+      if (resolvido) return;
+      resolvido = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finalizar, tetoMs);
+    timer.unref?.();
+    void garantirInventarioWavoip()
+      .catch(() => {})
+      .then(finalizar);
+  });
+}
+
+/** Handle do refresh periódico de background (A5) — idempotente. */
+let refreshInvHandle: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Arma o refresh periódico do inventário em BACKGROUND (A5) — desacopla o
+ * invCache de bater na API só quando uma requisição de discagem passa por
+ * /config. Idempotente (segunda chamada é no-op); só arma quando a API Wavoip
+ * está configurada; `unref()` no timer pra não segurar o processo vivo (molde
+ * de iniciarChecagemAlertas em alertas.ts).
+ */
+export function iniciarRefreshInventarioWavoip(intervaloMs = 60_000): void {
+  if (refreshInvHandle) return;
+  if (!wavoipApiConfigurada()) return;
+  refreshInvHandle = setInterval(() => void garantirInventarioWavoip().catch(() => {}), intervaloMs);
+  refreshInvHandle.unref?.();
+  console.log(`[wavoip-api] refresh periódico do inventário ativo (intervalo=${intervaloMs}ms, modo=${MODO_INV})`);
+}
+
+/** Para o refresh periódico do inventário (molde de fecharAlertas). No-op se não iniciado. */
+export function fecharRefreshInventarioWavoip(): void {
+  if (refreshInvHandle) {
+    clearInterval(refreshInvHandle);
+    refreshInvHandle = null;
+  }
+}
+
+/** Fecha o cliente Redis do inventário (graceful shutdown) — no-op em modo memória. */
+export async function fecharInventarioWavoip(): Promise<void> {
+  if (clienteInv) {
+    await clienteInv.quit();
+    clienteInv = null;
+  }
+}
+
+console.log(
+  MODO_INV === 'redis'
+    ? '[wavoip-api] inventario de devices espelhado em Redis (sobrevive a restart)'
+    : '[wavoip-api] inventario de devices em memoria (nao sobrevive a restart)',
+);
 
 /** Token de um device pelo id, do inventário vivo em cache (server-side). null se ausente. */
 export function tokenDeviceWavoip(deviceId: string): string | null {
