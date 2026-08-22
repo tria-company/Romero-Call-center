@@ -735,6 +735,12 @@ import {
   wavoipApiConfigurada,
   garantirInventarioWavoip,
   snapshotDevicesWavoip,
+  // A5 (Pacote A / incidente 2026-08-22): teto o refresh do inventário no
+  // caminho crítico de discagem (aquecerInventarioWavoip) + refresh
+  // periódico de background que desacopla o invCache de bater na API só
+  // quando /config passa por ele.
+  aquecerInventarioWavoip,
+  iniciarRefreshInventarioWavoip,
 } from './wavoip-api.ts';
 // Alerta de degradação de device (A2, Pacote A / incidente 2026-08-22):
 // dispara fire-and-forget quando /config resolve modo 'global'/'indisponivel'.
@@ -1290,8 +1296,10 @@ export const mastra = new Mastra({
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           // Aquece o inventário vivo da Wavoip (TTL 60s) pra resolver o token do
           // device dedicado do operador. Não-fatal: se a API cair, resolve pelo
-          // env/pool/global como sempre (garantirInventarioWavoip nunca lança).
-          await garantirInventarioWavoip();
+          // env/pool/global como sempre. A5 (Pacote A / incidente 2026-08-22):
+          // aquecerInventarioWavoip tem teto ~2.5s — se a API Wavoip travar, a
+          // corrida perdedora segue em background (nunca bloqueia esta rota).
+          await aquecerInventarioWavoip();
           const cfg = resolverConfigDoUsuario(sess.usuario);
           // A2 (Pacote A / incidente 2026-08-22): alerta o gestor quando o
           // operador cai em modo degradado (chip orfao global ou device
@@ -1318,7 +1326,8 @@ export const mastra = new Mastra({
           // deviceConectadoWavoip pra pular device caido do pool. Sem isso, esta
           // rota (chamada isolada, sem passar por /config antes) podia rodar
           // com cache frio e nunca filtrar hibernating. Não-fatal (nunca lança).
-          await garantirInventarioWavoip();
+          // A5: teto ~2.5s (aquecerInventarioWavoip) — nunca trava o lease.
+          await aquecerInventarioWavoip();
           const alocado = await alocarDevice(sess.usuario);
           if (!alocado) return c.json({ erro: 'sem device livre' }, 503);
           return c.json(alocado);
@@ -3218,3 +3227,11 @@ export const mastra = new Mastra({
     ],
   },
 });
+
+// A5 (Pacote A / incidente 2026-08-22): arma o refresh periódico de
+// background do inventário Wavoip — desacopla o invCache de bater na API só
+// quando uma requisição de discagem (/config, /dispositivo/lease) passa por
+// ele. Self-guarded (no-op se a API Wavoip não está configurada) e `unref()`
+// no timer (molde do top-level `iniciarChecagemAlertas()` de worker.ts) — o
+// web não tem SIGTERM próprio, confia no exit do processo.
+iniciarRefreshInventarioWavoip();
