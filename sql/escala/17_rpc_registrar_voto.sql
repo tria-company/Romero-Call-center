@@ -42,6 +42,15 @@
 -- carrega o clickup_task_id) — `aggregate_id` só agrupa/ordena o dreno
 -- (ix_outbox_ordem), nunca é usado como FK/join.
 --
+-- WR-02 (achado da revisão 19-REVIEW.md): quando a ligação NÃO tem lead
+-- (avulsa inbound sem vínculo — `lead_clickup_task_id` e `lead_id` ambos null),
+-- `hashtextextended(null)` e `'lead:'||null` davam NULL, violando o NOT NULL de
+-- `clickup_outbox.aggregate_id`/`dedup_key` (23502) e abortando a RPC inteira —
+-- o voto (SoT + ledger) sumia atrás de um 404 mascarado. Agora ambos caem
+-- (coalesce) para `v_lig_key` (sempre não-null), um surrogate determinístico
+-- por-voto: o voto persiste no ledger e a idempotência do dedup se mantém.
+-- No caso COM lead o coalesce curto-circuita — comportamento byte-idêntico.
+--
 -- Idempotente (CREATE OR REPLACE FUNCTION) — pode reaplicar sem quebrar,
 -- desde que a assinatura não mude.
 
@@ -105,7 +114,15 @@ begin
          atualizado_em=now()
    where clickup_task_id = v_lead_ct;
 
-  v_lead_aggregate_id := coalesce(v_lead_id_ligacao, hashtextextended(v_lead_ct, 0));
+  -- WR-02: surrogate determinístico do aggregate_id do outbox 'lead'. Quando a
+  -- ligação NÃO tem lead (avulsa inbound sem vínculo: v_lead_ct e v_lead_id
+  -- ambos null), hashtextextended(v_lead_ct=null) daria NULL e violaria o
+  -- NOT NULL de clickup_outbox.aggregate_id (23502) — abortando a RPC inteira e
+  -- PERDENDO o voto (SoT + ledger) atrás de um 404 mascarado. Cai para o
+  -- v_lig_key (sempre não-null: coalesce(clickup_task_id,'local:'||id) no
+  -- caminho ligação; 'lead:'||ct no caminho lead) como identidade determinística.
+  -- Caso COM lead: coalesce curto-circuita em v_lead_ct — byte-idêntico ao de antes.
+  v_lead_aggregate_id := coalesce(v_lead_id_ligacao, hashtextextended(coalesce(v_lead_ct, v_lig_key), 0));
 
   if p_romero is not null then
     -- Ledger: append-only por (ligacao_task_id, candidato) — corrigir a
@@ -123,7 +140,9 @@ begin
       'set_campo',
       true,
       jsonb_build_object('campo', 'CONFIRMOU_VOTO_ROMERO', 'valor', p_romero),
-      'lead:' || v_lead_ct || ':voto:romero:' || v_lig_key,
+      -- WR-02: dedup_key determinístico e NÃO-null mesmo sem lead (coalesce para
+      -- v_lig_key); com lead, curto-circuita em v_lead_ct — mesma chave de antes.
+      'lead:' || coalesce(v_lead_ct, v_lig_key) || ':voto:romero:' || v_lig_key,
       coalesce((select max(seq) from clickup_outbox where aggregate='lead' and aggregate_id=v_lead_aggregate_id), 0) + 1
     )
     on conflict (dedup_key) do nothing;
@@ -143,7 +162,8 @@ begin
       'set_campo',
       true,
       jsonb_build_object('campo', 'CONFIRMOU_VOTO_ANDRESSA', 'valor', p_andressa),
-      'lead:' || v_lead_ct || ':voto:andressa:' || v_lig_key,
+      -- WR-02: idem — dedup_key determinístico e não-null sem lead.
+      'lead:' || coalesce(v_lead_ct, v_lig_key) || ':voto:andressa:' || v_lig_key,
       coalesce((select max(seq) from clickup_outbox where aggregate='lead' and aggregate_id=v_lead_aggregate_id), 0) + 1
     )
     on conflict (dedup_key) do nothing;
@@ -215,7 +235,15 @@ begin
          atualizado_em=now()
    where clickup_task_id = v_lead_ct;
 
-  v_lead_aggregate_id := coalesce(v_lead_id_ligacao, hashtextextended(v_lead_ct, 0));
+  -- WR-02: surrogate determinístico do aggregate_id do outbox 'lead'. Quando a
+  -- ligação NÃO tem lead (avulsa inbound sem vínculo: v_lead_ct e v_lead_id
+  -- ambos null), hashtextextended(v_lead_ct=null) daria NULL e violaria o
+  -- NOT NULL de clickup_outbox.aggregate_id (23502) — abortando a RPC inteira e
+  -- PERDENDO o voto (SoT + ledger) atrás de um 404 mascarado. Cai para o
+  -- v_lig_key (sempre não-null: coalesce(clickup_task_id,'local:'||id) no
+  -- caminho ligação; 'lead:'||ct no caminho lead) como identidade determinística.
+  -- Caso COM lead: coalesce curto-circuita em v_lead_ct — byte-idêntico ao de antes.
+  v_lead_aggregate_id := coalesce(v_lead_id_ligacao, hashtextextended(coalesce(v_lead_ct, v_lig_key), 0));
 
   if p_romero is not null then
     insert into hml_votos_ligacao (ligacao_task_id, lead_task_id, operador, candidato, escolha, origem)
@@ -229,7 +257,9 @@ begin
       'set_campo',
       true,
       jsonb_build_object('campo', 'CONFIRMOU_VOTO_ROMERO', 'valor', p_romero),
-      'lead:' || v_lead_ct || ':voto:romero:' || v_lig_key,
+      -- WR-02: dedup_key determinístico e NÃO-null mesmo sem lead (coalesce para
+      -- v_lig_key); com lead, curto-circuita em v_lead_ct — mesma chave de antes.
+      'lead:' || coalesce(v_lead_ct, v_lig_key) || ':voto:romero:' || v_lig_key,
       coalesce((select max(seq) from hml_clickup_outbox where aggregate='lead' and aggregate_id=v_lead_aggregate_id), 0) + 1
     )
     on conflict (dedup_key) do nothing;
@@ -249,7 +279,8 @@ begin
       'set_campo',
       true,
       jsonb_build_object('campo', 'CONFIRMOU_VOTO_ANDRESSA', 'valor', p_andressa),
-      'lead:' || v_lead_ct || ':voto:andressa:' || v_lig_key,
+      -- WR-02: idem — dedup_key determinístico e não-null sem lead.
+      'lead:' || coalesce(v_lead_ct, v_lig_key) || ':voto:andressa:' || v_lig_key,
       coalesce((select max(seq) from hml_clickup_outbox where aggregate='lead' and aggregate_id=v_lead_aggregate_id), 0) + 1
     )
     on conflict (dedup_key) do nothing;
