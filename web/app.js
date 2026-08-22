@@ -251,21 +251,29 @@
     var id=leaseDeviceId;leaseDeviceId=null;
     apiPost('/api/discador/dispositivo/release',{deviceId:id}).catch(function(){});
   }
+  // A3 (Pacote A / incidente 2026-08-22): re-busca /config no INICIO DE CADA
+  // ligacao (nao mais 1x por sessao) — sem isso, um operador que logava na
+  // janela de pico (Wavoip em timeout/invCache frio/WAVOIP_DEVICES vazio) e
+  // caia no chip global ficava PRESO nesse token o dia inteiro, mesmo depois
+  // do device dedicado voltar a resolver. Se o token mudou desde a instancia
+  // atual, descarta o singleton 'wavoip' envenenado e re-instancia.
   function garantirWavoip(){
-    if((deviceModo==='dedicado'||deviceModo==='global')&&wavoip){return Promise.resolve(wavoip);}
-    if(deviceModo===null){
-      return api('/api/discador/config').then(function(res){return res.json();}).then(function(cfg){
-        deviceModo=cfg.modo;
-        if(deviceModo==='pool'){return alocarDeviceELigar();}
-        if(deviceModo==='dedicado'){dedicadoDeviceId=cfg.deviceId||null;}
-        // DEVICE-04: numero dedicado caiu do WhatsApp (hibernating) — para AQUI
-        // com um aviso especifico em vez de deixar a discagem falhar sem explicacao.
-        if(cfg.desconectado){var ed=new Error('numero desconectado');ed.numeroDesconectado=true;throw ed;}
-        wavoipToken=cfg.wavoipToken;if(!wavoipToken){throw new Error('sem token wavoip');}
-        return instanciarWavoip(wavoipToken).then(function(w){wavoip=w;return wavoip;});
-      });
-    }
-    return alocarDeviceELigar();
+    return api('/api/discador/config').then(function(res){return res.json();}).then(function(cfg){
+      deviceModo=cfg.modo;
+      if(deviceModo==='pool'){return alocarDeviceELigar();}
+      // A1: device dedicado sem token resolvivel — NUNCA disca pelo global
+      // (chip orfao fora da conta do operador). endCallUI mostra aviso claro.
+      if(deviceModo==='indisponivel'){var ei=new Error('chip indisponivel');ei.chipIndisponivel=true;throw ei;}
+      if(deviceModo==='dedicado'){dedicadoDeviceId=cfg.deviceId||null;}
+      // DEVICE-04: numero dedicado caiu do WhatsApp (hibernating) — para AQUI
+      // com um aviso especifico em vez de deixar a discagem falhar sem explicacao.
+      if(cfg.desconectado){var ed=new Error('numero desconectado');ed.numeroDesconectado=true;throw ed;}
+      var novo=cfg.wavoipToken;
+      if(!novo){throw new Error('sem token wavoip');}
+      if(wavoip&&wavoipToken===novo){return wavoip;}
+      wavoipToken=novo;
+      return instanciarWavoip(novo).then(function(w){wavoip=w;return wavoip;});
+    });
   }
   // DEVICE-03: deviceId corrente pro /ligando desambiguar a task ativa —
   // dedicado usa o deviceId aprendido de /config, pool usa o lease da
@@ -309,6 +317,7 @@
       tocarChamando();// reforça o tom (já iniciado no gesto) agora que discou
       wireCallEvents(currentCall);
     }).catch(function(e){
+      if(e&&e.chipIndisponivel){setCallEstado('erro','Seu número está indisponível agora. Tente de novo em instantes.');endCallUI();return;}
       if(e&&e.semDeviceLivre){setCallEstado('erro','Sem número livre agora. Tente de novo em instantes.');endCallUI();return;}
       if(e&&e.numeroDesconectado){setCallEstado('erro','Seu número caiu do WhatsApp. Avise o gestor para reconectar.');endCallUI();return;}
       var neg=(e&&(e.name==='NotAllowedError'||e.name==='SecurityError'));
