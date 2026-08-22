@@ -439,6 +439,28 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
   await marcarCallFalhaProcessada(dados.whatsappCallId);
 }
 
+/**
+ * Fase 19.1 Plano 08 (DUR-02/06/07) — decide o taskId da Ligacao de um RECORD
+ * a partir dos 3 candidatos possiveis, na ordem de preferencia (mais duravel
+ * primeiro): `taskIdData` (resolvido no ENQUEUE, index.ts — imune ao TTL de
+ * 6h da correlacao Redis, mesmo racional do `telefone` ja capturado no job),
+ * `taskIdRedis` (map in-memory/estado-webhook.ts, TTL 6h), `taskIdClickup`
+ * (fallback persistido — Ligacao aberta com o mesmo TELEFONE). Nenhum dos 3
+ * resolvido -> `{ estacionar: true }`: o caller NAO cria mais uma Ligacao
+ * avulsa as cegas (troca a avulsa-as-cegas por park-para-humano, mais
+ * conservador — decisao travada do dono da operacao, "nada se perde sem
+ * decisao humana"). Funcao PURA (zero I/O) — testavel isolada pela smoke
+ * (correlacao-durabilidade.smoke.mjs) sem precisar de Redis/ClickUp reais.
+ */
+export function decidirTaskIdRecord(cands: {
+  taskIdData?: string | null;
+  taskIdRedis?: string | null;
+  taskIdClickup?: string | null;
+}): { taskId?: string; estacionar: boolean } {
+  const taskId = cands.taskIdData || cands.taskIdRedis || cands.taskIdClickup || undefined;
+  return taskId ? { taskId, estacionar: false } : { estacionar: true };
+}
+
 // ===== processarRecordJob — transcricao + Agente Analise + Agente Contexto =====
 // (OPER-01..05, D-P3-01..15, FILA-02/FILA-05)
 
@@ -499,30 +521,40 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   }
   registrarSucessoEtapa('transcricao');
 
-  // D-P3-01: resolve a task da Ligacao — 1) map in-memory (task reportada em
-  // /api/discador/ligando), 2) fallback persistido no ClickUp (Ligacao
-  // aberta com o mesmo TELEFONE), 3) D-P3-03: nao casou nenhuma -> cria uma
-  // Ligacao avulsa (nenhuma ligacao real fica sem registro).
-  let taskId = await lerTaskAtiva(telefone, dados.deviceId);
-  if (!taskId) {
+  // Fase 19.1 Plano 08 (DUR-02/06/07): correlacao DURAVEL — prefere
+  // `dados.taskId` (resolvido NA HORA DO ENQUEUE, index.ts, imune ao TTL de
+  // 6h da correlacao Redis telefone->task: retries de qualquer idade, mesmo
+  // >6h, nao dependem mais do TTL). So cai pro fallback in-memory/ClickUp
+  // quando ausente (compat com job antigo, gravado antes deste deploy, sem o
+  // campo). D-P3-03 REVISADO: nao casou NENHUM dos 3 -> ja NAO cria mais
+  // Ligacao avulsa as cegas (podia chutar a ligacao errada) — ESTACIONA
+  // (throw classificado permanente) para decisao humana. O registro cru fica
+  // em webhook_eventos + o job parkeado (worker 19.1-04, [ALERTA][ESTACIONADO]);
+  // o resgate (scripts/resgatar-sem-correlacao.mjs, T2) reconstroi a
+  // correlacao via ClickUp (telefone+data) depois.
+  const taskIdRedis = dados.taskId ? null : await lerTaskAtiva(telefone, dados.deviceId);
+  let taskIdClickup: string | null = null;
+  if (!dados.taskId && !taskIdRedis) {
     try {
-      taskId = await buscarLigacaoAbertaPorTelefone(telefone);
+      taskIdClickup = await buscarLigacaoAbertaPorTelefone(telefone);
     } catch (e) {
       console.error('[processador] falha ao buscar Ligacao aberta por telefone:', e);
     }
   }
-  if (!taskId) {
-    try {
-      const avulsa = await criarLigacaoAvulsa(telefone);
-      taskId = avulsa.id;
-    } catch (e) {
-      // Criar a avulsa e o unico jeito de nao perder o registro desta
-      // gravacao (D-P3-03) — se ISSO falhar, lanca (retentavel, mesmo efeito
-      // do 502 de hoje). CR-02: nada foi marcado ainda, o retry re-roda limpo.
-      console.error('[processador] falha ao criar Ligacao avulsa:', e);
-      throw e instanceof Error ? e : new Error(String(e));
-    }
+  const decisaoTaskId = decidirTaskIdRecord({
+    taskIdData: dados.taskId ?? null,
+    taskIdRedis,
+    taskIdClickup,
+  });
+  if (decisaoTaskId.estacionar) {
+    // WR-01: SO o callId (LGPD) — nunca telefone.
+    console.warn(`[processador] RECORD sem correlacao resolvivel (call=${callId}) — estacionando para decisao humana`);
+    // Mensagem ESTAVEL — classificarErro (classificar-erro.ts) mapeia
+    // 'sem correlacao call' para permanente; o worker (19.1-04) vira
+    // UnrecoverableError e estaciona com [ALERTA][ESTACIONADO].
+    throw new Error(`sem correlacao call→task (call=${callId})`);
   }
+  const taskId = decisaoTaskId.taskId as string;
 
   // D-P3-04: grava a transcricao (field TRANSCRICAO + comentario),
   // substituindo a nota no GHL. Loga-e-segue (nao trava a cadeia por uma

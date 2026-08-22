@@ -91,6 +91,10 @@ import {
   criarLigacaoAvulsa,
   valorCampoLead,
   CAMPOS_LEADS,
+  // Fase 19.1 Plano 08 (DUR-02/06): fallback persistido de correlação
+  // call->task, resolvido NA HORA DO ENQUEUE do RECORD (correlação durável,
+  // ver import de lerTaskAtiva abaixo).
+  buscarLigacaoAbertaPorTelefone,
   // Canal de envio Evolution API + Lista de Áudios (Fase 12 Plano 03,
   // ENVIO-01/02/03/06): a rota GET usa a versão CACHEADA (quick 260818-perf:
   // varredura ~8-30s + poll de 30s do painel = cache stale-while-revalidate);
@@ -706,6 +710,10 @@ import {
   guardarCorrelacaoDevice,
   lerCorrelacaoDevice,
   guardarTaskAtiva,
+  // Fase 19.1 Plano 08 (DUR-02/06): lê a task ativa NA HORA DO ENQUEUE do
+  // RECORD — mesma leitura que o processador já fazia inline, agora também
+  // no webhook, para tornar a correlação durável no próprio job.
+  lerTaskAtiva,
 } from './estado-webhook.ts';
 // Fila assincrona de processamento (Fase 06 Plano 01/03): os branches RECORD
 // e CALL-terminal enfileiram o trabalho pesado (transcricao/analise/
@@ -3123,7 +3131,23 @@ export const mastra = new Mastra({
               // RECORD (mesmo racional do telefone). null quando o device
               // nao foi derivavel (degrada telefone-so, DD-07-13).
               const deviceId = (await lerCorrelacaoDevice(whatsappCallId)) || undefined;
-              const dados: DadosJobRecord = { whatsappCallId, telefone, recordUrl, payload, eventoDuravelId, deviceId };
+              // Fase 19.1 Plano 08 (DUR-02/06): resolve a task ativa NA HORA
+              // DO ENQUEUE (mesmo ladder que o processador já fazia inline,
+              // lerTaskAtiva -> fallback ClickUp por telefone) e injeta no
+              // job — correlação DURÁVEL, imune ao TTL de 6h da correlação
+              // Redis telefone->task (mesmo racional do `telefone` acima).
+              // Best-effort: falha na resolução aqui não bloqueia o enqueue
+              // (processarRecordJob tem o MESMO fallback, compat com job sem
+              // taskId); undefined quando nenhuma das duas resolveu.
+              let taskId = (await lerTaskAtiva(telefone, deviceId)) || undefined;
+              if (!taskId) {
+                try {
+                  taskId = (await buscarLigacaoAbertaPorTelefone(telefone)) || undefined;
+                } catch (e) {
+                  console.error('[wavoip] falha ao resolver taskId no enqueue do RECORD (fallback no processador):', e);
+                }
+              }
+              const dados: DadosJobRecord = { whatsappCallId, telefone, recordUrl, payload, eventoDuravelId, deviceId, taskId };
               const { enfileirado } = await enfileirarRecord(dados);
               if (enfileirado) {
                 return c.json({ status: 'enfileirado' });

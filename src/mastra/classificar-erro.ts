@@ -86,18 +86,34 @@ function ehStatus5xx(status: number): boolean {
   return status >= 500 && status <= 599;
 }
 
+// Marcador da Fase 19.1 Plano 08 (DUR-02/06) — mensagem ESTÁVEL lançada por
+// processarRecordJob (processador.ts) quando um RECORD não tem correlação
+// resolvível (nem dados.taskId do enqueue, nem Redis, nem ClickUp por
+// telefone). Checado ANTES de qualquer status HTTP/marcador de origem: é uma
+// decisão de NEGÓCIO (park-para-humano), não uma falha de infra — vence
+// mesmo se a mensagem coincidir com algum marcador/status por acaso.
+const MARCADOR_SEM_CORRELACAO = 'sem correlacao call';
+
 /**
  * Classifica um erro de terceiro em transitório (re-tenta pra sempre) ou
  * permanente (estaciona com alarme). Aceita `Error` OU `string` (failedReason
- * cru do BullMQ). Ordem de decisão: 1) rede/timeout, 2) status HTTP
- * conhecido, 3) marcador de origem (ClickUp) sem status extraível, 4) default
- * conservador — origem/status desconhecidos caem SEMPRE em transitório
- * (decisão travada "nada descartado sem humano").
+ * cru do BullMQ). Ordem de decisão: 0) marcador estável de correlação
+ * ausente (Fase 19.1 Plano 08 — permanente sempre), 1) rede/timeout, 2)
+ * status HTTP conhecido, 3) marcador de origem (ClickUp) sem status
+ * extraível, 4) default conservador — origem/status desconhecidos caem
+ * SEMPRE em transitório (decisão travada "nada descartado sem humano").
  */
 export function classificarErro(erro: unknown): ErroClassificado {
   const mensagem = derivarMensagem(erro);
   const msg = mensagem.toLowerCase();
   const status = extrairStatus(msg);
+
+  // 0) RECORD sem correlação resolvível (Fase 19.1 Plano 08, DUR-02/06):
+  // sempre PERMANENTE — estaciona para decisão humana, nunca re-tenta pra
+  // sempre uma correlação que não vai aparecer sozinha.
+  if (msg.includes(MARCADOR_SEM_CORRELACAO)) {
+    return { tipo: 'permanente', origem: 'desconhecido', status, motivo: 'correlacao-ausente' };
+  }
 
   // 1) rede/timeout sempre vence, mesmo com um 3-dígitos coincidente no texto.
   if (ehMarcadorDeRede(msg)) {

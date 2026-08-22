@@ -38,6 +38,16 @@ export interface DadosJobRecord {
   payload: Record<string, any>;
   eventoDuravelId: string | null; // linha webhook_eventos, p/ o job fechar o desfecho
   deviceId?: string; // DEVICE-03/DD-07-15: capturado no enqueue (lerCorrelacaoDevice), imune ao TTL entre CALL e RECORD
+  /**
+   * Fase 19.1 Plano 08 (DUR-02/06/07): taskId da Ligacao JA RESOLVIDO no
+   * enqueue (index.ts, branch RECORD do webhook) — correlacao DURAVEL, imune
+   * ao TTL de 6h da correlacao Redis telefone->task (mesmo racional do
+   * `telefone` acima). processarRecordJob (processador.ts) PREFERE este
+   * campo; so cai pro fallback (lerTaskAtiva/buscarLigacaoAbertaPorTelefone)
+   * quando ausente (compat com job antigo, gravado antes deste deploy, que
+   * nao tem o campo). Opcional de proposito.
+   */
+  taskId?: string;
 }
 
 export interface DadosJobFalhaTerminal {
