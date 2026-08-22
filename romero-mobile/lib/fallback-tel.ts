@@ -95,10 +95,14 @@ export function montarMarcadores(p: {
   classificacao?: string;
   demanda?: string;
   observacao?: string;
+  /** R9 (quick-260822-rr6): "⭐ Super fã" — item 2 (marcador no comentário).
+   *  O item 1 (tag permanente no lead) é feito à parte via `registrarSuperFa`. */
+  superFa?: boolean;
 }): string {
   const partes: string[] = [p.origem === "apos-whatsapp" ? "[tel apos-whatsapp]" : "[tel direto]"];
   if (p.classificacao) partes.push(`[classificacao] ${p.classificacao}`);
   if (p.demanda?.trim()) partes.push(`[demanda] ${p.demanda.trim()}`);
+  if (p.superFa) partes.push("[super-fa]");
   let texto = partes.join(" ");
   if (p.observacao?.trim()) texto = `${texto} ${p.observacao.trim()}`;
   return texto.slice(0, LIMITE_MARCADORES);
@@ -121,6 +125,8 @@ export async function registrarDesfechoTel(
     demanda?: string;
     observacao?: string;
     origem?: OrigemTel;
+    /** R9 (quick-260822-rr6): embutido no marcador via `montarMarcadores`. */
+    superFa?: boolean;
   },
 ): Promise<boolean> {
   try {
@@ -131,6 +137,7 @@ export async function registrarDesfechoTel(
             classificacao: opts?.classificacao,
             demanda: opts?.demanda,
             observacao: opts?.observacao,
+            superFa: opts?.superFa,
           })
         : opts?.observacao;
     const r = await fetch("/api/mobile/desfecho", {
@@ -163,6 +170,23 @@ export async function registrarAnotacaoLigacao(taskId: string, texto: string): P
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ texto }),
     });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Marca o LEAD ligado à Ligação como "super-fã" (R9, quick-260822-rr6) pela
+ * rota-ponte `/api/mobile/ligacao/:taskId/super-fa` — item 1 (tag PERMANENTE
+ * na pessoa, Lista 01); o marcador `[super-fa]` no comentário/observação é o
+ * item 2, embutido via `montarMarcadores`. Best-effort: nunca lança. `r.ok`
+ * cobre também o caso "sem lead vinculado" (o backend responde 200 com aviso
+ * — não é falha, só não havia o que taguear).
+ */
+export async function registrarSuperFa(taskId: string): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/mobile/ligacao/${encodeURIComponent(taskId)}/super-fa`, { method: "POST" });
     return r.ok;
   } catch {
     return false;

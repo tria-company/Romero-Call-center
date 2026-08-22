@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Circle,
   Copy,
   Phone,
   PhoneCall,
@@ -26,6 +27,7 @@ import {
   montarMarcadores,
   registrarAnotacaoLigacao,
   registrarDesfechoTel,
+  registrarSuperFa,
   registrarVotoTel,
   type LigacaoTelPendente,
 } from "@/lib/fallback-tel";
@@ -191,6 +193,11 @@ export function Fila({
   const [classificacaoTel, setClassificacaoTel] = React.useState("");
   const [demandaTel, setDemandaTel] = React.useState("");
   const [obsTel, setObsTel] = React.useState("");
+  // R9 (quick-260822-rr6): "⭐ Super fã" — opcional, disponível nos dois
+  // caminhos do retorno (atendeu/não atendeu). Persistência em 2 partes: tag
+  // permanente no lead (registrarSuperFa, item 1) + marcador no comentário/
+  // observação (montarMarcadores, item 2).
+  const [superFaTel, setSuperFaTel] = React.useState(false);
   const [enviandoTel, setEnviandoTel] = React.useState(false);
   const [erroTel, setErroTel] = React.useState(false);
   const [copiadoId, setCopiadoId] = React.useState<string | null>(null);
@@ -208,6 +215,7 @@ export function Fila({
     setClassificacaoTel("");
     setDemandaTel("");
     setObsTel("");
+    setSuperFaTel(false);
     setErroTel(false);
   }
 
@@ -283,6 +291,9 @@ export function Fila({
     if (!alvoTel || enviandoTel || !classificacaoTel) return;
     setEnviandoTel(true);
     setErroTel(false);
+    // R9: tag no lead é best-effort — não bloqueia/gate o resto do fluxo
+    // (a Ligação pode não ter lead vinculado; o backend já trata isso).
+    if (superFaTel) await registrarSuperFa(alvoTel.taskId);
     const textoAnotacao =
       "📞 Atendida (tel)\n" +
       montarMarcadores({
@@ -290,6 +301,7 @@ export function Fila({
         classificacao: classificacaoTel,
         demanda: demandaTel,
         observacao: obsTel,
+        superFa: superFaTel,
       });
     const okAnotacao = await registrarAnotacaoLigacao(alvoTel.taskId, textoAnotacao);
     const okVoto = okAnotacao && (await registrarVotoTel(alvoTel.taskId, { romero: votoRomero, andressa: votoAndressa }));
@@ -311,12 +323,15 @@ export function Fila({
     if (!alvoTel || enviandoTel || !categoriaTel) return;
     setEnviandoTel(true);
     setErroTel(false);
+    // R9: tag no lead é best-effort — não bloqueia/gate o desfecho.
+    if (superFaTel) await registrarSuperFa(alvoTel.taskId);
     const ok = await registrarDesfechoTel(alvoTel.taskId, "nao_atendida", {
       categoria: categoriaTel,
       classificacao: classificacaoTel || undefined,
       demanda: demandaTel || undefined,
       observacao: obsTel || undefined,
       origem: alvoTel.origem,
+      superFa: superFaTel || undefined,
     });
     setEnviandoTel(false);
     if (!ok) {
@@ -444,6 +459,15 @@ export function Fila({
                 disabled={enviandoTel}
               />
             </div>
+            <button
+              type="button"
+              className={`fp-superfa fp-btn48${superFaTel ? " active" : ""}`}
+              onClick={() => setSuperFaTel((v) => !v)}
+              disabled={enviandoTel}
+              aria-pressed={superFaTel}
+            >
+              {superFaTel ? <CheckCircle2 size={18} /> : <Circle size={18} />} ⭐ Super fã
+            </button>
             {erroTel && <div className="fp-perro">Não deu para registrar — tente de novo.</div>}
             <div className="fp-pacts">
               <button type="button" className="seg fp-btn48" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
@@ -516,6 +540,15 @@ export function Fila({
               maxLength={500}
               disabled={enviandoTel}
             />
+            <button
+              type="button"
+              className={`fp-superfa fp-btn48${superFaTel ? " active" : ""}`}
+              onClick={() => setSuperFaTel((v) => !v)}
+              disabled={enviandoTel}
+              aria-pressed={superFaTel}
+            >
+              {superFaTel ? <CheckCircle2 size={18} /> : <Circle size={18} />} ⭐ Super fã
+            </button>
             {erroTel && <div className="fp-perro">Não deu para registrar — tente de novo.</div>}
             <div className="fp-pacts">
               <button type="button" className="seg fp-btn48" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
@@ -876,4 +909,11 @@ const FP_CSS = `
 .fp-telsegbtn{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:999px; padding:6px 14px; font-size:12.5px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-telsegbtn.active{ background:var(--accent); border-color:var(--accent); color:#fff; }
 .fp-telsegbtn:disabled{ opacity:.55; cursor:default; }
+
+/* R9 (quick-260822-rr6): toggle grande "⭐ Super fã" — mesmo padrão visual dos
+   botões novos (≥48px, ícone, texto legível), disponível nos dois caminhos
+   do retorno tel:. */
+.fp-superfa{ width:100%; display:flex; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); background:var(--bg-2); color:var(--dim); border-radius:12px; font-size:14px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-superfa.active{ border-color:color-mix(in srgb, #f5c43d 55%, var(--line)); background:color-mix(in srgb, #f5c43d 16%, transparent); color:#f5c43d; }
+.fp-superfa:disabled{ opacity:.55; cursor:default; }
 `;
