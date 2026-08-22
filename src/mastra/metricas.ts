@@ -18,6 +18,7 @@ import {
   METRICAS_ERRO_JANELA_MS,
   METRICAS_429_JANELA_MS,
   METRICAS_PRESENCA_TTL_MS,
+  METRICAS_SERIE_TTL_MS,
 } from './config.ts';
 import { profundidadeFila } from './fila.ts';
 import { contarChamadasAtivas } from './estado-webhook.ts';
@@ -64,6 +65,7 @@ const PREFIXO_PRESENCA = 'met:presenca:';
 const PREFIXO_ETAPA = 'met:etapa:'; // + etapa + ':' + (erros|total) + ':' + bucket
 const PREFIXO_DIA = 'met:dia:'; // + data (YYYY-MM-DD)
 const PREFIXO_429 = 'met:429:'; // + bucket
+const PREFIXO_SERIE = 'met:serie:'; // + metrica-chave (ex.: erro:webhook, sucesso:sync, 429) + ':' + data (YYYY-MM-DD)
 
 /** Bucket de janela fixa — a chave muda a cada janela, TTL cobre a janela inteira (contador janelado sem sorted set). */
 function bucketJanela(janelaMs: number): number {
@@ -133,11 +135,13 @@ function registrarErroEtapaMem(etapa: EtapaMetrica): void {
   c.erros += 1;
   c.total += 1;
   registrarErroDiaMem();
+  incrementarSerieMem('erro:' + etapa); // F1 — serie duravel
 }
 
 function registrarSucessoEtapaMem(etapa: EtapaMetrica): void {
   const c = garantirContadorEtapaMem(etapa);
   c.total += 1;
+  incrementarSerieMem('sucesso:' + etapa); // F1 — serie duravel
 }
 
 function taxaErroPorEtapaMem(): Record<EtapaMetrica, { erros: number; total: number; taxa: number }> {
@@ -164,10 +168,53 @@ function registrar429Mem(): void {
     contador429Mem.contagem = 0;
   }
   contador429Mem.contagem += 1;
+  incrementarSerieMem('429'); // F1 — serie duravel
 }
 
 function contagem429Mem(): number {
   return contador429Mem.bucket === bucketJanela(METRICAS_429_JANELA_MS) ? contador429Mem.contagem : 0;
+}
+
+// ===== F1 — serie diaria DURAVEL (retencao METRICAS_SERIE_TTL_MS), separada dos
+// contadores janelados acima. Write-side p/ investigacao pos-incidente; NAO
+// alimenta lerMetricas()/avaliarThresholds (essas seguem os contadores
+// janelados de sempre). LGPD: metrica-chave e so um rotulo de etapa/tipo
+// (ex. 'erro:webhook', '429') — NUNCA telefone/CPF.
+
+const serieMem = new Map<string, number>(); // `${metrica}:${data}` -> contagem
+
+function chaveSerieMem(metrica: string, data: string): string {
+  return `${metrica}:${data}`;
+}
+
+/** Poda best-effort (mesmo espirito do backstop de recordsMem) — modo memoria e 1 instancia, entao um Map ilimitado vazaria memoria ao longo de 90 dias simulados via reinicios frequentes; mantem so o dia de hoje quando estoura o teto. */
+function podarSerieMem(): void {
+  if (serieMem.size <= 20000) return;
+  const hoje = diaHojeStr();
+  for (const chave of serieMem.keys()) {
+    if (!chave.endsWith(':' + hoje)) serieMem.delete(chave);
+  }
+}
+
+function incrementarSerieMem(metrica: string): void {
+  const chave = chaveSerieMem(metrica, diaHojeStr());
+  serieMem.set(chave, (serieMem.get(chave) || 0) + 1);
+  if (serieMem.size > 20000) podarSerieMem();
+}
+
+function ultimosDias(dias: number): string[] {
+  const out: string[] = [];
+  const hoje = new Date();
+  for (let i = 0; i < dias; i++) {
+    const d = new Date(hoje);
+    d.setUTCDate(d.getUTCDate() - i);
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+function lerSerieDiariaMem(metrica: string, dias: number): Array<{ data: string; contagem: number }> {
+  return ultimosDias(dias).map((data) => ({ data, contagem: serieMem.get(chaveSerieMem(metrica, data)) || 0 }));
 }
 
 // ===== Backend REDIS — contadores janelados via chave+bucket + PEXPIRE =====
@@ -211,10 +258,12 @@ async function registrarErroEtapaRedis(etapa: EtapaMetrica): Promise<void> {
   const chaveDia = chaveDiaHoje();
   await cli.incr(chaveDia);
   await cli.pexpire(chaveDia, DIA_TTL_MS);
+  await incrementarSerieRedis('erro:' + etapa); // F1 — serie duravel
 }
 
 async function registrarSucessoEtapaRedis(etapa: EtapaMetrica): Promise<void> {
   await incrementarEtapaRedis(etapa, 'total');
+  await incrementarSerieRedis('sucesso:' + etapa); // F1 — serie duravel
 }
 
 async function taxaErroPorEtapaRedis(): Promise<Record<EtapaMetrica, { erros: number; total: number; taxa: number }>> {
@@ -246,11 +295,35 @@ async function registrar429Redis(): Promise<void> {
   const cli = garantirCliente();
   await cli.incr(chave);
   await cli.pexpire(chave, METRICAS_429_JANELA_MS * 2);
+  await incrementarSerieRedis('429'); // F1 — serie duravel
 }
 
 async function contagem429Redis(): Promise<number> {
   const valor = await garantirCliente().get(chave429());
   return Number(valor) || 0;
+}
+
+// ===== F1 — serie diaria DURAVEL (Redis) — ver comentario da variante mem acima. =====
+
+function chaveSerieRedis(metrica: string, data: string): string {
+  return `${PREFIXO_SERIE}${metrica}:${data}`;
+}
+
+async function incrementarSerieRedis(metrica: string): Promise<void> {
+  const cli = garantirCliente();
+  const chave = chaveSerieRedis(metrica, diaHojeStr());
+  await cli.incr(chave);
+  await cli.pexpire(chave, METRICAS_SERIE_TTL_MS);
+}
+
+async function lerSerieDiariaRedis(metrica: string, dias: number): Promise<Array<{ data: string; contagem: number }>> {
+  const cli = garantirCliente();
+  const out: Array<{ data: string; contagem: number }> = [];
+  for (const data of ultimosDias(dias)) {
+    const valor = await cli.get(chaveSerieRedis(metrica, data));
+    out.push({ data, contagem: Number(valor) || 0 });
+  }
+  return out;
 }
 
 // ===== Chamadas por device (por numero) — contador diario total/atendida/nao =====
@@ -435,6 +508,27 @@ export async function lerChamadasDevicesHoje(): Promise<Record<string, ContagemD
   } catch (e) {
     console.error('[metricas] falha ao ler chamadas por device (degradando p/ vazio):', e instanceof Error ? e.message : String(e));
     return {};
+  }
+}
+
+/**
+ * F1 — leitor OPCIONAL da serie diaria duravel (retencao METRICAS_SERIE_TTL_MS,
+ * 90 dias por default). `metrica` e um rotulo (`'erro:webhook'`, `'sucesso:sync'`,
+ * `'429'`, etc — os mesmos usados internamente por registrarErroEtapa/
+ * registrarSucessoEtapa/registrar429ClickUp). Write-side p/ investigacao
+ * pos-incidente — NAO alimenta o painel (lerMetricas/avaliarThresholds seguem
+ * os contadores janelados de sempre, inalterados). Degrada p/ [] em falha,
+ * NUNCA lanca.
+ */
+export async function lerSerieDiaria(
+  metrica: string,
+  dias = 7,
+): Promise<Array<{ data: string; contagem: number }>> {
+  try {
+    return MODO === 'redis' ? await lerSerieDiariaRedis(metrica, dias) : lerSerieDiariaMem(metrica, dias);
+  } catch (e) {
+    console.error('[metricas] falha ao ler serie diaria (degradando p/ vazio):', e instanceof Error ? e.message : String(e));
+    return [];
   }
 }
 
