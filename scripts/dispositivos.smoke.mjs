@@ -131,7 +131,11 @@ async function rodarCenarioPool() {
 
 function setarEnvsCenarioPrincipal() {
   process.env.WAVOIP_DEVICES = 'dev1:tok1:5511999990001,dev2:tok2:5511999990002';
-  process.env.WAVOIP_USER_DEVICES = 'joao:dev1';
+  // 'joao' dedicado a dev1 (existe no inventario); 'pedro' dedicado a
+  // dev_fantasma (NAO existe em WAVOIP_DEVICES nem no inventario vivo da
+  // Wavoip) — cenario do Caso 5 (A1, Pacote A / incidente 2026-08-22): device
+  // dedicado sem token resolvivel -> modo 'indisponivel', NUNCA pool/global.
+  process.env.WAVOIP_USER_DEVICES = 'joao:dev1,pedro:dev_fantasma';
   process.env.WAVOIP_DEVICE_TOKEN = 'tok_global_nao_deveria_ser_usado';
 }
 
@@ -165,6 +169,16 @@ async function main() {
   checar(
     cfgMaria.wavoipToken === null && cfgMaria.deviceId === null && cfgMaria.modo === 'pool',
     `resolverConfigDoUsuario('maria') deveria ser {wavoipToken:null,deviceId:null,modo:'pool'}, recebido: ${JSON.stringify(cfgMaria)}`,
+  );
+
+  // Caso 5 (A1, Pacote A / incidente 2026-08-22): pedro tem device DEDICADO
+  // (dev_fantasma) mas ele nao existe em WAVOIP_DEVICES nem no inventario vivo
+  // (cache vazio neste smoke, sem rede) — NAO deve cair em pool/global (chip
+  // orfao fora da conta); deve resolver 'indisponivel' com wavoipToken null.
+  const cfgPedro = resolverConfigDoUsuario('pedro');
+  checar(
+    cfgPedro.wavoipToken === null && cfgPedro.deviceId === 'dev_fantasma' && cfgPedro.modo === 'indisponivel',
+    `resolverConfigDoUsuario('pedro') deveria ser {wavoipToken:null,deviceId:'dev_fantasma',modo:'indisponivel'}, recebido: ${JSON.stringify(cfgPedro)}`,
   );
 
   // tokenDoDevice: existente vs inexistente.

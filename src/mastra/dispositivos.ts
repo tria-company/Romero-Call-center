@@ -25,7 +25,12 @@ import { snapshotUsuarios } from './usuarios.ts';
 // Wavoip (cacheado server-side). Aditivo — se não achar, cai pro pool/global.
 import { tokenDeviceWavoip, deviceConectadoWavoip } from './wavoip-api.ts';
 
-export type ModoDevice = 'dedicado' | 'pool' | 'global';
+// 'indisponivel' (Pacote A, incidente 2026-08-22, A1): operador com device
+// DEDICADO cujo token nao resolve (nem env nem cache vivo) — nunca cai em
+// pool/global, que seria um chip ORFAO fora da conta do operador (compartilhado
+// entre atendentes e invisivel pro webhook). So quando NAO ha device dedicado
+// e que pool/global (legado de verdade) entram em jogo.
+export type ModoDevice = 'dedicado' | 'pool' | 'global' | 'indisponivel';
 
 export interface ConfigDevice {
   wavoipToken: string | null;
@@ -131,14 +136,21 @@ function existeDeviceDePool(): boolean {
 }
 
 /**
- * Resolve a config de device do usuario autenticado (DEVICE-01, DD-07-02):
+ * Resolve a config de device do usuario autenticado (DEVICE-01, DD-07-02;
+ * Pacote A / incidente 2026-08-22, A1):
  * 1. usuario tem device dedicado -> esse token, modo 'dedicado'. Fonte primária
  *    (D-04): `wavoip_device_id` do snapshot do store; fallback de degradação
  *    pro mapa `WAVOIP_USER_DEVICES` do env SOMENTE quando o snapshot está
  *    vazio — não é uma segunda fonte viva.
- * 2. senao, se ha device de pool livre no inventario -> wavoipToken null, modo 'pool'
- *    (o frontend fara lease no inicio da chamada — plano 07-02).
- * 3. senao -> WAVOIP_DEVICE_TOKEN global, modo 'global' (comportamento atual de 1 device,
+ * 2. usuario TEM device dedicado mas o token NAO resolve (nem env nem cache
+ *    vivo) -> modo 'indisponivel' (wavoipToken null). NUNCA cai no pool/global
+ *    abaixo — isso seria discar por um chip ORFAO fora da conta do operador
+ *    (compartilhado entre atendentes, invisivel pro webhook). O frontend
+ *    mostra um aviso e nao disca (A3); o backend alerta o gestor (A2).
+ * 3. senao (usuario SEM device dedicado — legado de verdade), se ha device de
+ *    pool livre no inventario -> wavoipToken null, modo 'pool' (o frontend
+ *    fara lease no inicio da chamada — plano 07-02).
+ * 4. senao -> WAVOIP_DEVICE_TOKEN global, modo 'global' (comportamento atual de 1 device,
  *    degradacao graciosa — criterio 4 do roadmap).
  */
 export function resolverConfigDoUsuario(usuario: string): ConfigDevice {
@@ -150,7 +162,7 @@ export function resolverConfigDoUsuario(usuario: string): ConfigDevice {
   if (deviceIdDedicado) {
     // Fonte 1: inventário do env (WAVOIP_DEVICES). Fonte 2 (fallback aditivo):
     // inventário vivo da conta Wavoip em cache — o painel associa o operador ao
-    // `id` do device da API, cujo token vem daqui. Nenhum dos dois -> pool/global.
+    // `id` do device da API, cujo token vem daqui.
     const token = tokenDoDevice(deviceIdDedicado) ?? tokenDeviceWavoip(deviceIdDedicado);
     if (token) {
       // DEVICE-04: so sinaliza quando o cache vivo CONFIRMA desconexao
@@ -160,6 +172,10 @@ export function resolverConfigDoUsuario(usuario: string): ConfigDevice {
         ? { wavoipToken: token, deviceId: deviceIdDedicado, modo: 'dedicado', desconectado: true }
         : { wavoipToken: token, deviceId: deviceIdDedicado, modo: 'dedicado' };
     }
+    // A1: nenhuma das duas fontes resolveu o token deste device dedicado —
+    // NAO cai em pool/global (chip orfao fora da conta). O pool/global abaixo
+    // so e alcancado por usuario SEM device dedicado.
+    return { wavoipToken: null, deviceId: deviceIdDedicado, modo: 'indisponivel' };
   }
   if (existeDeviceDePool()) {
     return { wavoipToken: null, deviceId: null, modo: 'pool' };
