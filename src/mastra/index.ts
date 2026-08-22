@@ -736,6 +736,9 @@ import {
   garantirInventarioWavoip,
   snapshotDevicesWavoip,
 } from './wavoip-api.ts';
+// Alerta de degradação de device (A2, Pacote A / incidente 2026-08-22):
+// dispara fire-and-forget quando /config resolve modo 'global'/'indisponivel'.
+import { alertarDeviceDegradado } from './alertas.ts';
 
 // Máscara de telefone (D-09/OBS-03, fonte única) — usada na mensagem de
 // alerta de queda de device do atendente (Quick 260819-p1r), nunca o número
@@ -1290,6 +1293,13 @@ export const mastra = new Mastra({
           // env/pool/global como sempre (garantirInventarioWavoip nunca lança).
           await garantirInventarioWavoip();
           const cfg = resolverConfigDoUsuario(sess.usuario);
+          // A2 (Pacote A / incidente 2026-08-22): alerta o gestor quando o
+          // operador cai em modo degradado (chip orfao global ou device
+          // dedicado sem token resolvivel) — fire-and-forget, nunca bloqueia
+          // a resposta; cooldown/no-PII dentro de alertarDeviceDegradado.
+          if (cfg.modo === 'global' || cfg.modo === 'indisponivel') {
+            void alertarDeviceDegradado(sess.usuario, cfg.modo, cfg.deviceId);
+          }
           return c.json(cfg);
         },
       },

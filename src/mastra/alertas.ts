@@ -117,6 +117,61 @@ export async function alertarThreshold(titulo: string, detalhe: string): Promise
   }
 }
 
+/**
+ * Cooldown (ms) por operador do alerta de degradação de device (A2, Pacote A
+ * / incidente 2026-08-22, T-mfp-05) — molde fixo de MIN_TOTAL_ETAPA_ALERTA
+ * acima (não é env, D-07 não pediu configuração fina aqui). Evita flood: sem
+ * isso, cada /api/discador/config de um operador em modo degradado dispararia
+ * um alerta Slack POR REQUISIÇÃO.
+ */
+const DEVICE_ALERTA_COOLDOWN_MS = 15 * 60_000;
+
+/** Último disparo (epoch ms) de alertarDeviceDegradado por operador — dedup por cooldown, não edge-trigger (chave = usuario). */
+const ultimoAlertaDevicePorOperador = new Map<string, number>();
+
+/**
+ * Alerta best-effort de degradação de device (A2, Pacote A / incidente
+ * 2026-08-22): dispara quando `resolverConfigDoUsuario` resolve 'global' (chip
+ * órfão compartilhado) ou 'indisponivel' (device dedicado sem token) — MESMO
+ * MOLDE de `alertarThreshold` acima: console.error estruturado ANTES do POST
+ * (sempre, mesmo sem ALERT_WEBHOOK_URL), depois no-op se ALERT_WEBHOOK_URL
+ * vazio, depois POST best-effort dentro de try/catch que só loga em falha e
+ * NUNCA relança. LGPD/segredo (T-mfp-01): log e payload carregam SOMENTE
+ * usuario/modo/deviceId — NUNCA token/telefone/CPF.
+ *
+ * Cooldown por operador (T-mfp-05, 15min): se o mesmo operador já alertou
+ * dentro da janela, retorna sem alertar (nem log nem POST) — evita flood de
+ * um operador preso em modo degradado batendo /config repetidamente. Nota
+ * (mesmo espírito do T-10-04-I2 de alertas.ts): o cooldown é POR-PROCESSO —
+ * o web pode ter réplicas, então até N alertas/15min/operador (N = número de
+ * réplicas) é aceitável, não um lock distribuído.
+ */
+export async function alertarDeviceDegradado(usuario: string, modo: string, deviceId: string | null): Promise<void> {
+  const agora = Date.now();
+  const ultimo = ultimoAlertaDevicePorOperador.get(usuario);
+  if (ultimo !== undefined && agora - ultimo < DEVICE_ALERTA_COOLDOWN_MS) return;
+  ultimoAlertaDevicePorOperador.set(usuario, agora);
+
+  console.error(`[ALERTA][DEVICE] usuario=${usuario} modo=${modo} deviceId=${deviceId ?? ''}`);
+
+  if (!ALERT_WEBHOOK_URL) return;
+
+  try {
+    await fetch(ALERT_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: `⚠️ Device degradado — operador ${usuario} em modo '${modo}'${deviceId ? ` (deviceId ${deviceId})` : ''}`,
+      }),
+    });
+  } catch (e) {
+    console.error(
+      '[alertas] falha ao enviar alerta de device degradado via webhook (degradando p/ so-log):',
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
 // ===== Checagem periódica — setInterval de módulo, idempotente =====
 
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
