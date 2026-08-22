@@ -117,9 +117,18 @@ async function testeCr01Idempotencia() {
       `CR-01: a passada de reuse deve reportar 1 enviada (recebido ${JSON.stringify(rReuse)})`,
     );
 
-    // O CONTRASTE ("sem id resolvido -> criarTask É chamado 1x") é exercido no
-    // teste do WR-03 (Task 5), pois o caminho de criação exige que a guarda do
-    // dreno LIBERE a saída inline sem Redis — o que é exatamente o fix do WR-03.
+    // (b) CONTRASTE: nunca criada (id não resolvido) -> criarTask É chamado 1x.
+    // Só passa porque o WR-03 libera a saída inline sem Redis (senão adiaria).
+    const cria = instalarMock({ clickupTaskId: null });
+    const rCria = await processarDrenoOutboxJob(42);
+    checar(
+      cria.criarTaskPost === 1,
+      `CR-01 (contraste): sem clickup_task_id resolvido, o POST /task deve ser chamado exatamente 1x (recebido ${cria.criarTaskPost})`,
+    );
+    checar(
+      rCria.enviadas === 1,
+      `WR-03: sem Redis, o dreno inline DRENA (criar_task emitido) — recebido ${JSON.stringify(rCria)}`,
+    );
   } finally {
     global.fetch = fetchReal;
   }
@@ -177,9 +186,33 @@ async function testeWr01Atribuicao() {
   );
 }
 
+// ===== WR-03 — DRENO_INLINE sem Redis DRENA (não bloqueia) =====
+async function testeWr03InlineDrena() {
+  const { modoRateLimiterDreno, adquirirTokenDreno } = await import('../src/mastra/rate-limiter-dreno.ts');
+  const { drenoInlineLiberadoSemRedis } = await import('../src/mastra/drenar-outbox.ts');
+
+  checar(
+    modoRateLimiterDreno() === 'sem-redis',
+    `WR-03: pré-condição — modoRateLimiterDreno() deve ser 'sem-redis' (recebido '${modoRateLimiterDreno()}')`,
+  );
+  // A guarda do dreno LIBERA a saída inline sem Redis...
+  checar(
+    drenoInlineLiberadoSemRedis() === true,
+    'WR-03: sem Redis, a guarda do dreno inline deve LIBERAR (o teto global só existe entre réplicas)',
+  );
+  // ...mas o limiter GLOBAL em si continua fail-CLOSED (contrato preservado para
+  // o caminho worker/multi-réplica — não é onde se decide o inline).
+  const tokenGlobal = await adquirirTokenDreno();
+  checar(
+    tokenGlobal === false,
+    `WR-03: adquirirTokenDreno() (balde global) continua fail-CLOSED sem Redis (recebido ${tokenGlobal}) — a exceção inline vive na guarda do dreno, não aqui`,
+  );
+}
+
 async function main() {
   await testeCr01Idempotencia();
   await testeWr01Atribuicao();
+  await testeWr03InlineDrena();
 
   if (falhas.length > 0) {
     console.error('=== SMOKE FAIL ===');

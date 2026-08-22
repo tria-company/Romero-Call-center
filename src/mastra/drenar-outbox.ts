@@ -36,10 +36,13 @@
 //
 // Rate limiter GLOBAL fail-CLOSED (19-06/R9, `rate-limiter-dreno.ts`): ANTES
 // de cada saída ao ClickUp (cada primitiva por-ID dentro de `processarLinha`)
-// o dreno adquire um token do balde central; sem token (Redis fora ou balde
-// vazio além do teto de espera) a linha ADIA — nunca deixa passar sem o teto
-// global, ao contrário do rate-limiter-clickup.ts (fail-open) que continua na
-// frente de `fetchClickUp` como segunda camada.
+// o dreno adquire um token do balde central; sem token (balde vazio além do
+// teto de espera, ou erro do Redis) a linha ADIA — nunca deixa passar sem o
+// teto global, ao contrário do rate-limiter-clickup.ts (fail-open) que continua
+// na frente de `fetchClickUp` como segunda camada. EXCEÇÃO (WR-03): no caminho
+// INLINE sem Redis (DRENO_INLINE, dev/homolog) o dreno LIBERA — o teto global
+// só existe entre réplicas concorrentes e o inline é single-shot; ver
+// `drenoInlineLiberadoSemRedis`.
 //
 // LGPD/WR-01: NUNCA loga payload/telefone/URL — só `aggregateId`, `linha.op`,
 // `linha.dedup_key`, `linha.status` e a classe/mensagem do erro (propagada
@@ -60,7 +63,7 @@ import {
   marcarDlqLinha,
   type LinhaOutbox,
 } from './outbox-repo.ts';
-import { adquirirTokenDreno } from './rate-limiter-dreno.ts';
+import { adquirirTokenDreno, modoRateLimiterDreno } from './rate-limiter-dreno.ts';
 
 /**
  * Monta o body de `criarTask` a partir do payload de uma linha
@@ -148,13 +151,39 @@ export async function processarDrenoOutboxJob(
 }
 
 /**
+ * WR-03: o caminho INLINE (sem Redis) do dreno NÃO é limitado pelo teto GLOBAL.
+ *
+ * O teto global fail-CLOSED (`rate-limiter-dreno.ts`, 19-06/R9) existe para
+ * impedir que N RÉPLICAS concorrentes do worker furem o orçamento ~90/min do
+ * ClickUp — e ele SÓ é real com o balde Redis central somando as réplicas. Sem
+ * `REDIS_URL` o deploy é o fallback INLINE single-shot (`DRENO_INLINE`, dev/
+ * homolog): um único processo, um agregado por vez, disparado pelo caller —
+ * não há réplicas concorrentes a coordenar, então o teto global não se aplica.
+ *
+ * O bug (revisão 19-REVIEW.md/WR-03): `adquirirTokenDreno()` retorna `false`
+ * imediatamente sem Redis, e como `garantirTokenDreno` roda antes de CADA saída,
+ * o dreno inline NUNCA emitia nada — o outbox enchia e o espelho ClickUp travava
+ * silenciosamente após o flip sem `REDIS_URL`. Aqui distinguimos os dois
+ * caminhos: sem Redis (inline), LIBERA; com Redis (worker/multi-réplica), segue
+ * fail-CLOSED de verdade (overflow do balde OU erro do Redis → bloqueia). A
+ * segunda camada de teto no caminho inline é o choke fail-open por-processo de
+ * `rate-limiter-clickup.ts`, que continua na frente de cada `fetchClickUp`.
+ */
+export function drenoInlineLiberadoSemRedis(): boolean {
+  return modoRateLimiterDreno() === 'sem-redis';
+}
+
+/**
  * Adquire o token do dreno (`rate-limiter-dreno.ts`, fail-CLOSED, 19-06/R9)
- * ANTES de uma saída ao ClickUp. `false` = BLOQUEADO (Redis fora ou balde
- * global esgotado) — o caller (`processarLinha`) trata exatamente como o
- * adiar por ordem (`taskIdAtual` ainda null): retorna `false`, o loop de
+ * ANTES de uma saída ao ClickUp. `false` = BLOQUEADO (balde global esgotado ou
+ * erro do Redis) — o caller (`processarLinha`) trata exatamente como o adiar
+ * por ordem (`taskIdAtual` ainda null): retorna `false`, o loop de
  * `processarDrenoOutboxJob` interrompe (break) e a linha permanece pendente.
+ * EXCEÇÃO (WR-03): sem Redis (caminho inline), LIBERA — ver
+ * `drenoInlineLiberadoSemRedis`.
  */
 async function garantirTokenDreno(linha: LinhaOutbox): Promise<boolean> {
+  if (drenoInlineLiberadoSemRedis()) return true; // WR-03: inline single-shot sem Redis DRENA
   const permitido = await adquirirTokenDreno();
   if (!permitido) {
     console.warn(

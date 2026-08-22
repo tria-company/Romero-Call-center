@@ -133,9 +133,13 @@ async function tentarTokenRedis(): Promise<{ permitido: boolean; esperaMs: numbe
  * FAIL-CLOSED (o oposto de rate-limiter-clickup.ts::adquirirToken):
  *
  *   - Sem REDIS_URL (`MODO !== 'redis'`) → retorna `false` IMEDIATAMENTE,
- *     sem tentar nenhum bucket local. O teto global exige o balde central;
- *     sem ele, o dreno não emite (o caller adia, o outbox permanece
- *     pendente/erro e drena quando o Redis voltar).
+ *     sem tentar nenhum bucket local. Esta função é um teste PURO do balde
+ *     GLOBAL: sem balde central, não há token global — logo `false`. NÃO é
+ *     onde se decide o caminho inline: quem trata o DRENO_INLINE sem Redis é a
+ *     guarda do dreno (`drenar-outbox.ts::garantirTokenDreno` /
+ *     `drenoInlineLiberadoSemRedis`, WR-03), que LIBERA a saída inline
+ *     single-shot (não há réplicas concorrentes a coordenar). Aqui o contrato
+ *     permanece fail-CLOSED para o caminho worker/multi-réplica.
  *   - Com Redis, espera LIMITADA (bounded-wait, mesmo teto
  *     RL_CLICKUP_WAIT_MAX_MS do limiter síncrono) enquanto o balde está
  *     vazio; ao esgotar o teto de espera → retorna `false` (BLOQUEADO), NÃO
@@ -191,5 +195,5 @@ export async function fecharRateLimiterDreno(): Promise<void> {
 console.log(
   MODO === 'redis'
     ? '[rate-limiter-dreno] limiter GLOBAL fail-CLOSED via Redis ativo (teto do dreno de fundo)'
-    : '[rate-limiter-dreno] sem REDIS_URL — dreno ficará BLOQUEADO (fail-CLOSED) até o Redis estar disponível',
+    : '[rate-limiter-dreno] sem REDIS_URL — teto global inativo; o dreno INLINE single-shot (DRENO_INLINE) drena sem o teto (WR-03), que só existe entre réplicas',
 );
