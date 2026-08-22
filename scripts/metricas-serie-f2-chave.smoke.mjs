@@ -13,6 +13,15 @@
 // Uso: node --experimental-strip-types scripts/metricas-serie-f2-chave.smoke.mjs
 
 import { registrarErroEtapa, registrarSucessoEtapa, registrar429ClickUp, lerSerieDiaria } from '../src/mastra/metricas.ts';
+import {
+  digestTelefone,
+  chaveTelefone,
+  chaveTelefoneLegado,
+  chaveTaskAtiva,
+  guardarTaskAtiva,
+  lerTaskAtiva,
+  limparTaskAtiva,
+} from '../src/mastra/estado-webhook.ts';
 
 const falhas = [];
 
@@ -83,12 +92,92 @@ async function testeSerieDiariaNuncaLanca() {
   checar(!lancou, 'lerSerieDiaria não deveria lançar mesmo sem Redis');
 }
 
+// ===== F2 — chave sem telefone em claro =====
+
+const OITO_DIGITOS_CONSECUTIVOS = /\d{8,}/;
+
+function testeDigestDeterministico() {
+  const d1 = digestTelefone('5511999998888');
+  const d2 = digestTelefone('5511999998888');
+  checar(d1 === d2, 'digestTelefone deveria ser determinístico p/ o mesmo input');
+  checar(typeof d1 === 'string' && d1.length === 16, `digestTelefone deveria devolver 16 hex chars, recebido: '${d1}' (len ${d1.length})`);
+  checar(/^[0-9a-f]{16}$/.test(d1), `digestTelefone deveria ser hex lowercase, recebido: '${d1}'`);
+
+  const outro = digestTelefone('5511988887777');
+  checar(d1 !== outro, 'digestTelefone deveria variar p/ telefones diferentes (não é uma constante)');
+}
+
+function testeChaveTelefoneSemNonoDigitoMesmoDigest() {
+  // 12 dígitos (sem o 9, formato Wavoip/webhook) e 13 dígitos (com o 9, formato
+  // Ligação/operador) do MESMO número precisam colapsar no MESMO digest —
+  // senão a correlação call->task quebra pra número móvel (mesmo bug que
+  // semNonoDigito já resolvia antes do F2).
+  const chave12 = chaveTelefone('551199998888'); // 12 dígitos, sem 9
+  const chave13 = chaveTelefone('5511999998888'); // 13 dígitos, com 9
+  checar(chave12 === chave13, `chaveTelefone(12 dígitos) e chaveTelefone(13 dígitos) do mesmo número deveriam ser o MESMO digest — '${chave12}' vs '${chave13}'`);
+}
+
+function testeChaveSemTelefoneEmClaro() {
+  const telefone = '5511999998888';
+  const chaveTel = chaveTelefone(telefone);
+  const chaveComposta = chaveTaskAtiva(telefone, 'dev1');
+  const chaveSemDevice = chaveTaskAtiva(telefone);
+
+  checar(
+    !OITO_DIGITOS_CONSECUTIVOS.test(chaveTel),
+    `chaveTelefone(...) não deveria conter 8+ dígitos consecutivos (telefone cru vazando) — recebido: '${chaveTel}'`,
+  );
+  checar(
+    !OITO_DIGITOS_CONSECUTIVOS.test(chaveComposta),
+    `chaveTaskAtiva(tel, dev) não deveria conter 8+ dígitos consecutivos — recebido: '${chaveComposta}'`,
+  );
+  checar(
+    !OITO_DIGITOS_CONSECUTIVOS.test(chaveSemDevice),
+    `chaveTaskAtiva(tel) sem device não deveria conter 8+ dígitos consecutivos — recebido: '${chaveSemDevice}'`,
+  );
+  checar(chaveTel !== telefone.replace(/\D/g, ''), 'chaveTelefone não deveria mais devolver os dígitos crus do telefone');
+}
+
+function testeChaveLegadoAindaDevolveDigitos() {
+  const telefone = '5511999998888';
+  const legado = chaveTelefoneLegado(telefone);
+  const digest = chaveTelefone(telefone);
+
+  checar(legado === '551199998888', `chaveTelefoneLegado deveria devolver os dígitos sem o nono dígito (semNonoDigito) — recebido: '${legado}'`);
+  checar(legado !== digest, 'chaveTelefoneLegado deveria ser DISTINTO do digest novo (formatos diferentes)');
+  checar(
+    OITO_DIGITOS_CONSECUTIVOS.test(legado),
+    'pré-condição do teste: chaveTelefoneLegado tem que conter os dígitos crus (senão o teste de fallback não prova nada)',
+  );
+}
+
+async function testeCorrelacaoPreservadaFimAFim() {
+  const telefone = '5511977776666';
+  await guardarTaskAtiva(telefone, 'task-f2', 'devF2');
+  checar(
+    (await lerTaskAtiva(telefone, 'devF2')) === 'task-f2',
+    'lerTaskAtiva pós-guardarTaskAtiva deveria achar a task (correlação preservada com a chave nova/digest)',
+  );
+  checar(
+    (await lerTaskAtiva(telefone)) === 'task-f2',
+    'lerTaskAtiva sem deviceId (fallback telefone-só) também deveria achar a task',
+  );
+  await limparTaskAtiva(telefone, 'devF2');
+  checar((await lerTaskAtiva(telefone, 'devF2')) === null, 'lerTaskAtiva pós-limparTaskAtiva deveria ser null');
+}
+
 async function main() {
   await testeSerieDiariaErroSucesso();
   await testeSerieDiaria429();
   await testeSerieDiariaVariosDias();
   await testeSerieDiariaMetricaInexistenteZerada();
   await testeSerieDiariaNuncaLanca();
+
+  testeDigestDeterministico();
+  testeChaveTelefoneSemNonoDigitoMesmoDigest();
+  testeChaveSemTelefoneEmClaro();
+  testeChaveLegadoAindaDevolveDigitos();
+  await testeCorrelacaoPreservadaFimAFim();
 
   if (falhas.length > 0) {
     console.error('=== SMOKE FAIL ===');
