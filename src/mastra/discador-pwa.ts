@@ -20,13 +20,14 @@ export const DISCADOR_MANIFEST = JSON.stringify({
   ],
 });
 
-// CACHE discador-v36: SW NETWORK-FIRST (online sempre pega a última versão;
+// CACHE discador-v37: SW NETWORK-FIRST (online sempre pega a última versão;
 // offline cai no cache) — evita servir app.js velho a cada mudança e acaba com
 // o "reload não atualiza". quick-260817-u20 · v33 nova UI da chamada (u22) ·
 // v34 popup de motivo tambem no reject (u23) · v35 avisa numero desconectado
 // do WhatsApp em vez de erro generico (u24, DEVICE-04) · v36 rebusca /config
-// por ligacao + avisa chip indisponivel
-export const DISCADOR_SW_JS = `const CACHE='discador-v36';
+// por ligacao + avisa chip indisponivel · v37 (quick-260822-rr6) botão
+// "Tentar pelo telefone" na tela de motivo
+export const DISCADOR_SW_JS = `const CACHE='discador-v37';
 const SHELL=['/discador','/discador/app.js','/discador/manifest.webmanifest','/discador/icon.svg'];
 self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
@@ -343,6 +344,7 @@ export const DISCADOR_HTML = `<!doctype html>
       </div>
       <textarea id="motivo-obs" placeholder="Detalhe (opcional)"></textarea>
       <div id="motivo-err" class="err"></div>
+      <button id="motivo-tel" type="button" class="loadmore">Tentar pelo telefone</button>
       <button id="motivo-salvar" class="primary">Concluir ligação</button>
     </div>
   </div>
@@ -779,6 +781,18 @@ export const DISCADOR_APP_JS = `(function(){
       $('motivo-overlay').style.display='none';voltarParaFila();
     }).catch(function(e){btn.disabled=false;btn.textContent='Concluir ligação';if(e&&e.message==='401'){return;}$('motivo-err').textContent='Não deu para concluir. Tente de novo.';});
   }
+  // quick-260822-rr6 (R3/D-03): "Tentar pelo telefone" na tela de MOTIVO — NAO
+  // e terminal (nao chama /desfecho); devolve o atendente ao app mobile pra
+  // MESMA task, plano B quando a chamada WhatsApp nao foi atendida. Embutido
+  // (iframe): postMessage pro pai (fluxo Romero/Audios, fora de escopo aqui).
+  // Full-page (atendente): navega pro retornoPainel com ?telapos=<taskId>.
+  function tentarPeloTelefone(){
+    var taskId=motivoTaskId;
+    $('motivo-overlay').style.display='none';
+    if(window.parent!==window){try{window.parent.postMessage({tipo:'discador:tentar-telefone',taskId:taskId},'*');}catch(e){}return;}
+    if(retornoPainel){window.location.href=retornoPainel+(retornoPainel.indexOf('?')>=0?'&':'?')+'telapos='+encodeURIComponent(taskId);return;}
+    voltarParaFila();
+  }
   // Pos-ligacao (SO quando ATENDIDA): pergunta a confirmacao de voto dos
   // candidatos ainda nao preenchidos no lead (Lista 01) e grava. Se o lead ja
   // tem os dois definidos, ou nao ha lead resolvido, so fecha a overlay da
@@ -832,6 +846,7 @@ export const DISCADOR_APP_JS = `(function(){
     var mc=$('motivo-cats');
     if(mc){mc.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('.seg-btn'):null;if(!b){return;}var all=mc.querySelectorAll('.seg-btn');for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}b.classList.add('sel');motivoCat=b.getAttribute('data-cat');$('motivo-err').textContent='';});}
     var ms=$('motivo-salvar');if(ms){ms.onclick=enviarMotivo;}
+    var mt=$('motivo-tel');if(mt){mt.onclick=tentarPeloTelefone;}
     // Chamadas longas: evitar perder a ligacao por refresh/fechar/logout sem querer
     // e re-adquirir o Wake Lock quando a aba volta a ficar visivel.
     window.addEventListener('beforeunload',function(e){if(emChamada){e.preventDefault();e.returnValue='';return '';}});
