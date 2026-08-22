@@ -8,7 +8,11 @@
 // a listagem de tasks (os endpoints por-ID sobreviveram ao incidente 2026-08-20).
 //
 // `op='criar_task'` resolve o `clickup_task_id` e faz BACK-FILL na linha de
-// `ligacoes` (outbox-repo.ts::backfillClickupTaskId); ops seguintes daquele
+// `ligacoes` (outbox-repo.ts::backfillClickupTaskId) — mas é IDEMPOTENTE A
+// CRASH (CR-01): se o agregado já tem `clickup_task_id` resolvido (uma passada
+// anterior criou a task mas morreu ANTES de `marcarEnviado`, a linha ficou
+// pendente), a re-execução NÃO chama `criarTask` de novo (zero task ClickUp
+// duplicada) — reusa o id e só marca `enviado`. ops seguintes daquele
 // aggregate que precisam do id ADIAM (a linha continua pendente) enquanto
 // `clickup_task_id` for `null` — preserva a ordem por `seq`: nunca pula uma
 // linha bloqueada para processar a próxima (isso destruiria a ordem). Após
@@ -179,6 +183,20 @@ async function processarLinha(
 
   switch (linha.op) {
     case 'criar_task': {
+      // CR-01 (idempotência a crash): se o `clickup_task_id` do agregado JÁ
+      // está resolvido (`taskIdAtual` != null — o `resolverClickupTaskId` no
+      // topo de `processarDrenoOutboxJob` o leu de `ligacoes`), então uma
+      // passada ANTERIOR já criou a task no ClickUp e fez o back-fill, mas
+      // MORREU antes de `marcarEnviado` (a linha continuou pendente). Recriar
+      // aqui geraria uma SEGUNDA task "Ligação avulsa —" na Lista 02 (a exata
+      // falha "op double-sends", risco #2). PULA `criarTask`: reusa o id
+      // existente (o `backfillClickupTaskId` é `is.null`-guardado, idempotente
+      // — não sobrescreve) e retorna true para o caller marcar `enviado` e
+      // fechar a linha. NÃO consome token do dreno (não há saída ao ClickUp).
+      if (taskIdAtual) {
+        await backfillClickupTaskId(aggregateId, taskIdAtual);
+        return true;
+      }
       if (!(await garantirTokenDreno(linha))) return false;
       const nova = await criarTask(CLICKUP_LIST_LIGACOES, montarBodyDaTask(payload));
       if (!nova?.id) {
