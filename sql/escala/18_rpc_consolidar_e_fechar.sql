@@ -74,7 +74,14 @@ begin
          atendeu=(p_ligacao_patch->>'atendeu')::boolean,
          transcricao=coalesce(p_ligacao_patch->>'transcricao', transcricao),
          analise_ia=coalesce(p_ligacao_patch->'analise_ia', analise_ia),
-         necessita_revisao=(p_ligacao_patch->>'necessita_revisao')::boolean,
+         -- CR-02: só sobrescreve necessita_revisao quando há SINAL real (a chave
+         -- PRESENTE em p_ligacao_patch — divergência de voto OU baixa aderência,
+         -- ver processador.ts). Chave AUSENTE = consolidação sem sinal de revisão:
+         -- PRESERVA o valor atual (COALESCE via CASE), nunca zera a coluna. Espelha
+         -- o guard do outbox NECESSITA_REVISAO logo abaixo (`? 'necessita_revisao'`).
+         necessita_revisao=case when p_ligacao_patch ? 'necessita_revisao'
+                                then (p_ligacao_patch->>'necessita_revisao')::boolean
+                                else necessita_revisao end,
          atualizado_em=now()
    where id = p_ligacao_id;
 
@@ -215,7 +222,12 @@ begin
          atendeu=(p_ligacao_patch->>'atendeu')::boolean,
          transcricao=coalesce(p_ligacao_patch->>'transcricao', transcricao),
          analise_ia=coalesce(p_ligacao_patch->'analise_ia', analise_ia),
-         necessita_revisao=(p_ligacao_patch->>'necessita_revisao')::boolean,
+         -- CR-02 (gêmeo IDÊNTICO ao de produção): só sobrescreve necessita_revisao
+         -- quando a chave está PRESENTE em p_ligacao_patch (sinal real); ausente
+         -- PRESERVA o valor atual, nunca zera.
+         necessita_revisao=case when p_ligacao_patch ? 'necessita_revisao'
+                                then (p_ligacao_patch->>'necessita_revisao')::boolean
+                                else necessita_revisao end,
          atualizado_em=now()
    where id = p_ligacao_id;
 

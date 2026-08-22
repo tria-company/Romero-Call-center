@@ -200,6 +200,14 @@ async function consolidarEFecharLigacao(
      *  coluna no Supabase — mesma semântica do caminho clickup, que também
      *  não toca TRANSCRICAO dentro desta função quando não houve gravação. */
     transcricao?: string;
+    /** CR-02: verdict de revisão do Agente Análise (baixa aderência / sinais /
+     *  falha técnica) computado por `necessitaRevisao` no caminho que roda a
+     *  Análise. Sob `supabase`, alimenta `p_ligacao_patch.necessita_revisao`
+     *  para o SoT/espelho não perderem o flag de baixa aderência (o caminho
+     *  ClickUp já o grava direto). `undefined` = a Análise não rodou (caminho
+     *  não-atendida/sem-transcrição) — a chave fica AUSENTE do patch e a RPC
+     *  PRESERVA o valor atual (não zera). `true` só quando há sinal real. */
+    revisaoAnalise?: boolean;
   },
 ): Promise<void> {
   // Hoisted fora do try: o fechamento "SEMPRE ao final" (abaixo) precisa
@@ -427,7 +435,12 @@ async function consolidarEFecharLigacao(
     };
     if (opts.transcricao !== undefined) ligacaoPatch.transcricao = opts.transcricao;
     if (analiseIaParaLigacao !== undefined) ligacaoPatch.analise_ia = analiseIaParaLigacao;
-    if (necessitaRevisaoPorVoto) ligacaoPatch.necessita_revisao = true;
+    // CR-02: escreve necessita_revisao SÓ quando há sinal real — divergência de
+    // voto (necessitaRevisaoPorVoto) OU baixa aderência/sinais do Agente Análise
+    // (opts.revisaoAnalise). Sem sinal, a chave fica AUSENTE e a RPC PRESERVA o
+    // valor atual (COALESCE condicional em 18_rpc_consolidar_e_fechar.sql) — nunca
+    // zera a coluna nem emite push de espelho espúrio.
+    if (necessitaRevisaoPorVoto || opts.revisaoAnalise === true) ligacaoPatch.necessita_revisao = true;
 
     try {
       // A RPC faz TUDO numa única tx: UPDATE leads (leadsPatch) + UPDATE
@@ -685,6 +698,11 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // Analise falhou (valores ficam `null`).
   let resultadoAnalise: ReturnType<typeof parseResultadoAnalise> | null = null;
   let retornoAnalise: ReturnType<typeof extrairRetorno> | null = null;
+  // CR-02: verdict de revisão hoisted — o Agente Contexto (consolidarEFecharLigacao,
+  // abaixo) precisa dele para levar o flag de baixa aderência ao SoT/espelho sob
+  // supabase. `true` no catch mantém a paridade com o caminho ClickUp (que marca
+  // NECESSITA_REVISAO=true quando a Análise falha, ver setCustomField no catch).
+  let revisaoAnalise = false;
   try {
     const task = await lerTask(taskId);
     const script = task?.description ?? task?.text_content ?? '';
@@ -697,6 +715,7 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
       sinaisAlerta: resultado.sinaisAlerta,
       falhaTecnica: resultado.falhaTecnica,
     });
+    revisaoAnalise = revisao;
     const retorno = extrairRetorno(resultado, { hoje: new Date(), defaultDias: 2 });
     resultadoAnalise = resultado;
     retornoAnalise = retorno;
@@ -719,6 +738,7 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     // distinguimos "precisa de revisao humana" de um erro que travaria o
     // job inteiro.
     registrarErroEtapa('analise');
+    revisaoAnalise = true; // CR-02: paridade com o setCustomField(true) abaixo — o SoT/espelho também precisam do flag
     console.error('[processador] falha no Agente Analise, marcando NECESSITA_REVISAO:', e);
     try {
       await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
@@ -747,6 +767,8 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     // p_ligacao_patch.transcricao sob supabase (19-08) — mesmo texto já
     // gravado no ClickUp por gravarTranscricao acima.
     transcricao,
+    // CR-02: leva o verdict de baixa aderência/sinais ao SoT/espelho sob supabase.
+    revisaoAnalise,
   });
 
   // Reconciliação (2026-08-20, "se ligou, sai da lista"): a chamada desta
@@ -889,6 +911,9 @@ export async function finalizarRecordSemTranscricao(dados: DadosJobRecord): Prom
     // Mesmo placeholder já gravado no ClickUp por gravarTranscricao acima —
     // p_ligacao_patch.transcricao sob supabase (19-08).
     transcricao: '(transcrição não obtida automaticamente após 3 tentativas — revisar manualmente)',
+    // CR-02: paridade com o setCustomField(NECESSITA_REVISAO=true) acima — sob
+    // supabase o SoT/espelho também precisam marcar revisão (transcrição falhou).
+    revisaoAnalise: true,
   });
 
   // Reconciliação (2026-08-20): mesma regra do record normal — ligou, as
