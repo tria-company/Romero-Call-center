@@ -713,6 +713,32 @@ function ehErroRpcNaoAutorizado(e: unknown): boolean {
   return status >= 400 && status < 500;
 }
 
+/**
+ * Correlação de FALLBACK do webhook Wavoip por telefone (LEITURA-05, Fase B
+ * 19-07 Task 3) — usada quando a correlação em memória (call_id→telefone,
+ * `guardarCorrelacao`/`lerCorrelacao` abaixo) não tem a entrada
+ * (restart/TTL expirado). Ramifica por `FONTE_LIGACOES`: 'supabase' chama
+ * `buscarLigacaoAbertaPorTelefoneSupabase` (multi-candidato ±9º dígito,
+ * 19-05 — devolve o id LOCAL da Ligação); 'clickup' (default) chama a
+ * função atual de clickup.ts (varre a página 0 de Ligações abertas —
+ * devolve o `taskId` do ClickUp). `null` = nenhuma Ligação aberta casou
+ * (resultado legítimo, distinto de erro de infra — ambas as funções
+ * LANÇAM em falha de rede/config, WR-03). NUNCA loga telefone (LGPD).
+ *
+ * CALL SITES: nenhum em index.ts ainda — os 3 pontos que hoje chamam
+ * `buscarLigacaoAbertaPorTelefone` diretamente (correlação de falha
+ * terminal / RECORD) vivem em `processador.ts`
+ * (`processarFalhaTerminalJob`/`processarRecordJob`, linhas ~356/496/678),
+ * cujo wiring atrás da flag é o plano **19-08** (owner de processador.ts —
+ * FORA DE ESCOPO tocar aqui, conforme o próprio 19-07-PLAN.md). Esta função
+ * fica exportada e pronta pro 19-08 trocar as 3 chamadas diretas por ela.
+ */
+export async function resolverLigacaoAbertaPorTelefone(telefone: string): Promise<string | null> {
+  return FONTE_LIGACOES === 'supabase'
+    ? buscarLigacaoAbertaPorTelefoneSupabase(telefone)
+    : buscarLigacaoAbertaPorTelefone(telefone);
+}
+
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador, papelDoOperador } from './operadores';
 
