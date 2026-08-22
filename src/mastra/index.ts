@@ -100,6 +100,9 @@ import {
   lerTimelineDaLigacao,
   definirVotoLeadCampo,
   comentarTask,
+  // quick-260822-rr6 (R6/D-06): anotação aditiva na Ligação (caminho "atendeu"
+  // do retorno tel:) — ISOLADA de registrarDesfecho/FONTE_LIGACOES.
+  anotarLigacao,
   // Pular contato (2026-08-19): fecha a Ligação com motivo do Romero — mesmos
   // primitivos do desfecho (metadados + comentário + fechar), semântica própria.
   gravarMetadadosLigacao,
@@ -1467,6 +1470,43 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao registrar desfecho' }, 502);
+          }
+        },
+      },
+      {
+        // ANOTAÇÃO na Ligação (quick-260822-rr6, R6/D-06): rota ADITIVA e
+        // ISOLADA — o caminho "atendeu" do retorno tel: usa isto pra persistir
+        // classificação/demanda/observação num comentário (registrarDesfecho
+        // ignora observação em 'atendida'; a anotação do LEAD é gestor-only).
+        // NUNCA muda status/fecha/grava custom field; NÃO toca
+        // registrarDesfecho nem a ramificação FONTE_LIGACOES. Débito
+        // documentado (SUMMARY do quick): comentário ClickUp funciona
+        // PRÉ-FLIP; PÓS-FLIP (supabase) não é relido.
+        path: '/api/discador/ligacao/:taskId/anotacao',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const taskId = c.req.param('taskId');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const texto = String(body.texto || '').trim().slice(0, 500);
+          if (!texto) return c.json({ erro: 'texto obrigatório' }, 400);
+          try {
+            await anotarLigacao(taskId, assignee, texto);
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            // LGPD: nunca logar taskId/texto/telefone — só a mensagem genérica.
+            console.error('[discador] erro ao anotar ligação:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao registrar anotação' }, 502);
           }
         },
       },

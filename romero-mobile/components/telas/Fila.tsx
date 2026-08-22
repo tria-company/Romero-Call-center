@@ -182,7 +182,8 @@ export function Fila({
       window.setTimeout(() => setAvisoTelId((atual) => (atual === item.taskId ? null : atual)), 2500);
       return;
     }
-    const pendente: LigacaoTelPendente = { taskId: item.taskId, nome: item.nome, telefone: item.telefone };
+    // D-08: ligação iniciada pelo botão do card = origem "direto".
+    const pendente: LigacaoTelPendente = { taskId: item.taskId, nome: item.nome, telefone: item.telefone, origem: "direto" };
     marcarLigacaoTelPendente(pendente);
     setAlvoTel(pendente);
     setFaseTel("escolha");
