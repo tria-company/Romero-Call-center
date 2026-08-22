@@ -17,12 +17,30 @@
 //         assinada — a funcao nem recebe recordUrl/telefone, so `fonte`
 //         (stream+headers) e `params`).
 //
+//   PARTE B — src/mastra/processador.ts: processarRecordJob (record path)
+//     B1) guardarGravacao roda ANTES de transcrever: se a copia propria falha
+//         (download da nossa copia), o POST pro Deepgram NUNCA acontece — e o
+//         erro relancado carrega a causa (classificarErro rotula certo).
+//     B2) fluxo completo (copia OK, baixarGravacao OK) com falha SO no
+//         Deepgram (400): confirma a ORDEM das 6 chamadas HTTP (existencia ->
+//         bucket -> download -> upload -> baixarGravacao -> Deepgram) e que o
+//         erro relancado por processarRecordJob preserva a causa especifica
+//         (classificarErro -> permanente/deepgram), nao mais o "transcricao
+//         falhou call=..." generico de antes.
+//
 // Env fake definido ANTES do import (config.ts le process.env na carga do
-// modulo) — nunca a instancia real.
+// modulo) — nunca a instancia real. REDIS_URL fica AUSENTE de proposito:
+// estado-webhook.ts cai no modo 'memoria' (recordJaProcessado sem rede).
 //
 // Uso: node --experimental-strip-types scripts/transcrever-copia-local.smoke.mjs
 
+process.env.SUPABASE_URL ||= 'https://smoke.invalido.local';
+process.env.SUPABASE_SERVICE_KEY ||= 'smoke-fake-service-key';
+process.env.SUPABASE_STORAGE_BUCKET_GRAVACOES ||= 'gravacoes';
+
 const { transcreverGravacaoLocal, montarParamsListen } = await import('../src/mastra/deepgram.ts');
+const { processarRecordJob } = await import('../src/mastra/processador.ts');
+const { classificarErro } = await import('../src/mastra/classificar-erro.ts');
 
 const fetchOriginal = globalThis.fetch;
 
@@ -141,19 +159,109 @@ async function testeA4_mensagemLgpdSafe() {
   }
 }
 
+// ===== PARTE B — processarRecordJob (record path) =====
+
+function dadosJobRecord(callId, recordUrl) {
+  return {
+    whatsappCallId: callId,
+    telefone: '5511999999999',
+    recordUrl,
+    payload: {},
+    eventoDuravelId: null,
+    deviceId: undefined,
+  };
+}
+
+async function testeB1_guardarGravacaoAntesDeTranscrever() {
+  console.log('\n[B1] processarRecordJob — falha na copia propria: Deepgram NUNCA e chamado (ordem)...');
+  const chamadas = criarFetchGlobalRoteirizado([
+    { ok: false, status: 404, headers: new Headers({}) }, // HEAD do object -> nao existe
+    { ok: true, status: 200, headers: new Headers({}) }, // GET bucket -> ja existe (no-op)
+    () => { throw new Error('mock: rede caiu ao baixar a gravacao do storage'); }, // GET record_url (download) -> falha de rede
+  ]);
+  try {
+    await processarRecordJob(dadosJobRecord('call-b1', 'https://storage.exemplo.invalido/audio-b1.mp3'));
+    checar(false, 'processarRecordJob deveria LANCAR quando guardarGravacao falha');
+  } catch (e) {
+    const mensagem = e instanceof Error ? e.message : String(e);
+    checar(chamadas.length === 3, `so deveriam ter acontecido as 3 chamadas da copia propria (nada de Deepgram), recebeu ${chamadas.length}`);
+    checar(
+      !chamadas.some((c) => c.url.includes('deepgram')),
+      'Deepgram NUNCA deveria ser chamado quando a copia propria falha (guardarGravacao roda ANTES de transcrever)',
+    );
+    const classificado = classificarErro(mensagem);
+    checar(classificado.tipo === 'transitorio', `falha de rede na copia deveria classificar transitorio, recebido ${classificado.tipo}`);
+    checar(classificado.origem === 'storage', `origem deveria ser storage, recebido ${classificado.origem}`);
+  } finally {
+    globalThis.fetch = fetchOriginal;
+  }
+}
+
+async function testeB2_ordemCompletaECausaPreservada() {
+  console.log('\n[B2] processarRecordJob — copia+baixar OK, Deepgram falha (400): ordem das 6 chamadas + causa preservada...');
+  const streamDownload = streamFake();
+  const streamCopia = streamFake();
+  const chamadas = criarFetchGlobalRoteirizado([
+    { ok: false, status: 404, headers: new Headers({}) }, // 1) HEAD do object -> nao existe
+    { ok: true, status: 200, headers: new Headers({}) }, // 2) GET bucket -> ja existe (no-op)
+    {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'audio/mpeg', 'content-length': '3' }),
+      body: streamDownload,
+    }, // 3) GET record_url (download da copia)
+    { ok: true, status: 200, headers: new Headers({}) }, // 4) POST upload da copia
+    {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'audio/mpeg', 'content-length': '3' }),
+      body: streamCopia,
+    }, // 5) GET baixarGravacao (le a NOSSA copia de volta)
+    { ok: false, status: 400, text: async () => 'audio invalido' }, // 6) POST /v1/listen Deepgram -> falha permanente
+  ]);
+  try {
+    await processarRecordJob(dadosJobRecord('call-b2', 'https://storage.exemplo.invalido/audio-b2.mp3'));
+    checar(false, 'processarRecordJob deveria LANCAR quando o Deepgram falha (causa preservada, nao o generico de antes)');
+  } catch (e) {
+    const mensagem = e instanceof Error ? e.message : String(e);
+    checar(chamadas.length === 6, `esperava as 6 chamadas na ordem certa (copia -> baixar -> deepgram), recebeu ${chamadas.length}`);
+
+    const idxDeepgram = chamadas.findIndex((c) => c.url.includes('deepgram'));
+    checar(idxDeepgram === 5, `POST ao Deepgram deveria ser a ULTIMA chamada (indice 5), recebido indice ${idxDeepgram}`);
+    checar(
+      chamadas.slice(0, 5).every((c) => !c.url.includes('deepgram')),
+      'nenhuma chamada anterior a ultima deveria ser pro Deepgram (guardarGravacao/baixarGravacao rodam ANTES)',
+    );
+
+    checar(
+      !mensagem.includes('transcricao falhou call='),
+      `o throw generico de antes NAO deveria mais ser a mensagem — a causa especifica deve substitui-lo, recebido: "${mensagem}"`,
+    );
+    checar(mensagem.includes('(400)'), `mensagem re-lancada por processarRecordJob deveria preservar o status (400), recebido: "${mensagem}"`);
+
+    const classificado = classificarErro(mensagem);
+    checar(classificado.tipo === 'permanente', `400 do Deepgram deveria classificar permanente, recebido ${classificado.tipo}`);
+    checar(classificado.origem === 'deepgram', `origem deveria ser deepgram, recebido ${classificado.origem}`);
+  } finally {
+    globalThis.fetch = fetchOriginal;
+  }
+}
+
 async function main() {
-  console.log('=== Smoke transcricao da copia local — deepgram.ts (Fase 19.1 Plano 03, DUR-05/DUR-06) ===');
+  console.log('=== Smoke transcricao da copia local — deepgram.ts + processador.ts (Fase 19.1 Plano 03, DUR-05/DUR-06) ===');
   await testeA1_sucessoStreaming();
   await testeA2_falhaHttpComStatus();
   await testeA3_transcriptVazio();
   await testeA4_mensagemLgpdSafe();
+  await testeB1_guardarGravacaoAntesDeTranscrever();
+  await testeB2_ordemCompletaECausaPreservada();
 
   if (falhas.length > 0) {
     console.error(`\n=== RESULTADO: FAIL — ${falhas.length} asserção(ões) falharam ===`);
     for (const f of falhas) console.error('  -', f);
     process.exit(1);
   }
-  console.log('\n=== RESULTADO: PASS — transcreverGravacaoLocal (causa especifica, streaming, LGPD-safe) provado (sem rede) ===');
+  console.log('\n=== RESULTADO: PASS — transcreverGravacaoLocal (causa especifica) + ordem copia-antes-de-transcrever provadas (sem rede) ===');
   process.exit(0);
 }
 
