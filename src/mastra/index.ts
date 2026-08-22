@@ -1888,10 +1888,21 @@ export const mastra = new Mastra({
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const leadTaskId = c.req.param('leadTaskId');
           try {
-            // ?leve=1 (2026-08-20): ficha SEM timeline — o card da conversa e o
-            // modo fast só usam o dossiê; pular a timeline corta ~10s no frio.
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a rota deixa de
+            // depender da listagem frágil da Lista 02 LIGACOES (buscarLigacoesDoLead,
+            // que caiu no incidente que motivou a inversão). A Lista 01 LEADS
+            // segue ClickUp-autoritativa nesta fase (a escrita de leads é Phase
+            // 20), então ficha + dossiê vêm do reader resiliente na variante
+            // LEVE (GET /task único da Lista 01 + descrição/dossiê — NUNCA a
+            // listagem da Lista 02). A TIMELINE de `ligacoes` é a parte que
+            // inverte pro Supabase (LEITURA-03).
+            // NOTA (débito p/ 19-10/Phase 20): sem `ligacoes.lead_id` numérico
+            // materializado (idem /timeline), a timeline do detalhe degrada
+            // para vazia sob supabase — a ficha/dossiê seguem completos e o
+            // contrato { lead, dossie, timeline } é preservado. Caminho
+            // 'clickup' (lerLeadDetalheResiliente/lerLeadDossieResiliente) intacto.
             const detalhe =
-              c.req.query('leve') === '1'
+              FONTE_LIGACOES === 'supabase' || c.req.query('leve') === '1'
                 ? await lerLeadDossieResiliente(leadTaskId)
                 : await lerLeadDetalheResiliente(leadTaskId);
             // conhecimento pra ordenação da fila + geração sob demanda:
@@ -2101,6 +2112,27 @@ export const mastra = new Mastra({
           if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
           const taskId = c.req.param('taskId');
           try {
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a timeline vem de
+            // `ligacoes` (LEITURA-03) — resolve o lead da Ligação por id LOCAL
+            // (resolverLeadDaLigacaoSupabase) e lê o histórico com o guard por
+            // operador (buscarLigacoesDoLeadSupabase valida que alguma Ligação
+            // do lead pertence ao operador — IDOR-safe), montando o MESMO shape
+            // que lerTimelineDaLigacao. NUNCA toca GET /list/{02}/task.
+            // NOTA (débito p/ 19-10/Phase 20): `ligacoes.lead_id` (FK numérica)
+            // ainda não é materializado nesta fase (ver LigacaoEspelhoRow em
+            // supabase.ts) — enquanto for null, buscarLigacoesDoLeadSupabase
+            // (que filtra por lead_id) devolve timeline vazia; a rota degrada
+            // (contrato preservado), não quebra. Caminho 'clickup' intacto.
+            if (FONTE_LIGACOES === 'supabase') {
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) return c.json({ erro: 'Ligação não encontrada' }, 404);
+              const ref = await resolverLeadDaLigacaoSupabase(ligacaoId);
+              const timeline =
+                ref && ref.leadId !== null
+                  ? await buscarLigacoesDoLeadSupabase(ref.leadId, sess.usuario)
+                  : [];
+              return c.json({ timeline });
+            }
             const timeline = await lerTimelineDaLigacao(taskId, assignee);
             return c.json({ timeline });
           } catch (e) {
