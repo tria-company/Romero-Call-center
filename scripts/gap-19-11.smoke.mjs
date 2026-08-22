@@ -125,8 +125,61 @@ async function testeCr01Idempotencia() {
   }
 }
 
+// ===== WR-01 — fila diária não-vazia sob supabase (assignee -> operador) =====
+async function testeWr01Atribuicao() {
+  const { paraLinhaLigacao } = await import('../src/mastra/espelho.ts');
+  const { CAMPOS_LIGACOES } = await import('../src/mastra/clickup.ts');
+  const AGORA = '2026-08-22T12:00:00.000Z';
+
+  // Ligação de LOTE nunca-tentada: OPERADOR custom field AUSENTE, assignee=88
+  // (member id do 'romero' no DISCADOR_ASSIGNEES sintético).
+  const loteNuncaTentada = {
+    id: 'CU_1',
+    assignees: [{ id: 88 }],
+    custom_fields: [{ id: CAMPOS_LIGACOES.TELEFONE, value: '+5511999999999' }],
+  };
+  const linhaLote = paraLinhaLigacao(loteNuncaTentada, AGORA);
+  checar(
+    linhaLote.operador === 'romero',
+    `WR-01: ligação de lote sem OPERADOR deve herdar o login do assignee (88->romero), recebido: ${JSON.stringify(linhaLote.operador)}`,
+  );
+  checar(
+    linhaLote.assignee_clickup_id === 88,
+    `WR-01: assignee_clickup_id deve ser preservado (88), recebido: ${JSON.stringify(linhaLote.assignee_clickup_id)}`,
+  );
+
+  // OPERADOR custom field PRESENTE (já carimbado por iniciar_ligacao) tem
+  // precedência — o reverse-map do assignee NÃO sobrescreve o operador real.
+  const jaCarimbada = {
+    id: 'CU_2',
+    assignees: [{ id: 99 }],
+    custom_fields: [
+      { id: CAMPOS_LIGACOES.OPERADOR, value: 'romero' },
+      { id: CAMPOS_LIGACOES.TELEFONE, value: '+5511888888888' },
+    ],
+  };
+  const linhaCarimbada = paraLinhaLigacao(jaCarimbada, AGORA);
+  checar(
+    linhaCarimbada.operador === 'romero',
+    `WR-01: OPERADOR custom field presente deve ter precedência sobre o assignee, recebido: ${JSON.stringify(linhaCarimbada.operador)}`,
+  );
+
+  // Assignee sem mapeamento -> operador null (comportamento de hoje preservado).
+  const semMapa = {
+    id: 'CU_3',
+    assignees: [{ id: 777 }],
+    custom_fields: [{ id: CAMPOS_LIGACOES.TELEFONE, value: '+5511777777777' }],
+  };
+  const linhaSemMapa = paraLinhaLigacao(semMapa, AGORA);
+  checar(
+    linhaSemMapa.operador === null,
+    `WR-01: assignee sem mapeamento login deve deixar operador null (fallback), recebido: ${JSON.stringify(linhaSemMapa.operador)}`,
+  );
+}
+
 async function main() {
   await testeCr01Idempotencia();
+  await testeWr01Atribuicao();
 
   if (falhas.length > 0) {
     console.error('=== SMOKE FAIL ===');

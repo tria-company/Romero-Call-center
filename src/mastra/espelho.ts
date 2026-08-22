@@ -28,6 +28,7 @@ import {
   type TaskClickUp,
 } from './clickup.ts';
 import { parseLeadDaTask, derivarRetornoNecessario } from './lote.ts';
+import { mapaOperadorParaAssignee } from './operadores.ts';
 import { canonizarTelefone, variantesTelefone } from './telefone-canonico.ts';
 import { duracaoEmSegundos } from './painel-dados.ts';
 import {
@@ -172,14 +173,44 @@ function paraAnaliseIa(raw: string): Record<string, unknown> | null {
   return raw ? { texto: raw } : null;
 }
 
+/**
+ * WR-01: reverse-map do assignee do ClickUp (member id numérico) -> login do
+ * discador, para pré-preencher `operador` em ligações de LOTE nunca-tentadas.
+ *
+ * A fila diária sob `supabase` (`buscarFilaSupabase(login)`) filtra
+ * `operador=eq.<login>`, mas o custom field OPERADOR só é carimbado (com o
+ * login) quando o operador clica "Ligar" (`iniciar_ligacao`). O lote diário do
+ * ClickUp atribui por `assignee` (member id, namespace diferente do login) —
+ * então uma ligação de lote recém-sincronizada teria `operador=null` e sumiria
+ * da fila de TODO operador (fila diária VAZIA após o flip, quebra o core value).
+ *
+ * Aqui traduzimos o assignee -> login (via o mesmo `mapaOperadorParaAssignee`
+ * que o gerador de lote usa) e pré-preenchemos `operador`. O guard anti-IDOR de
+ * `iniciar_ligacao` (14) recusa só operador DIFERENTE — como pré-preenchemos com
+ * o MESMO login que o operador atribuído vai passar, ele continua podendo
+ * carimbar o INÍCIO. Sem mapeamento (assignee não é um operador do discador) →
+ * `null` (comportamento de hoje preservado).
+ */
+function loginDoAssigneeLigacao(assigneeId: number | null | undefined): string | null {
+  if (assigneeId === null || assigneeId === undefined) return null;
+  const alvo = String(assigneeId);
+  for (const [login, memberId] of mapaOperadorParaAssignee()) {
+    if (memberId === alvo) return login;
+  }
+  return null;
+}
+
 export function paraLinhaLigacao(task: TaskClickUp, agora: string): LigacaoEspelhoRow {
   const telefoneRaw = valorCampoLead(task, CAMPOS_LIGACOES.TELEFONE);
+  const assigneeId = task.assignees?.[0]?.id ?? null;
   return {
     clickup_task_id: task.id,
     lead_id: null, // FK numérica: resolvida só quando a ESCRITA inverter (Phase 19)
     lead_clickup_task_id: leadClickupTaskIdDaLigacao(task),
-    operador: valorCampoLead(task, CAMPOS_LIGACOES.OPERADOR) || null,
-    assignee_clickup_id: task.assignees?.[0]?.id ?? null,
+    // WR-01: OPERADOR carimbado (login) tem precedência; sem ele, herda o login
+    // do assignee do lote para a ligação nunca-tentada entrar na fila diária.
+    operador: valorCampoLead(task, CAMPOS_LIGACOES.OPERADOR) || loginDoAssigneeLigacao(assigneeId) || null,
+    assignee_clickup_id: assigneeId,
     telefone_canonico: canonizarTelefone(telefoneRaw),
     telefone_variantes: variantesTelefone(telefoneRaw),
     script: task.description ?? task.text_content ?? null,
