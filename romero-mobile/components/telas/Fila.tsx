@@ -1,16 +1,30 @@
 "use client";
 
 import * as React from "react";
-import { Copy, Phone, SkipForward } from "lucide-react";
+import {
+  Ban,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Copy,
+  Phone,
+  PhoneCall,
+  SkipForward,
+  XCircle,
+} from "lucide-react";
 // Helper PURO de iniciais — fora de qualquer store/localStorage.
 import { iniciais } from "@/lib/leads-util";
 import type { ItemFilaReal, VotoReal } from "@/lib/discador-servidor";
 import { pularLigacao, useFilaReal } from "@/lib/fila-real";
 import { copiarTelefone, fmtTelefone, linkTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import {
+  carregarContextoLead,
+  carregarLigacaoDetalhe,
   lerLigacaoTelPendente,
   limparLigacaoTelPendente,
   marcarLigacaoTelPendente,
+  montarMarcadores,
+  registrarAnotacaoLigacao,
   registrarDesfechoTel,
   registrarVotoTel,
   type LigacaoTelPendente,
@@ -38,9 +52,18 @@ import { Audios } from "./Audios";
    ATENDENTE quando o Wavoip falha. Botão SECUNDÁRIO "Ligar pelo telefone" +
    "Copiar número" abaixo de Ligar/Pular; abre o discador nativo e o app cobra
    o retorno (atendeu→voto / não atendeu→motivo / não consegui ligar). Não
-   altera o fluxo Wavoip/WhatsApp (Romero, `<Audios embutido/>`, segue intacto). */
+   altera o fluxo Wavoip/WhatsApp (Romero, `<Audios embutido/>`, segue intacto).
+
+   quick-260822-rr6 (iteração de UX pós-produção): R1 (card não pisca durante
+   refetch, indicador "Atualizando…"), R2 (botões de ação ≥48px/ícone/full-
+   width), R3 (chegada por `?telapos=<taskId>` — gancho do discador WhatsApp
+   quando a chamada não é atendida, MESMA task, sem desfecho terminal), R4/R5/
+   R6 (observação/demanda/classificação no retorno), R7 (roteiro+dossiê
+   recolhíveis no card ANTES de ligar, buscados via fallback-tel.ts), R8
+   (origem `[tel direto]`/`[tel apos-whatsapp]` nos marcadores). */
 
 const CATEGORIAS_NAO_ATENDIDA = ["Não atende", "Ocupado", "Número errado", "Chamou e caiu"] as const;
+const CLASSIFICACOES = ["Receptiva", "Indecisa", "Negativa"] as const;
 
 export function Fila({
   papel = "atendente",
@@ -49,7 +72,7 @@ export function Fila({
   papel?: "gestor" | "atendente";
   podeAudios?: boolean;
 } = {}) {
-  const { itens, carregando, erro, semMapeamento, recarregar } = useFilaReal();
+  const { itens, carregando, atualizando, erro, semMapeamento, recarregar } = useFilaReal();
 
   /* Token do call center, buscado ao MONTAR e não ao tocar em "Ligar": o
      bloqueador de pop-ups só deixa `window.open` passar dentro do gesto, e um
@@ -139,7 +162,7 @@ export function Fila({
         />
         {pularErro && <div className="fp-perro">Não deu para pular — tente de novo.</div>}
         <div className="fp-pacts">
-          <button type="button" className="seg" onClick={() => setPularAlvo(null)} disabled={pulando}>
+          <button type="button" className="seg fp-btn48" onClick={() => setPularAlvo(null)} disabled={pulando}>
             Cancelar
           </button>
           <button type="button" className="fp-pgo" onClick={() => void confirmarPular()} disabled={pulando || !pularMotivo.trim()}>
@@ -150,28 +173,73 @@ export function Fila({
     </div>
   );
 
-  /* ── Fallback de ligação nativa (tel:) — plano B (quick-260822-pzh) ─────
+  /* ── Fallback de ligação nativa (tel:) — plano B (quick-260822-pzh, iterado
+     no rr6) ──────────────────────────────────────────────────────────────
      D-03 (guard-rail): se o atendente saiu no meio de uma ligação `tel:` e
      voltou, `alvoTel` reaparece no MOUNT a partir do localStorage — a tela de
      retorno cobre a Ligação pendente até ele responder ou tocar "Não
-     consegui ligar". */
+     consegui ligar".
+     R3/R8 (rr6): chegar com `?telapos=<taskId>` (gancho do discador WhatsApp
+     na tela de motivo) abre o MESMO fluxo com `origem:"apos-whatsapp"`, sem
+     precisar do guard-rail (a Ligação ainda não foi discada pelo tel: — só a
+     chamada WhatsApp não foi atendida). */
   const [alvoTel, setAlvoTel] = React.useState<LigacaoTelPendente | null>(null);
   const [faseTel, setFaseTel] = React.useState<"escolha" | "voto" | "motivo">("escolha");
   const [votoRomero, setVotoRomero] = React.useState<VotoReal | undefined>(undefined);
   const [votoAndressa, setVotoAndressa] = React.useState<VotoReal | undefined>(undefined);
   const [categoriaTel, setCategoriaTel] = React.useState("");
+  const [classificacaoTel, setClassificacaoTel] = React.useState("");
+  const [demandaTel, setDemandaTel] = React.useState("");
   const [obsTel, setObsTel] = React.useState("");
   const [enviandoTel, setEnviandoTel] = React.useState(false);
   const [erroTel, setErroTel] = React.useState(false);
   const [copiadoId, setCopiadoId] = React.useState<string | null>(null);
   const [avisoTelId, setAvisoTelId] = React.useState<string | null>(null);
 
+  // Abre a tela de retorno tel: pra uma Ligação — reseta TODO o formulário
+  // (compartilhado pelo card, "Ligar pelo telefone", E a chegada por telapos).
+  function abrirRetornoTel(p: LigacaoTelPendente) {
+    marcarLigacaoTelPendente(p);
+    setAlvoTel(p);
+    setFaseTel("escolha");
+    setVotoRomero(undefined);
+    setVotoAndressa(undefined);
+    setCategoriaTel("");
+    setClassificacaoTel("");
+    setDemandaTel("");
+    setObsTel("");
+    setErroTel(false);
+  }
+
   React.useEffect(() => {
+    // R3/R8 (rr6): gancho "Tentar pelo telefone" do discador WhatsApp — o
+    // taskId volta na query da MESMA Ligação (full-page, D-03). Precede o
+    // guard-rail: uma chegada nova por telapos vale mais que um pendente
+    // antigo (raro dois ao mesmo tempo, mas se acontecer, o mais recente
+    // ganha). `replaceState` evita reabrir o fluxo num refresh da página.
+    const telapos = new URLSearchParams(window.location.search).get("telapos");
+    if (telapos) {
+      window.history.replaceState(null, "", window.location.pathname);
+      let vivo = true;
+      void carregarLigacaoDetalhe(telapos).then((detalhe) => {
+        if (!vivo) return;
+        abrirRetornoTel({
+          taskId: telapos,
+          nome: detalhe?.nome ?? "",
+          telefone: detalhe?.telefone ?? "",
+          origem: "apos-whatsapp",
+        });
+      });
+      return () => {
+        vivo = false;
+      };
+    }
     const pendente = lerLigacaoTelPendente();
     if (pendente) {
       setAlvoTel(pendente);
       setFaseTel("escolha");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function ligarPeloTelefone(item: ItemFilaReal) {
@@ -183,15 +251,7 @@ export function Fila({
       return;
     }
     // D-08: ligação iniciada pelo botão do card = origem "direto".
-    const pendente: LigacaoTelPendente = { taskId: item.taskId, nome: item.nome, telefone: item.telefone, origem: "direto" };
-    marcarLigacaoTelPendente(pendente);
-    setAlvoTel(pendente);
-    setFaseTel("escolha");
-    setVotoRomero(undefined);
-    setVotoAndressa(undefined);
-    setCategoriaTel("");
-    setObsTel("");
-    setErroTel(false);
+    abrirRetornoTel({ taskId: item.taskId, nome: item.nome, telefone: item.telefone, origem: "direto" });
     // Abre o discador NATIVO do aparelho (iOS confirma, Android disca direto).
     window.location.href = link;
   }
@@ -215,16 +275,27 @@ export function Fila({
     fecharRetornoTel();
   }
 
-  // D-04 (atendeu): voto → desfecho 'atendida'. Falha em qualquer um dos dois
-  // preserva o guard-rail (retry sem perder o estado pendente).
+  // R6 (obrigatória): voto + anotação (classificação/demanda/observação) →
+  // desfecho 'atendida'. Falha em qualquer uma das 3 etapas preserva o
+  // guard-rail (retry sem perder o estado pendente) — ORDEM: anotação →
+  // voto → desfecho.
   async function concluirVoto() {
-    if (!alvoTel || enviandoTel) return;
+    if (!alvoTel || enviandoTel || !classificacaoTel) return;
     setEnviandoTel(true);
     setErroTel(false);
-    const okVoto = await registrarVotoTel(alvoTel.taskId, { romero: votoRomero, andressa: votoAndressa });
+    const textoAnotacao =
+      "📞 Atendida (tel)\n" +
+      montarMarcadores({
+        origem: alvoTel.origem,
+        classificacao: classificacaoTel,
+        demanda: demandaTel,
+        observacao: obsTel,
+      });
+    const okAnotacao = await registrarAnotacaoLigacao(alvoTel.taskId, textoAnotacao);
+    const okVoto = okAnotacao && (await registrarVotoTel(alvoTel.taskId, { romero: votoRomero, andressa: votoAndressa }));
     const okDesfecho = okVoto && (await registrarDesfechoTel(alvoTel.taskId, "atendida"));
     setEnviandoTel(false);
-    if (!okVoto || !okDesfecho) {
+    if (!okAnotacao || !okVoto || !okDesfecho) {
       setErroTel(true);
       return;
     }
@@ -233,14 +304,20 @@ export function Fila({
     recarregar();
   }
 
-  // D-04/D-05 (não atendeu): desfecho 'nao_atendida' com categoria + marca de
-  // canal "[tel]" na observação (convenção, sem coluna dedicada — D-05).
+  // R5/R6 (não atendeu, opcionais): desfecho 'nao_atendida' — a lib compõe os
+  // marcadores (origem + classificação + demanda + observação) via
+  // montarMarcadores, substituindo o antigo prefixo fixo "[tel] " do pzh.
   async function concluirMotivo() {
     if (!alvoTel || enviandoTel || !categoriaTel) return;
     setEnviandoTel(true);
     setErroTel(false);
-    const observacao = ("[tel] " + obsTel).trim();
-    const ok = await registrarDesfechoTel(alvoTel.taskId, "nao_atendida", { categoria: categoriaTel, observacao });
+    const ok = await registrarDesfechoTel(alvoTel.taskId, "nao_atendida", {
+      categoria: categoriaTel,
+      classificacao: classificacaoTel || undefined,
+      demanda: demandaTel || undefined,
+      observacao: obsTel || undefined,
+      origem: alvoTel.origem,
+    });
     setEnviandoTel(false);
     if (!ok) {
       setErroTel(true);
@@ -263,19 +340,32 @@ export function Fila({
     >
       <div className="fp-telcard" onClick={(e) => e.stopPropagation()}>
         <div className="fp-ptit">
-          <Phone size={17} /> Conseguiu falar com {alvoTel.nome}?
+          <Phone size={17} /> Conseguiu falar com {alvoTel.nome || "o lead"}?
         </div>
 
         {faseTel === "escolha" && (
           <div className="fp-telesc">
-            <button type="button" className="fp-telchoice fp-telchoice--ok" onClick={() => setFaseTel("voto")}>
-              Atendeu
+            {/* R3 (rr6): cobre o re-discar E a chegada apos-whatsapp (ainda
+               não discou pelo tel: nesse caminho). Gesto do usuário — abre o
+               discador nativo do aparelho. */}
+            <button
+              type="button"
+              className="fp-telchoice fp-telchoice--tel fp-btn48"
+              onClick={() => {
+                const link = linkTelefone(alvoTel.telefone);
+                if (link) window.location.href = link;
+              }}
+            >
+              <Phone size={17} /> Ligar pelo telefone
             </button>
-            <button type="button" className="fp-telchoice" onClick={() => setFaseTel("motivo")}>
-              Não atendeu
+            <button type="button" className="fp-telchoice fp-telchoice--ok fp-btn48" onClick={() => setFaseTel("voto")}>
+              <CheckCircle2 size={17} /> Atendeu
             </button>
-            <button type="button" className="seg" onClick={naoConsegui}>
-              Não consegui ligar
+            <button type="button" className="fp-telchoice fp-btn48" onClick={() => setFaseTel("motivo")}>
+              <XCircle size={17} /> Não atendeu
+            </button>
+            <button type="button" className="seg fp-btn48" onClick={naoConsegui}>
+              <Ban size={15} /> Não consegui ligar
             </button>
           </div>
         )}
@@ -289,7 +379,7 @@ export function Fila({
                   <button
                     key={v}
                     type="button"
-                    className={`fp-telsegbtn${votoRomero === v ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn48${votoRomero === v ? " active" : ""}`}
                     onClick={() => setVotoRomero(votoRomero === v ? undefined : v)}
                     disabled={enviandoTel}
                   >
@@ -305,7 +395,7 @@ export function Fila({
                   <button
                     key={v}
                     type="button"
-                    className={`fp-telsegbtn${votoAndressa === v ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn48${votoAndressa === v ? " active" : ""}`}
                     onClick={() => setVotoAndressa(votoAndressa === v ? undefined : v)}
                     disabled={enviandoTel}
                   >
@@ -314,13 +404,58 @@ export function Fila({
                 ))}
               </div>
             </div>
+            <div className="fp-telq">
+              <div className="fp-tellbl">Classificação (obrigatória)</div>
+              <div className="fp-telseg">
+                {CLASSIFICACOES.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className={`fp-telsegbtn fp-btn48${classificacaoTel === c ? " active" : ""}`}
+                    onClick={() => setClassificacaoTel(c)}
+                    disabled={enviandoTel}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="fp-telq">
+              <div className="fp-tellbl">Demanda (opcional)</div>
+              <input
+                className="fp-ptxt fp-ptxt--input"
+                type="text"
+                value={demandaTel}
+                onChange={(e) => setDemandaTel(e.target.value)}
+                placeholder="O que o lead pediu/precisa…"
+                maxLength={200}
+                disabled={enviandoTel}
+              />
+            </div>
+            <div className="fp-telq">
+              <div className="fp-tellbl">Observação (opcional)</div>
+              <textarea
+                className="fp-ptxt"
+                value={obsTel}
+                onChange={(e) => setObsTel(e.target.value)}
+                placeholder="Observação livre…"
+                rows={3}
+                maxLength={500}
+                disabled={enviandoTel}
+              />
+            </div>
             {erroTel && <div className="fp-perro">Não deu para registrar — tente de novo.</div>}
             <div className="fp-pacts">
-              <button type="button" className="seg" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
+              <button type="button" className="seg fp-btn48" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
                 Voltar
               </button>
-              <button type="button" className="fp-pgo" onClick={() => void concluirVoto()} disabled={enviandoTel}>
-                {enviandoTel ? <span className="fp-spin" /> : null} Concluir
+              <button
+                type="button"
+                className="fp-pgo fp-btn48"
+                onClick={() => void concluirVoto()}
+                disabled={enviandoTel || !classificacaoTel}
+              >
+                {enviandoTel ? <span className="fp-spin" /> : <Check size={16} />} Concluir
               </button>
             </div>
           </div>
@@ -335,7 +470,7 @@ export function Fila({
                   <button
                     key={c}
                     type="button"
-                    className={`fp-telsegbtn${categoriaTel === c ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn48${categoriaTel === c ? " active" : ""}`}
                     onClick={() => setCategoriaTel(c)}
                     disabled={enviandoTel}
                   >
@@ -344,6 +479,34 @@ export function Fila({
                 ))}
               </div>
             </div>
+            <div className="fp-telq">
+              <div className="fp-tellbl">Classificação (opcional)</div>
+              <div className="fp-telseg">
+                {CLASSIFICACOES.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className={`fp-telsegbtn fp-btn48${classificacaoTel === c ? " active" : ""}`}
+                    onClick={() => setClassificacaoTel(classificacaoTel === c ? "" : c)}
+                    disabled={enviandoTel}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="fp-telq">
+              <div className="fp-tellbl">Demanda (opcional)</div>
+              <input
+                className="fp-ptxt fp-ptxt--input"
+                type="text"
+                value={demandaTel}
+                onChange={(e) => setDemandaTel(e.target.value)}
+                placeholder="O que o lead pediu/precisa…"
+                maxLength={200}
+                disabled={enviandoTel}
+              />
+            </div>
             <textarea
               className="fp-ptxt"
               value={obsTel}
@@ -351,19 +514,20 @@ export function Fila({
               placeholder="Observação (opcional)…"
               rows={3}
               maxLength={500}
+              disabled={enviandoTel}
             />
             {erroTel && <div className="fp-perro">Não deu para registrar — tente de novo.</div>}
             <div className="fp-pacts">
-              <button type="button" className="seg" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
+              <button type="button" className="seg fp-btn48" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
                 Voltar
               </button>
               <button
                 type="button"
-                className="fp-pgo"
+                className="fp-pgo fp-btn48"
                 onClick={() => void concluirMotivo()}
                 disabled={enviandoTel || !categoriaTel}
               >
-                {enviandoTel ? <span className="fp-spin" /> : null} Concluir
+                {enviandoTel ? <span className="fp-spin" /> : <Check size={16} />} Concluir
               </button>
             </div>
           </div>
@@ -372,8 +536,47 @@ export function Fila({
     </div>
   );
 
-  /* Conteúdo da vista LIGAR (atendentes) — estados inline. */
-  const secaoLigar = carregando ? (
+  /* R7/D-07 (rr6): script (roteiro) + dossiê do lead — busca PREGUIÇOSA,
+     keyed no taskId do PRÓXIMO lead da fila. Não bloqueia o card (renderiza
+     de imediato com skeleton próprio nas seções) nem atrasa o toque em
+     "Ligar". Nunca lança (fallback-tel.ts). LGPD: nunca logar. */
+  const taskIdAtual = itens[0]?.taskId;
+  const [scriptTexto, setScriptTexto] = React.useState<string | null>(null);
+  const [scriptCarregando, setScriptCarregando] = React.useState(false);
+  const [dossieTexto, setDossieTexto] = React.useState<string | null>(null);
+  const [dossieCarregando, setDossieCarregando] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!taskIdAtual) {
+      setScriptTexto(null);
+      setDossieTexto(null);
+      return;
+    }
+    let vivo = true;
+    setScriptTexto(null);
+    setDossieTexto(null);
+    setScriptCarregando(true);
+    setDossieCarregando(true);
+    void carregarLigacaoDetalhe(taskIdAtual).then((d) => {
+      if (!vivo) return;
+      setScriptTexto(d?.script ?? "");
+      setScriptCarregando(false);
+    });
+    void carregarContextoLead(taskIdAtual).then((c) => {
+      if (!vivo) return;
+      setDossieTexto(c ?? "");
+      setDossieCarregando(false);
+    });
+    return () => {
+      vivo = false;
+    };
+  }, [taskIdAtual]);
+
+  /* Conteúdo da vista LIGAR (atendentes) — estados inline.
+     R1 (rr6): o esqueleto CHEIO só aparece na primeira carga (sem itens
+     ainda) — com o card já visível, um refetch (`atualizando`) mostra só o
+     indicador discreto na `qbar`, o card do lead NUNCA some/pisca. */
+  const secaoLigar = carregando && itens.length === 0 ? (
     <Esqueleto alturas={[64, 86]} />
   ) : erro ? (
     <div className="empty">
@@ -399,6 +602,11 @@ export function Fila({
               : "fila zerada hoje"}
           </span>
         </div>
+        {atualizando && (
+          <div className="fp-atualizando">
+            <span className="fp-spin fp-spin--dim" /> Atualizando…
+          </div>
+        )}
       </div>
 
       {itens.length === 0 ? (
@@ -419,6 +627,10 @@ export function Fila({
           onCopiar={copiar}
           copiado={copiadoId === itens[0].taskId}
           avisoTelInvalido={avisoTelId === itens[0].taskId}
+          scriptTexto={scriptTexto}
+          scriptCarregando={scriptCarregando}
+          dossieTexto={dossieTexto}
+          dossieCarregando={dossieCarregando}
         />
       )}
     </>
@@ -448,6 +660,45 @@ export function Fila({
   );
 }
 
+/** Seção recolhível do card (R7/D-07) — "Roteiro" e "Dossiê", cada uma com o
+ *  próprio skeleton enquanto carrega. Texto longo em bloco rolável, quebra de
+ *  linha preservada (`white-space:pre-wrap`). */
+function SecaoRecolhivel({
+  titulo,
+  aberto,
+  onToggle,
+  carregando,
+  texto,
+  vazio,
+}: {
+  titulo: string;
+  aberto: boolean;
+  onToggle: () => void;
+  carregando: boolean;
+  texto: string | null;
+  vazio: string;
+}) {
+  return (
+    <div className="fp-secao">
+      <button type="button" className="fp-secao-head" onClick={onToggle} aria-expanded={aberto}>
+        <span>{titulo}</span>
+        <ChevronDown size={17} className={aberto ? "fp-chev fp-chev--aberto" : "fp-chev"} />
+      </button>
+      {aberto && (
+        <div className="fp-secao-body">
+          {carregando ? (
+            <div className="skel" style={{ height: 52, borderRadius: 10 }} />
+          ) : texto ? (
+            <div className="fp-secao-texto">{texto}</div>
+          ) : (
+            <div className="fp-secao-vazio">{vazio}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CardFila({
   item,
   indice,
@@ -457,6 +708,10 @@ function CardFila({
   onCopiar,
   copiado,
   avisoTelInvalido,
+  scriptTexto,
+  scriptCarregando,
+  dossieTexto,
+  dossieCarregando,
 }: {
   item: ItemFilaReal;
   indice: number;
@@ -466,64 +721,77 @@ function CardFila({
   onCopiar: (item: ItemFilaReal) => void;
   copiado: boolean;
   avisoTelInvalido: boolean;
+  scriptTexto: string | null;
+  scriptCarregando: boolean;
+  dossieTexto: string | null;
+  dossieCarregando: boolean;
 }) {
   // u14: o CARD INTEIRO liga. Tocar em qualquer lugar do card dispara `onLigar`
-  // (mesma ação do botão). O botão "Ligar" fica como affordance explícita e
-  // dá stopPropagation pra não disparar duas vezes. A ficha saiu da Fila.
-  // 2026-08-19: "Pular" embaixo do Ligar — tira o contato da fila COM motivo
-  // (modal), sem discar; também stopPropagation (senão o card ligaria junto).
-  // quick-260822-pzh (D-01): "Ligar pelo telefone" + "Copiar número" ficam
-  // SUBORDINADOS (visual discreto, `fp-tel-sec`) — plano B, não o caminho
-  // principal.
+  // (mesma ação do botão). "Ligar" fica como affordance explícita.
+  // 2026-08-19: "Pular" tira o contato da fila COM motivo (modal), sem discar.
+  // R7 (rr6): "Roteiro" e "Dossiê" recolhíveis — fecham por padrão, abrem sob
+  // toque (cada card novo reseta o estado, já que a key muda por taskId).
+  const [abertoScript, setAbertoScript] = React.useState(false);
+  const [abertoDossie, setAbertoDossie] = React.useState(false);
+
   return (
     <div
-      className="task"
+      className="task fp-card"
       onClick={() => onLigar(item)}
       style={{
         cursor: "pointer",
         animation: `reveal-up 380ms var(--ease-out-soft) ${Math.min(indice, 8) * 40}ms backwards`,
       }}
     >
-      <div className="av">{iniciais(item.nome)}</div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="tn trunc">{item.nome}</div>
-        {/* Telefone exibido ao operador autorizado — nunca logar (LGPD). */}
-        <div className="tm trunc">{fmtTelefone(item.telefone)}</div>
-        <div className="fp-telrow" onClick={(e) => e.stopPropagation()}>
-          <button type="button" className="fp-tel-sec" onClick={() => onLigarTel(item)}>
-            <Phone size={11} /> Ligar pelo telefone
-          </button>
-          <button type="button" className="fp-tel-sec" onClick={() => onCopiar(item)}>
-            <Copy size={11} /> {copiado ? "Copiado" : "Copiar número"}
-          </button>
+      <div className="fp-card-head">
+        <div className="av">{iniciais(item.nome)}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="tn trunc">{item.nome}</div>
+          {/* Telefone exibido ao operador autorizado — nunca logar (LGPD). */}
+          <div className="tm trunc">{fmtTelefone(item.telefone)}</div>
         </div>
-        {avisoTelInvalido && <div className="fp-teleravi">Telefone inválido para ligar.</div>}
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch" }}>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onLigar(item);
-          }}
-          className="go"
-          aria-label="Ligar"
-        >
-          Ligar
+      <div className="fp-secoes" onClick={(e) => e.stopPropagation()}>
+        <SecaoRecolhivel
+          titulo="Roteiro"
+          aberto={abertoScript}
+          onToggle={() => setAbertoScript((a) => !a)}
+          carregando={scriptCarregando}
+          texto={scriptTexto}
+          vazio="Sem roteiro disponível para esta ligação."
+        />
+        <SecaoRecolhivel
+          titulo="Dossiê"
+          aberto={abertoDossie}
+          onToggle={() => setAbertoDossie((a) => !a)}
+          carregando={dossieCarregando}
+          texto={dossieTexto}
+          vazio="Sem dossiê disponível para este lead."
+        />
+      </div>
+
+      <div className="fp-acoes" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className="fp-ligar" onClick={() => onLigar(item)} aria-label="Ligar">
+          <PhoneCall size={19} /> Ligar
         </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onPular(item);
-          }}
-          className="fp-pular"
-          aria-label={`Pular ${item.nome}`}
-        >
-          <SkipForward size={12} /> Pular
+        <button type="button" className="fp-ligar-tel" onClick={() => onLigarTel(item)}>
+          <Phone size={17} /> Ligar pelo telefone
         </button>
+        {avisoTelInvalido && <div className="fp-teleravi">Telefone inválido para ligar.</div>}
+        <div className="fp-acoes-row">
+          <button type="button" className="fp-acao-sec" onClick={() => onCopiar(item)}>
+            <Copy size={16} /> {copiado ? "Copiado" : "Copiar número"}
+          </button>
+          <button
+            type="button"
+            className="fp-acao-sec fp-acao-sec--alerta"
+            onClick={() => onPular(item)}
+            aria-label={`Pular ${item.nome}`}
+          >
+            <SkipForward size={16} /> Pular
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -531,11 +799,11 @@ function CardFila({
 
 /* CSS do PULAR na fila clássica (2026-08-19) — o modal/chip do Audios (AU_CSS)
    não monta nesta vista, então os estilos vivem aqui com prefixo fp-.
-   quick-260822-pzh: classes fp-tel-sec / fp-telmodal / fp-telcard / fp-telseg
-   (fallback de ligação tel:) somadas ao bloco abaixo. */
+   quick-260822-pzh: classes fp-telmodal / fp-telcard / fp-telseg (fallback de
+   ligação tel:) somadas ao bloco abaixo. quick-260822-rr6: card vertical
+   (fp-card/fp-card-head/fp-secoes/fp-acoes), botões ≥48px (fp-btn48/fp-ligar/
+   fp-ligar-tel/fp-acao-sec) e indicador de refetch (fp-atualizando). */
 const FP_CSS = `
-.fp-pular{ display:inline-flex; align-items:center; justify-content:center; gap:4px; font-size:10px; font-weight:800; letter-spacing:.03em; text-transform:uppercase; padding:5px 10px; border-radius:999px; border:1px solid color-mix(in srgb, var(--alert) 45%, transparent); background:transparent; color:var(--alert); cursor:pointer; -webkit-tap-highlight-color:transparent; }
-.fp-pular:active{ background:color-mix(in srgb, var(--alert) 14%, transparent); }
 .fp-pmodal{ position:fixed; inset:0; z-index:300; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; justify-content:center; padding:0 12px calc(24px + var(--safe-b)); }
 .fp-pcard{ width:min(520px, 100%); background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:16px; display:flex; flex-direction:column; gap:10px; animation:fpUp .18s ease both; }
 @keyframes fpUp{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:none; } }
@@ -543,32 +811,69 @@ const FP_CSS = `
 .fp-pnome{ font-size:14px; font-weight:700; color:var(--ink); }
 .fp-phint{ font-size:12.5px; color:var(--dim); line-height:1.5; }
 .fp-ptxt{ width:100%; box-sizing:border-box; resize:none; background:var(--bg-2); border:1px solid var(--line); border-radius:12px; padding:10px 12px; color:var(--ink); font-size:14px; line-height:1.5; outline:none; font-family:inherit; }
+.fp-ptxt--input{ resize:auto; min-height:48px; }
 .fp-ptxt:focus{ border-color:var(--alert); }
 .fp-perro{ font-size:12.5px; color:var(--alert); font-weight:700; }
-.fp-pacts{ display:flex; gap:8px; justify-content:flex-end; align-items:center; }
-.fp-pgo{ display:inline-flex; align-items:center; gap:6px; border:none; border-radius:12px; padding:10px 14px; background:var(--alert); color:#fff; font-weight:800; font-size:13px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-pacts{ display:flex; gap:8px; justify-content:flex-end; align-items:center; flex-wrap:wrap; }
+.fp-pgo{ display:inline-flex; align-items:center; justify-content:center; gap:6px; border:none; border-radius:12px; padding:10px 16px; background:var(--alert); color:#fff; font-weight:800; font-size:13.5px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-pgo:disabled{ opacity:.55; cursor:default; }
 .fp-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:fpSpin .7s linear infinite; }
+.fp-spin--dim{ border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--dim); }
 @keyframes fpSpin{ to{ transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce){ .fp-spin,.fp-pcard{ animation:none!important; } }
 
-/* Fallback tel: (quick-260822-pzh) — botão secundário/discreto no card (D-01). */
-.fp-telrow{ display:flex; gap:10px; margin-top:4px; flex-wrap:wrap; }
-.fp-tel-sec{ display:inline-flex; align-items:center; gap:4px; font-size:10.5px; font-weight:700; color:var(--dim); background:none; border:none; padding:2px 0; cursor:pointer; -webkit-tap-highlight-color:transparent; }
-.fp-tel-sec:active{ opacity:.65; }
-.fp-teleravi{ font-size:11px; color:var(--alert); font-weight:700; margin-top:2px; }
+/* Alvo de toque mínimo ≥48px (R2/D-02) — modificador aplicado junto de
+   classes já existentes (.seg/.fp-telchoice/.fp-telsegbtn/.fp-pgo) sem mexer
+   no estilo global dessas classes fora deste arquivo. */
+.fp-btn48{ min-height:48px; display:inline-flex; align-items:center; justify-content:center; gap:8px; }
+
+/* Indicador discreto de refetch (R1/D-01) — o card do lead NUNCA some; só
+   este texto aparece/some na barra de progresso. */
+.fp-atualizando{ display:flex; align-items:center; gap:6px; margin-top:8px; font-size:11.5px; font-weight:700; color:var(--dim); }
+
+.fp-teleravi{ font-size:11px; color:var(--alert); font-weight:700; margin-top:6px; }
+
+/* Card vertical (R2/R7, rr6): avatar+nome no topo, seções recolhíveis no
+   meio, ações grandes embaixo — substitui o layout horizontal antigo
+   (avatar | info | coluna de botões pequenos). */
+.fp-card{ flex-direction:column; align-items:stretch; }
+.fp-card-head{ display:flex; align-items:center; gap:clamp(11px, 3cqi, 16px); }
+
+/* Seções recolhíveis "Roteiro"/"Dossiê" (R7/D-07). */
+.fp-secoes{ display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+.fp-secao{ border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--bg-2); }
+.fp-secao-head{ width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:12px 14px; min-height:44px; background:none; border:none; color:var(--ink); font-size:13.5px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-chev{ transition:transform 160ms var(--ease-out); color:var(--dim); flex:none; }
+.fp-chev--aberto{ transform:rotate(180deg); }
+.fp-secao-body{ padding:0 14px 14px; }
+.fp-secao-texto{ white-space:pre-wrap; font-size:13px; line-height:1.6; color:var(--dim); max-height:260px; overflow-y:auto; }
+.fp-secao-vazio{ font-size:12.5px; color:var(--dim-2); font-style:italic; }
+
+/* Ações do card (R2/D-02): "Ligar" primário grande full-width; "Ligar pelo
+   telefone" secundário grande full-width; "Copiar número"/"Pular" numa
+   grade de 2 colunas, todos ≥48px com ícone e texto legível. */
+.fp-acoes{ display:flex; flex-direction:column; gap:10px; margin-top:14px; }
+.fp-ligar{ min-height:52px; width:100%; display:flex; align-items:center; justify-content:center; gap:9px; border:none; border-radius:14px; background:var(--romero, #3d8bff); color:#04122a; font-weight:800; font-size:15px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-ligar:active{ transform:scale(0.98); }
+.fp-ligar-tel{ min-height:48px; width:100%; display:flex; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:14px; background:var(--bg-2); color:var(--ink); font-weight:700; font-size:14px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-ligar-tel:active{ background:rgba(255,255,255,.06); }
+.fp-acoes-row{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.fp-acao-sec{ min-height:48px; display:flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line); border-radius:12px; background:transparent; color:var(--dim); font-weight:700; font-size:12.5px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-acao-sec:active{ background:rgba(255,255,255,.06); }
+.fp-acao-sec--alerta{ border-color:color-mix(in srgb, var(--alert) 45%, transparent); color:var(--alert); }
 
 /* Tela de retorno (D-04) — mesmo molde visual do modalPular. */
 .fp-telmodal{ position:fixed; inset:0; z-index:310; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; justify-content:center; padding:0 12px calc(24px + var(--safe-b)); }
-.fp-telcard{ width:min(520px, 100%); background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:16px; display:flex; flex-direction:column; gap:12px; animation:fpUp .18s ease both; }
+.fp-telcard{ width:min(520px, 100%); max-height:min(720px, 88vh); overflow-y:auto; background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:16px; display:flex; flex-direction:column; gap:12px; animation:fpUp .18s ease both; }
 .fp-telesc{ display:flex; flex-direction:column; gap:8px; }
 .fp-telchoice{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:12px; padding:12px; font-size:14px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-telchoice--ok{ border-color:color-mix(in srgb, var(--ok, #2ecc71) 45%, var(--line)); }
+.fp-telchoice--tel{ border-color:color-mix(in srgb, var(--romero, #3d8bff) 45%, var(--line)); color:var(--romero, #3d8bff); }
 .fp-telform{ display:flex; flex-direction:column; gap:10px; }
 .fp-telq{ display:flex; flex-direction:column; gap:6px; }
 .fp-tellbl{ font-size:12px; font-weight:800; color:var(--dim); text-transform:uppercase; letter-spacing:.03em; }
 .fp-telseg{ display:flex; gap:6px; flex-wrap:wrap; }
-.fp-telsegbtn{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:999px; padding:6px 12px; font-size:12.5px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-telsegbtn{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:999px; padding:6px 14px; font-size:12.5px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-telsegbtn.active{ background:var(--accent); border-color:var(--accent); color:#fff; }
 .fp-telsegbtn:disabled{ opacity:.55; cursor:default; }
 `;

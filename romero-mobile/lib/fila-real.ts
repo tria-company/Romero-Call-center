@@ -16,6 +16,11 @@ import type { ItemFilaReal } from "@/lib/discador-servidor";
 export type EstadoFilaReal = {
   itens: ItemFilaReal[];
   carregando: boolean;
+  /** R1/D-01 (quick-260822-rr6): true durante um refetch (após a PRIMEIRA
+   *  carga) — a UI usa isto pra mostrar um indicador discreto de
+   *  "Atualizando…" SEM trocar o card pelo esqueleto cheio (`carregando`
+   *  só é true na primeira carga, sem dados ainda). */
+  atualizando: boolean;
   erro: boolean;
   semMapeamento: boolean;
   recarregar: () => void;
@@ -24,15 +29,24 @@ export type EstadoFilaReal = {
 export function useFilaReal(): EstadoFilaReal {
   const [itens, setItens] = React.useState<ItemFilaReal[]>([]);
   const [carregando, setCarregando] = React.useState(true);
+  const [atualizando, setAtualizando] = React.useState(false);
   const [erro, setErro] = React.useState(false);
   const [semMapeamento, setSemMapeamento] = React.useState(false);
 
   // Guarda de vida entre carregamentos: um fetch que volta após o unmount (ou
   // depois de um recarregar mais novo) não pode escrever no estado.
   const vivoRef = React.useRef(true);
+  // R1/D-01: distingue a PRIMEIRA carga (sem dados ainda, mostra esqueleto
+  // cheio) de um refetch (card atual seguе visível, só o indicador discreto
+  // muda) — setado true no finally da primeira chamada, nunca antes.
+  const jaCarregouRef = React.useRef(false);
 
   const carregar = React.useCallback(async () => {
-    setCarregando(true);
+    if (jaCarregouRef.current) {
+      setAtualizando(true);
+    } else {
+      setCarregando(true);
+    }
     setErro(false);
     try {
       const r = await fetch("/api/mobile/fila", { cache: "no-store" });
@@ -52,7 +66,11 @@ export function useFilaReal(): EstadoFilaReal {
     } catch {
       if (vivoRef.current) setErro(true);
     } finally {
-      if (vivoRef.current) setCarregando(false);
+      if (vivoRef.current) {
+        jaCarregouRef.current = true;
+        setCarregando(false);
+        setAtualizando(false);
+      }
     }
   }, []);
 
@@ -64,7 +82,7 @@ export function useFilaReal(): EstadoFilaReal {
     };
   }, [carregar]);
 
-  return { itens, carregando, erro, semMapeamento, recarregar: carregar };
+  return { itens, carregando, atualizando, erro, semMapeamento, recarregar: carregar };
 }
 
 /**
