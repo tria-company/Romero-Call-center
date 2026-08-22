@@ -20,8 +20,10 @@
 //     B2) uma mensagem qualquer (sem marcador conhecido) continua transitório
 //         (default conservador — não quebrado pelo novo marcador).
 //
-// (PARTE C — registrarEstacionamentoCorrelacao, metricas.ts — estendida
-// pela Task 3 deste plano, ver comentário mais abaixo no arquivo.)
+//   PARTE C — registrarEstacionamentoCorrelacao (metricas.ts, Task 3):
+//     C1) incrementa o contador durável (modo memória, via lerSerieDiaria)
+//         sem lançar.
+//     C2) nenhum log/saída da chamada carrega PII.
 //
 // Uso: node --experimental-strip-types scripts/correlacao-durabilidade.smoke.mjs
 
@@ -31,6 +33,7 @@ process.env.SUPABASE_STORAGE_BUCKET_GRAVACOES ||= 'gravacoes';
 
 const { decidirTaskIdRecord } = await import('../src/mastra/processador.ts');
 const { classificarErro } = await import('../src/mastra/classificar-erro.ts');
+const { registrarEstacionamentoCorrelacao, lerSerieDiaria } = await import('../src/mastra/metricas.ts');
 
 const falhas = [];
 function checar(condicao, mensagem) {
@@ -85,6 +88,33 @@ function testeMensagemDeRedeNaoQuebra() {
   checar(r.tipo === 'transitorio' && r.origem === 'rede', `marcador de rede pré-existente não deveria ser afetado pelo novo marcador, recebido: ${JSON.stringify(r)}`);
 }
 
+// ===== PARTE C — registrarEstacionamentoCorrelacao (metricas.ts) =====
+
+async function testeContadorEstacionamentoIncrementaSemLancarSemPii() {
+  let lancou = false;
+  const linhas = [];
+  const originais = { log: console.log, warn: console.warn, error: console.error };
+  console.log = (...a) => linhas.push(a.map(String).join(' '));
+  console.warn = (...a) => linhas.push(a.map(String).join(' '));
+  console.error = (...a) => linhas.push(a.map(String).join(' '));
+  try {
+    registrarEstacionamentoCorrelacao();
+    registrarEstacionamentoCorrelacao();
+  } catch {
+    lancou = true;
+  } finally {
+    Object.assign(console, originais);
+  }
+  checar(!lancou, 'registrarEstacionamentoCorrelacao NUNCA deveria lançar (modo memória)');
+
+  const serie = await lerSerieDiaria('correlacao_estacionada', 1);
+  const hoje = serie[0];
+  checar(!!hoje && hoje.contagem >= 2, `contador durável deveria ter incrementado >=2, recebido: ${JSON.stringify(serie)}`);
+
+  const linhaComTelefone = linhas.find((l) => /\d{8,}/.test(l));
+  checar(!linhaComTelefone, `nenhuma linha de log deveria carregar sequência longa de dígitos (telefone/CPF), recebido: ${JSON.stringify(linhas)}`);
+}
+
 async function main() {
   testeDecideDataPrimeiro();
   testeDecideRedisSemData();
@@ -93,6 +123,7 @@ async function main() {
   testeMensagemEstavelSemCorrelacaoEhPermanente();
   testeMensagemQualquerContinuaTransitorio();
   testeMensagemDeRedeNaoQuebra();
+  await testeContadorEstacionamentoIncrementaSemLancarSemPii();
 
   if (falhas.length > 0) {
     console.error('=== SMOKE FAIL ===');

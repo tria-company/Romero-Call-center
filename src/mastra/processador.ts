@@ -66,7 +66,7 @@ import { guardarGravacao, baixarGravacao } from './gravacao-store.ts';
 
 import { mascararTelefone } from './mascarar.ts';
 
-import { registrarErroEtapa, registrarSucessoEtapa } from './metricas.ts';
+import { registrarErroEtapa, registrarSucessoEtapa, registrarEstacionamentoCorrelacao } from './metricas.ts';
 
 import {
   derivarAtendeu,
@@ -547,6 +547,9 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     taskIdClickup,
   });
   if (decisaoTaskId.estacionar) {
+    // Fase 19.1 Plano 08 Task 3 (DUR-02/06): contador durável ANTES do log +
+    // throw — observabilidade do ramo (nunca lança, sem PII).
+    registrarEstacionamentoCorrelacao();
     // WR-01: SO o callId (LGPD) — nunca telefone.
     console.warn(`[processador] RECORD sem correlacao resolvivel (call=${callId}) — estacionando para decisao humana`);
     // Mensagem ESTAVEL — classificarErro (classificar-erro.ts) mapeia

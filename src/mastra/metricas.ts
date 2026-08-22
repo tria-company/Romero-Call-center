@@ -485,6 +485,36 @@ export function registrar429ClickUp(): void {
   }
 }
 
+/**
+ * Fase 19.1 Plano 08 (DUR-02/06) — contador DURAVEL do ramo "RECORD sem
+ * correlacao resolvivel" (processador.ts, decidirTaskIdRecord/estacionar):
+ * chamado logo antes do throw permanente que estaciona o job para decisao
+ * humana. Reusa a MESMA infra de serie diaria do F1 (met:serie:
+ * correlacao_estacionada:{dia}, retencao METRICAS_SERIE_TTL_MS) — NAO
+ * alimenta o painel/thresholds (lerMetricas/avaliarThresholds inalterados),
+ * so investigacao pos-incidente via `lerSerieDiaria('correlacao_estacionada')`.
+ * NUNCA lanca; zero PII (so um contador, sem callId/telefone).
+ */
+export function registrarEstacionamentoCorrelacao(): void {
+  try {
+    if (MODO === 'redis') {
+      incrementarSerieRedis('correlacao_estacionada').catch((e) => {
+        console.error(
+          '[metricas] falha ao registrar estacionamento de correlacao (degradando p/ no-op):',
+          e instanceof Error ? e.message : String(e),
+        );
+      });
+    } else {
+      incrementarSerieMem('correlacao_estacionada');
+    }
+  } catch (e) {
+    console.error(
+      '[metricas] falha ao registrar estacionamento de correlacao (degradando p/ no-op):',
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
 /** Conta uma chamada do device (por numero) no dia — total/atendida/nao. NUNCA lanca. */
 export function registrarChamadaDevice(deviceId: string, tipo: TipoChamadaDevice): void {
   if (!deviceId) return;
