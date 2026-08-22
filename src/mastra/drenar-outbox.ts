@@ -19,6 +19,20 @@
 // CADA envio bem-sucedido, `marcarEnviado` marca `enviado` e NULA o payload
 // (scrub de PII pós-drain, LGPD-03/Riscos R13).
 //
+// WR-A (19-13, 19-REVIEW-2.md) — fecha a janela residual do CR-01: o
+// `clickup_task_id` só é conhecido DEPOIS de `criarTask` e persistido por uma
+// chamada SEPARADA (`backfillClickupTaskId`). Um crash ENTRE as duas deixaria
+// a re-execução sem id resolvido → `criarTask` de novo → task DUPLICADA. A
+// defesa é um CLAIM por compare-and-set (`outbox-repo.ts::claimLinha`,
+// `pendente`/`erro`→`enviando`) ANTES de `criarTask`: se o processo morre
+// depois do claim mas antes do back-fill, a linha fica `enviando` (fora do
+// conjunto que `proximasPendentes` lê) — a próxima passada NÃO a re-executa às
+// cegas: `reconciliarCriarTaskPresa` a detecta e, sem id resolvido, a converte
+// em `orphan` (a task PODE existir no ClickUp mas descorrelacionada) — um
+// ÓRFÃO DETECTÁVEL reconciliável pelo 19-06, NUNCA uma DUPLICATA. Se `criarTask`
+// falha DENTRO do processo (sem crash), o claim é LIBERADO (`liberarLinha`,
+// `enviando`→`pendente`) e o retry segue como antes.
+//
 // `processarDrenoOutboxJob` é EXPORTADA e usada TANTO pelo worker (worker.ts,
 // case 'drenar-outbox') QUANTO pelo fallback inline dos callers (rotas
 // 19-07/08, quando `enfileirarDrenoOutbox` retorna `{ enfileirado:false }` —
@@ -61,6 +75,10 @@ import {
   backfillClickupTaskId,
   marcarEnviado,
   marcarDlqLinha,
+  claimLinha,
+  liberarLinha,
+  linhasPresasEnviando,
+  marcarOrphanEnviando,
   type LinhaOutbox,
 } from './outbox-repo.ts';
 import { adquirirTokenDreno, modoRateLimiterDreno } from './rate-limiter-dreno.ts';
@@ -108,6 +126,13 @@ function montarBodyDaTask(payload: Record<string, unknown>): {
 export async function processarDrenoOutboxJob(
   aggregateId: number,
 ): Promise<{ enviadas: number; adiadas: number; emDlq: number }> {
+  // WR-A (19-13): ANTES de tudo, reconcilia uma `criar_task` presa em
+  // `enviando` (claim feito, mas o processo morreu antes do back-fill do id).
+  // Roda independentemente de haver linhas pendentes — fecha também o caso de
+  // uma `criar_task` "pelada" (sem ops seguintes) cujo `enviando` seria
+  // invisível a `proximasPendentes`/`cabecaMaisAntiga`.
+  await reconciliarCriarTaskPresa(aggregateId);
+
   const linhas = await proximasPendentes(aggregateId);
   let enviadas = 0;
   let adiadas = 0;
@@ -148,6 +173,45 @@ export async function processarDrenoOutboxJob(
   }
 
   return { enviadas, adiadas, emDlq };
+}
+
+/**
+ * WR-A (19-13, 19-REVIEW-2.md) — reconcilia uma `criar_task` PRESA em `enviando`
+ * (o claim foi feito mas o processo morreu antes do back-fill do id). Dois
+ * sub-casos de crash, ambos SEM re-criar a task (nunca duplicata):
+ *   1. `clickup_task_id` NÃO resolvido (`resolverClickupTaskId` = null): o
+ *      crash foi entre `criarTask` e o back-fill — a task PODE existir no
+ *      ClickUp mas está descorrelacionada. Converte em `orphan`
+ *      (`marcarOrphanEnviando`): um órfão DETECTÁVEL, reconciliável pelo 19-06.
+ *   2. `clickup_task_id` JÁ resolvido: o back-fill rodou, só o `marcarEnviado`
+ *      faltou (crash pós-back-fill). Finaliza a(s) linha(s) `enviando` como
+ *      `enviado` — o id já está persistido, as ops seguintes o reusam; nenhuma
+ *      task nova é criada.
+ * `linhasPresasEnviando` filtra `aggregate=eq.ligacao` + `op=eq.criar_task`, então
+ * para qualquer outro aggregate/id esta função é um no-op barato (lista vazia).
+ * NUNCA loga payload — só a contagem e o `aggregateId`.
+ */
+async function reconciliarCriarTaskPresa(aggregateId: number): Promise<void> {
+  const presas = await linhasPresasEnviando(aggregateId);
+  if (presas.length === 0) return;
+
+  const idPersistido = await resolverClickupTaskId('ligacao', aggregateId);
+  if (idPersistido) {
+    // Crash pós-back-fill: id já persistido; só faltou marcar enviado. Finaliza
+    // (não re-cria — as ops seguintes reusam o id via `resolverClickupTaskId`).
+    for (const linha of presas) await marcarEnviado(linha.id);
+    console.warn(
+      `[drenar-outbox] WR-A: ${presas.length} criar_task presa(s) em 'enviando' com id JÁ persistido (crash pós-back-fill) — finalizada(s) como enviado, sem re-criar (aggregateId=${aggregateId})`,
+    );
+    return;
+  }
+
+  // Crash entre criarTask e o back-fill: id NÃO resolvido. A task pode existir
+  // no ClickUp descorrelacionada — NUNCA re-cria; converte em órfão detectável.
+  const orfas = await marcarOrphanEnviando(aggregateId);
+  console.warn(
+    `[drenar-outbox] WR-A: ${orfas} criar_task presa(s) em 'enviando' SEM clickup_task_id resolvido (crash entre criarTask e back-fill) — roteada(s) para reconciliação/órfão (19-06), NÃO re-criada(s) (aggregateId=${aggregateId})`,
+  );
 }
 
 /**
@@ -226,9 +290,29 @@ async function processarLinha(
         await backfillClickupTaskId(aggregateId, taskIdAtual);
         return true;
       }
+      // Adquire o token do dreno ANTES do claim: se o teto global bloqueia
+      // (worker/multi-réplica), a linha ADIA ainda em `pendente` (nunca fica
+      // reivindicada sem ter criado a task) — preserva a ordem e o fail-CLOSED.
       if (!(await garantirTokenDreno(linha))) return false;
-      const nova = await criarTask(CLICKUP_LIST_LIGACOES, montarBodyDaTask(payload));
+      // WR-A (19-13): CLAIM por compare-and-set ANTES de `criarTask`. Se OUTRA
+      // réplica/passada já tirou a linha de `pendente`/`erro`, o claim falha
+      // (null) — trata como adiar (return false): a outra passada é a dona.
+      const reivindicada = await claimLinha(linha.id);
+      if (!reivindicada) return false;
+      let nova: { id?: string } | null;
+      try {
+        nova = await criarTask(CLICKUP_LIST_LIGACOES, montarBodyDaTask(payload));
+      } catch (e) {
+        // `criarTask` falhou DENTRO do processo (sem crash): a task NÃO foi
+        // criada. LIBERA o claim (`enviando`→`pendente`) para retry seguro e
+        // re-lança (op bloqueante) — nunca deixa como órfão uma falha que não
+        // criou task. (Um CRASH real NÃO chega aqui: a linha fica `enviando` e
+        // vira órfão detectável na próxima passada, via reconciliarCriarTaskPresa.)
+        await liberarLinha(linha.id);
+        throw e;
+      }
       if (!nova?.id) {
+        await liberarLinha(linha.id);
         throw new Error(
           `[drenar-outbox] criarTask não retornou id (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
         );

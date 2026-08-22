@@ -175,6 +175,67 @@ export async function marcarEnviado(id: number): Promise<void> {
 }
 
 /**
+ * WR-A (19-13, 19-REVIEW-2.md) — CLAIM por compare-and-set: reivindica a linha
+ * `id` movendo `status` de `pendente`/`erro` para `enviando` ATOMICAMENTE (o
+ * filtro `status=in.(pendente,erro)` no PATCH é o CAS — o PostgREST só troca a
+ * linha se ela ainda estiver nesse conjunto). Retorna a linha reivindicada
+ * (`return=representation`) ou `null` se OUTRA passada/réplica já a tirou de
+ * `pendente`/`erro` (0 linhas afetadas). O dreno reivindica a linha de
+ * `criar_task` ANTES de `criarTask`: se o processo morre entre `criarTask` e o
+ * back-fill do id, a linha fica `enviando` (não volta a `pendente`) — a
+ * re-execução NÃO a vê em `proximasPendentes` (que lê só `pendente`/`erro`) e
+ * portanto NUNCA re-cria a task (fecha a janela residual de duplicata). LANÇA
+ * em config ausente/erro de rede/HTTP (WR-03). NUNCA loga payload.
+ */
+export async function claimLinha(id: number): Promise<LinhaOutbox | null> {
+  checarConfig();
+  const url = `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}?id=eq.${id}&status=in.(pendente,erro)`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: { ...headers(), Prefer: 'return=representation' },
+      body: JSON.stringify({ status: 'enviando' }),
+    });
+  } catch (e) {
+    throw new Error(`[outbox-repo] falha de rede ao claimLinha id=${id}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao claimLinha id=${id}`);
+  }
+  const linhas = (await res.json()) as LinhaOutbox[];
+  return Array.isArray(linhas) && linhas.length > 0 ? linhas[0] : null;
+}
+
+/**
+ * WR-A (19-13) — LIBERA o claim: devolve a linha `id` de `enviando` para
+ * `pendente` (CAS por `status=eq.enviando`). Usada pelo dreno SÓ quando
+ * `criarTask` FALHA (lança) DENTRO do mesmo processo (sem crash) — a task NÃO
+ * foi criada no ClickUp, então re-abrir a linha para retry é seguro e preserva
+ * a semântica de retry pré-WR-A (a linha continua `pendente`, o BullMQ/inline
+ * re-tenta). Um CRASH de verdade não chega aqui — a linha fica `enviando` e é
+ * reconciliada como órfã na próxima passada (`marcarOrphanEnviando`). LANÇA em
+ * config ausente/erro de rede/HTTP (WR-03).
+ */
+export async function liberarLinha(id: number): Promise<void> {
+  checarConfig();
+  const url = `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}?id=eq.${id}&status=eq.enviando`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: { ...headers(), Prefer: 'return=minimal' },
+      body: JSON.stringify({ status: 'pendente' }),
+    });
+  } catch (e) {
+    throw new Error(`[outbox-repo] falha de rede ao liberarLinha id=${id}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao liberarLinha id=${id}`);
+  }
+}
+
+/**
  * Marca a linha `id` como `erro` com backoff (`tentativas`/`proximaEm`) — o
  * worker de dreno decide o agendamento; aqui só persiste. `erroTruncado`
  * NUNCA deve conter payload/telefone/URL cru (o caller trunca/sanitiza antes
@@ -297,6 +358,71 @@ export async function marcarOrphan(aggregate: string, aggregateId: number): Prom
   }
   if (!res.ok) {
     throw new Error(`[outbox-repo] HTTP ${res.status} ao marcarOrphan (aggregate=${aggregate}, aggregateId=${aggregateId})`);
+  }
+  const linhas = (await res.json()) as unknown[];
+  return Array.isArray(linhas) ? linhas.length : 0;
+}
+
+/**
+ * WR-A (19-13) — linhas de `criar_task` PRESAS em `enviando` de UM aggregate
+ * `ligacao`. Uma linha aqui significa que o dreno reivindicou a linha (claim,
+ * `pendente`→`enviando`) e MORREU antes do back-fill do `clickup_task_id`
+ * (crash na janela `criarTask`→`backfillClickupTaskId`). `proximasPendentes`
+ * NÃO as devolve (lê só `pendente`/`erro`), então esta leitura é o único jeito
+ * de o dreno detectá-las e roteá-las para reconciliação — NUNCA re-criar. O
+ * filtro `aggregate=eq.ligacao` protege contra colisão numérica de
+ * `aggregate_id` entre tabelas (ligacoes.id vs leads.id). LANÇA em config
+ * ausente/erro de rede/HTTP (WR-03).
+ */
+export async function linhasPresasEnviando(aggregateId: number): Promise<LinhaOutbox[]> {
+  checarConfig();
+  const url =
+    `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}` +
+    `?aggregate=eq.ligacao&aggregate_id=eq.${aggregateId}&op=eq.criar_task&status=eq.enviando&order=seq.asc`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, { headers: headers() });
+  } catch (e) {
+    throw new Error(
+      `[outbox-repo] falha de rede ao ler linhasPresasEnviando (aggregateId=${aggregateId}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao ler linhasPresasEnviando (aggregateId=${aggregateId})`);
+  }
+  return (await res.json()) as LinhaOutbox[];
+}
+
+/**
+ * WR-A (19-13) — reconciliação: converte as linhas `criar_task` presas em
+ * `enviando` de UM aggregate `ligacao` em `orphan` (CAS por `status=eq.enviando`).
+ * Chamada pelo dreno quando detecta um crash na janela `criarTask`→back-fill
+ * SEM `clickup_task_id` resolvido: a task PODE ter sido criada no ClickUp mas
+ * ficou descorrelacionada — a linha vira um ÓRFÃO DETECTÁVEL (reconciliável
+ * pelo scanner/alerta do 19-06), NUNCA uma DUPLICATA. Converge com o mesmo
+ * estado terminal de `marcarOrphan` (a ação de operador do 19-06), mas partindo
+ * de `enviando` (aquela parte de `pendente`/`erro`). Retorna quantas linhas
+ * foram convertidas. LANÇA em config ausente/erro de rede/HTTP (WR-03).
+ */
+export async function marcarOrphanEnviando(aggregateId: number): Promise<number> {
+  checarConfig();
+  const url =
+    `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}` +
+    `?aggregate=eq.ligacao&aggregate_id=eq.${aggregateId}&op=eq.criar_task&status=eq.enviando`;
+  let res: Response;
+  try {
+    res = await fetchTimeout(url, {
+      method: 'PATCH',
+      headers: { ...headers(), Prefer: 'return=representation' },
+      body: JSON.stringify({ status: 'orphan' }),
+    });
+  } catch (e) {
+    throw new Error(
+      `[outbox-repo] falha de rede ao marcarOrphanEnviando (aggregateId=${aggregateId}): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[outbox-repo] HTTP ${res.status} ao marcarOrphanEnviando (aggregateId=${aggregateId})`);
   }
   const linhas = (await res.json()) as unknown[];
   return Array.isArray(linhas) ? linhas.length : 0;

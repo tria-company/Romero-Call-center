@@ -63,6 +63,11 @@ async function testeCr01Idempotencia() {
       }
       // Supabase REST
       if (u.includes('/rest/v1/')) {
+        // WR-A (19-13): linhasPresasEnviando — GET ...op=eq.criar_task&status=eq.enviando.
+        // Nenhum crash simulado neste smoke (CR-01), então nada preso em 'enviando'.
+        if (metodo === 'GET' && u.includes('op=eq.criar_task') && u.includes('status=eq.enviando')) {
+          return ok([]);
+        }
         // resolverClickupTaskId — GET ...?id=eq.42&select=clickup_task_id
         if (metodo === 'GET' && u.includes('select=clickup_task_id')) {
           return ok(clickupTaskId ? [{ clickup_task_id: clickupTaskId }] : [{ clickup_task_id: null }]);
@@ -83,6 +88,12 @@ async function testeCr01Idempotencia() {
               tentativas: 0,
             },
           ]);
+        }
+        // WR-A (19-13): claimLinha — PATCH ...?id=eq.1&status=in.(pendente,erro)
+        // (compare-and-set pendente->enviando ANTES de criarTask). Devolve a
+        // representação da linha reivindicada (não-nula) para o dreno seguir.
+        if (metodo === 'PATCH' && u.includes('status=in.')) {
+          return ok([{ id: 1, aggregate: 'ligacao', aggregate_id: 42, op: 'criar_task', status: 'enviando', seq: 1 }]);
         }
         // backfillClickupTaskId — PATCH ...?id=eq.42&clickup_task_id=is.null
         if (metodo === 'PATCH' && u.includes('clickup_task_id=is.null')) {
