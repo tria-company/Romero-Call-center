@@ -45,6 +45,7 @@ import {
   CLICKUP_LIST_AUDIOS,
   OPER_STATUS_EM_PROCESSAMENTO,
   LOTE_LIMITE_TENTATIVAS,
+  FONTE_LIGACOES,
 } from './config.ts';
 
 export interface ResultadoSyncEspelho {
@@ -349,13 +350,17 @@ async function paginarESincronizar<TRow>(args: {
   pausaEntrePaginasMs?: number;
   tentativas?: number;
   onProgress?: (pagina: number, registrosAcumulados: number) => void;
+  // Seam de teste: injeta o listador do ClickUp (default `listarTasksComRetry`) pra
+  // o smoke offline (gap-19-12) contar upserts com um ClickUp fake, sem tocar a rede.
+  listar?: typeof listarTasksComRetry;
 }): Promise<ResultadoSyncEspelho> {
   let page = 0;
   let paginas = 0;
   let registrosTotal = 0;
+  const listarTasks = args.listar ?? listarTasksComRetry;
   const limite = args.maxPaginas && args.maxPaginas > 0 ? args.maxPaginas : Infinity;
   while (paginas < limite) {
-    const { tasks, lastPage } = await listarTasksComRetry(
+    const { tasks, lastPage } = await listarTasks(
       args.listId,
       { page, includeClosed: true },
       args.tentativas ?? 2,
@@ -376,36 +381,86 @@ async function paginarESincronizar<TRow>(args: {
   return { paginas, registros: registrosTotal, ultimaPagina: page };
 }
 
+/**
+ * WR-B (19-12): sob `FONTE_LIGACOES=supabase`, Supabase é o writer AUTORITATIVO de
+ * `ligacoes` — `iniciar_ligacao` carimba `operador` e `consolidar_e_fechar_ligacao`
+ * grava `status='fechada'`/`resultado` DIRETO na tabela, empurrando pro ClickUp só
+ * de forma assíncrona pela outbox. Se o sync espelho ClickUp→Supabase (Fase A) rodar
+ * DEPOIS do flip, um upsert que dispara antes da outbox drenar leria a linha stale do
+ * ClickUp e SOBRESCREVERIA o `operador` nativo (de volta pro assignee-login ou null),
+ * o `status` (de volta pra `aberta`) e o `resultado` — exatamente o clobber que o teste
+ * ClickUp-morto do 19-10 exporia. Então o mirror de `ligacoes` vira no-op sob `supabase`.
+ *
+ * As OUTRAS listas (leads/audios) NÃO têm este guard — elas só invertem na Phase 20;
+ * até lá o espelho segue populando `discador_leads_espelho`/`audios_envios` normalmente.
+ * Sob `clickup` (default), o mirror de `ligacoes` segue idêntico.
+ */
+export function ligacoesEspelhoDesativado(fonte: string = FONTE_LIGACOES): boolean {
+  return fonte === 'supabase';
+}
+
+/** Deps injetáveis (seam de teste offline — gap-19-12): em produção nada é passado, e
+ *  os defaults (`listarTasksComRetry`/upserts reais/`FONTE_LIGACOES`) valem. O smoke passa
+ *  fakes pra contar upserts e forçar a `fonte` sem tocar rede nem env do processo. */
+export interface DepsSyncEspelho {
+  listar?: typeof listarTasksComRetry;
+  upsertLeads?: typeof upsertLeadFullEspelho;
+  upsertLigacoes?: typeof upsertLigacoesEspelho;
+  upsertAudios?: typeof upsertAudiosEnvios;
+  fonte?: string;
+}
+
 /** Sincroniza `discador_leads_espelho` com o registro COMPLETO da Lista 01 (§2.3) —
  *  score/tentativas/proximo_contato/retorno_necessario/dossie/elegivel/... além do
  *  subset que o espelho já copiava. */
-export async function sincronizarEspelhoLeads(opts: OpcoesSyncEspelho = {}): Promise<ResultadoSyncEspelho> {
+export async function sincronizarEspelhoLeads(
+  opts: OpcoesSyncEspelho = {},
+  deps: DepsSyncEspelho = {},
+): Promise<ResultadoSyncEspelho> {
   const agora = new Date().toISOString();
   return paginarESincronizar<LeadFullEspelhoRow>({
     listId: CLICKUP_LIST_LEADS,
     mapear: (task) => paraLinhaLeadFull(task, agora),
-    upsert: upsertLeadFullEspelho,
+    upsert: deps.upsertLeads ?? upsertLeadFullEspelho,
+    listar: deps.listar,
     ...opts,
   });
 }
 
-/** Sincroniza `ligacoes` a partir da Lista 02 LIGACOES (§2.1) — upsert por `clickup_task_id`. */
-export async function sincronizarEspelhoLigacoes(opts: OpcoesSyncEspelho = {}): Promise<ResultadoSyncEspelho> {
+/** Sincroniza `ligacoes` a partir da Lista 02 LIGACOES (§2.1) — upsert por `clickup_task_id`.
+ *  WR-B: no-op quando `FONTE_LIGACOES=supabase` (ver `ligacoesEspelhoDesativado`). */
+export async function sincronizarEspelhoLigacoes(
+  opts: OpcoesSyncEspelho = {},
+  deps: DepsSyncEspelho = {},
+): Promise<ResultadoSyncEspelho> {
+  if (ligacoesEspelhoDesativado(deps.fonte ?? FONTE_LIGACOES)) {
+    // LGPD-safe: só a decisão de gating, nenhum dado da ligação.
+    console.log(
+      '[espelho:ligacoes] pulado — FONTE_LIGACOES=supabase: Supabase é o writer de ligacoes; ' +
+        're-espelhar do ClickUp sobrescreveria operador/status/resultado nativos (WR-B)',
+    );
+    return { paginas: 0, registros: 0, ultimaPagina: 0 };
+  }
   const agora = new Date().toISOString();
   return paginarESincronizar<LigacaoEspelhoRow>({
     listId: CLICKUP_LIST_LIGACOES,
     mapear: (task) => paraLinhaLigacao(task, agora),
-    upsert: upsertLigacoesEspelho,
+    upsert: deps.upsertLigacoes ?? upsertLigacoesEspelho,
+    listar: deps.listar,
     ...opts,
   });
 }
 
 /** Sincroniza `audios_envios` a partir da Lista 03 AUDIOS (§2.2) — upsert por `clickup_task_id`. */
-export async function sincronizarEspelhoAudios(opts: OpcoesSyncEspelho = {}): Promise<ResultadoSyncEspelho> {
+export async function sincronizarEspelhoAudios(
+  opts: OpcoesSyncEspelho = {},
+  deps: DepsSyncEspelho = {},
+): Promise<ResultadoSyncEspelho> {
   return paginarESincronizar<AudioEnvioRow>({
     listId: CLICKUP_LIST_AUDIOS,
     mapear: (task) => paraLinhaAudio(task),
-    upsert: upsertAudiosEnvios,
+    upsert: deps.upsertAudios ?? upsertAudiosEnvios,
+    listar: deps.listar,
     ...opts,
   });
 }
