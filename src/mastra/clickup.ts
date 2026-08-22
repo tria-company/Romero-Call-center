@@ -1013,6 +1013,26 @@ export async function comentarTask(taskId: string, texto: string): Promise<boole
 }
 
 /**
+ * Anota (comenta) na Ligação SEM mudar status/fechar/gravar custom fields —
+ * quick-260822-rr6 (R6/D-06): usada pelo caminho "atendeu" do retorno tel:
+ * pra persistir classificação/demanda/observação num comentário, já que
+ * `registrarDesfecho('atendida')` ignora observação e a anotação do LEAD é
+ * gestor-only. Espelha o padrão do PULAR (validarLigacaoDoOperador ANTES de
+ * comentar) — o `assigneeIdEsperado` NUNCA vem do body, sempre da sessão
+ * (CR-01/IDOR). Isolada de `registrarDesfecho`/`FONTE_LIGACOES` por design:
+ * não toca status/fechamento nem a ramificação de escrita da Fase B. LGPD:
+ * nunca logar taskId/texto/telefone.
+ */
+export async function anotarLigacao(
+  taskId: string,
+  assigneeIdEsperado: string,
+  texto: string,
+): Promise<boolean> {
+  await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  return comentarTask(taskId, texto);
+}
+
+/**
  * Grava a transcrição da ligação na Ligação (OPER-01, D-P3-04): custom field
  * TRANSCRICAO E como comentário na task — redundância intencional (o field é
  * filtrável/lido pela Análise, o comentário é pra leitura humana no ClickUp).

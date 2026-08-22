@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
-import { exigirRomero } from "@/lib/autorizacao";
+import { exigirSessao } from "@/lib/autorizacao";
 import { chamarDiscador } from "@/lib/discador-servidor";
 
 /**
  * Rota-ponte: o SCRIPT (roteiro de ligação) do lead, pela task da Ligação —
- * usado pelo MODO FAST (Áudios) no lugar do dossiê. Encaminha o GET ao
- * backend (`GET /api/discador/ligacao/:taskId`) tal qual. Gate romero-only.
+ * usado pelo MODO FAST (Áudios, Romero) E pelo card da fila do atendente
+ * (quick-260822-rr6, R7/D-07: "Roteiro" recolhível ANTES de ligar). Encaminha
+ * o GET ao backend (`GET /api/discador/ligacao/:taskId`) tal qual. Gate
+ * `exigirSessao` (alargado de romero-only): o backend valida ownership por
+ * operador (`assigneeDoOperador` + `validarLigacaoDoOperador`), então o
+ * atendente só lê a PRÓPRIA Ligação — Romero segue funcionando (sessão
+ * válida, sem mudança de comportamento).
  *
  * LGPD: nunca logar taskId/script/telefone.
  */
@@ -14,7 +19,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ taskId: string }> }) {
-  const gate = await exigirRomero();
+  const gate = await exigirSessao();
   if (!gate.ok) return gate.resposta;
 
   const { taskId } = await params;
