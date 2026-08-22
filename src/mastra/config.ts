@@ -486,6 +486,14 @@ export const FILA_NOME = process.env.FILA_NOME || 'processamento-ligacao';
 // não ser um erro de configuração, e sim um degrau de observabilidade opcional).
 export const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || '';
 
+// Teto de tentativas que, na prática, significa "re-tenta PARA SEMPRE" para um
+// erro TRANSITÓRIO (decisão travada do dono da operação, Fase 19.1 — "volta
+// pra fila até conseguir, nada se perde"). SUPERSEDE FILA_ATTEMPTS no
+// opcoesJob a partir do plano 19.1-04 (o parking do PERMANENTE é imediato via
+// UnrecoverableError no worker, não depende de esgotar tentativas). Mantemos
+// FILA_ATTEMPTS exportado acima só por compat de deploy (não removido).
+export const FILA_MAX_TENTATIVAS = Number(process.env.FILA_MAX_TENTATIVAS) || 1_000_000;
+
 // ===== Escala — rate limiter global do ClickUp (Fase 8, escala-150-atendentes) =====
 //
 // Parâmetros do token bucket (src/mastra/rate-limiter-clickup.ts) na frente de TODAS
@@ -635,3 +643,52 @@ export const PAINEL_TTL_CLICKUP_MS = Number(process.env.PAINEL_TTL_CLICKUP_MS) |
 // Lista 02 crescer: acima do teto o número vem marcado `parcial` e a UI rotula "N+"
 // em vez de mentir um total exato. 30 páginas = 3.000 ligações.
 export const PAINEL_MAX_PAGINAS = Number(process.env.PAINEL_MAX_PAGINAS) || 30;
+
+// ===== Fase 19.1 — durabilidade do pipeline (nada se perde até conseguir) =====
+//
+// Envs de resiliência do pipeline BullMQ ATUAL da main (retry-infinito para
+// TRANSITÓRIO, backoff capado, DLQ com re-drive automático + alerta de idade,
+// cópia própria da gravação, retenção durável de métricas — F1). Decisão
+// travada do dono da operação: "mesmo que o ClickUp dê problema ou que
+// qualquer outro dê problema, eu quero que volte para a fila até conseguir —
+// para que não se perca nada no processo." Centralizadas aqui de uma vez só
+// para os planos 02-07 (Wave 2+) consumirem com arquivos disjuntos
+// (paralelizáveis). Todas com default sensato -> sem console.warn (mesmo
+// espírito de FILA_*/RL_CLICKUP_*). Nenhum comportamento de runtime muda
+// neste plano — só as declarações.
+
+// Teto (1h) do backoff exponencial capado do retry-infinito (FILA_MAX_TENTATIVAS
+// acima). Curva alvo 5s -> 30s -> 2min -> 15min -> 1h (cap). Base segue
+// FILA_BACKOFF_MS (5s, já existente acima) — este é só o TETO.
+export const FILA_BACKOFF_CAP_MS = Number(process.env.FILA_BACKOFF_CAP_MS) || 3_600_000;
+
+// Período (ms) da varredura de re-drive automático da DLQ — DLQ deixa de ser
+// beco sem saída: os failed re-tentáveis voltam pra fila sozinhos.
+export const DLQ_REDRIVE_INTERVALO_MS = Number(process.env.DLQ_REDRIVE_INTERVALO_MS) || 300_000;
+
+// Máximo de jobs re-drivados por varredura (rate-spacing) — evita rajada.
+export const DLQ_REDRIVE_LOTE = Number(process.env.DLQ_REDRIVE_LOTE) || 20;
+
+// Atraso (ms) entre cada re-add da DLQ — serializa o re-drive para não
+// estourar o balde de 90/min do ClickUp (RL_CLICKUP_MAX acima), como
+// aconteceu no re-drive manual de 22/08 (rajada de 25 jobs -> fail-opens).
+export const DLQ_REDRIVE_ESPACO_MS = Number(process.env.DLQ_REDRIVE_ESPACO_MS) || 1500;
+
+// Idade (ms, 2h) de um job na DLQ que dispara alerta (`[ALERTA]`/
+// ALERT_WEBHOOK_URL acima) — mesmo molde do alerta de idade da cabeça do
+// dreno do outbox (homolog, Fase 19), aplicado agora à fila BullMQ da main.
+export const DLQ_AGE_ALERTA_MS = Number(process.env.DLQ_AGE_ALERTA_MS) || 7_200_000;
+
+// Bucket PRIVADO do Supabase Storage para a cópia própria da gravação (C4):
+// baixar UMA vez do storage.wavoip.com e persistir aqui — transcrição e TODOS
+// os retries leem da NOSSA cópia (mata a classe 411/degradação/expiração do
+// storage terceiro). Em `main` este bucket ainda NÃO existe — precisa ser
+// conferido/criado no Supabase self-hosted antes do plano que grava nele.
+// LGPD: gravação é dado pessoal — bucket privado, nunca URL pública em log.
+export const SUPABASE_STORAGE_BUCKET_GRAVACOES =
+  process.env.SUPABASE_STORAGE_BUCKET_GRAVACOES || 'gravacoes';
+
+// Retenção durável (90 dias) da série diária de métricas — amplia o DIA_TTL_MS
+// atual (48h, metricas.ts) SEM removê-lo, para investigação pós-incidente (F1:
+// contadores m:* hoje expiram na janela e somem antes de dar tempo de investigar).
+export const METRICAS_SERIE_TTL_MS = Number(process.env.METRICAS_SERIE_TTL_MS) || 90 * 24 * 60 * 60 * 1000;
