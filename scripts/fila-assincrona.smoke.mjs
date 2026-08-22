@@ -64,14 +64,19 @@ async function testeModoDegradacao() {
 }
 
 function testeRetryBackoff() {
+  // Fase 19.1 Plano 04 (DUR-01): retry-infinito (attempts grande) + backoff
+  // 'capado' (estratégia nomeada registrada no Worker, delega a
+  // calcularBackoffCapado) substituiu o antigo attempts=3/backoff
+  // 'exponential' — ver scripts/retry-durabilidade.smoke.mjs pra cobertura
+  // detalhada da curva/DLQ/parking.
   const opcoes = opcoesJob();
   checar(
     typeof opcoes.attempts === 'number' && opcoes.attempts >= 1,
-    `opcoesJob().attempts deveria ser >= 1 (retry configurado, FILA-03), recebido: ${opcoes.attempts}`,
+    `opcoesJob().attempts deveria ser >= 1 (retry configurado, DUR-01), recebido: ${opcoes.attempts}`,
   );
   checar(
-    opcoes.backoff?.type === 'exponential',
-    `opcoesJob().backoff.type deveria ser 'exponential', recebido: ${opcoes.backoff?.type}`,
+    opcoes.backoff?.type === 'capado',
+    `opcoesJob().backoff.type deveria ser 'capado' (Fase 19.1 Plano 04), recebido: ${opcoes.backoff?.type}`,
   );
 }
 
