@@ -1033,6 +1033,58 @@ export async function anotarLigacao(
 }
 
 /**
+ * Adiciona uma TAG na task (ClickUp `POST /task/:id/tag/:tag_name`) —
+ * usada por `marcarLeadSuperFa` (R9, quick-260822-rr6) pra marcar o lead como
+ * "super-fã": tag PERMANENTE na pessoa (Lista 01), filtrável em lotes
+ * futuros — diferente do marcador em comentário (histórico de UMA ligação).
+ * Thin wrapper, mesmo padrão de `comentarTask`. Token ausente e falha de
+ * infra/HTTP LANÇAM (WR-03) — nunca mascarados como sucesso.
+ */
+export async function taguearTask(taskId: string, tag: string): Promise<boolean> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para taguear a task');
+  }
+  let res: Response;
+  try {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${taskId}/tag/${encodeURIComponent(tag)}`, {
+      method: 'POST',
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[clickup] falha de rede ao taguear a task ${taskId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] POST /task/${taskId}/tag/${tag} falhou (${res.status})`);
+  }
+  return true;
+}
+
+/**
+ * Marca o LEAD ligado a uma Ligação como "super-fã" (R9/D-09, quick-260822-rr6)
+ * — tag `super-fa` na task do LEAD (Lista 01). Mesmo isolamento de
+ * `anotarLigacao`: valida ownership da Ligação ANTES de resolver/taguear
+ * (CR-01/IDOR) — o atendente só marca o lead da PRÓPRIA ligação.
+ * `{ temLead:false }` quando a Ligação não tem lead resolvido — NÃO lança (o
+ * caller grava só o marcador de comentário via `anotarLigacao`/
+ * `montarMarcadores`; a ausência de lead não pode falhar o fluxo de retorno).
+ * Erros de ownership/infra da PRÓPRIA Ligação continuam lançando (WR-03) — só
+ * a ausência de LEAD é um caso legítimo. Isolada de `registrarDesfecho`/
+ * `FONTE_LIGACOES`: não toca status/fechamento/ramificação de escrita.
+ */
+export async function marcarLeadSuperFa(
+  taskId: string,
+  assigneeIdEsperado: string,
+): Promise<{ temLead: boolean }> {
+  const task = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
+  const leadId = await resolverLeadPelaTask(task);
+  if (!leadId) return { temLead: false };
+  await taguearTask(leadId, 'super-fa');
+  return { temLead: true };
+}
+
+/**
  * Grava a transcrição da ligação na Ligação (OPER-01, D-P3-04): custom field
  * TRANSCRICAO E como comentário na task — redundância intencional (o field é
  * filtrável/lido pela Análise, o comentário é pra leitura humana no ClickUp).

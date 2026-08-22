@@ -76,6 +76,9 @@ import {
   // quick-260822-rr6 (R6/D-06): anotação aditiva na Ligação (caminho "atendeu"
   // do retorno tel:) — ISOLADA de registrarDesfecho/FONTE_LIGACOES.
   anotarLigacao,
+  // quick-260822-rr6 (R9): tag "super-fa" no LEAD ligado a uma Ligação — mesma
+  // isolação de anotarLigacao.
+  marcarLeadSuperFa,
   // Pular contato (2026-08-19): fecha a Ligação com motivo do Romero — mesmos
   // primitivos do desfecho (metadados + comentário + fechar), semântica própria.
   gravarMetadadosLigacao,
@@ -1246,6 +1249,42 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao registrar anotação' }, 502);
+          }
+        },
+      },
+      {
+        // SUPER-FÃ (quick-260822-rr6, R9): tag PERMANENTE "super-fa" no LEAD
+        // ligado a esta Ligação (Lista 01) — rota ADITIVA e ISOLADA, mesmo
+        // padrão de /anotacao. NUNCA muda status/fecha/grava custom field na
+        // Ligação; NÃO toca registrarDesfecho nem FONTE_LIGACOES. Sem lead
+        // resolvido -> 200 com aviso (não falha o fluxo — o marcador
+        // "[super-fa]" no comentário da Ligação segue via /anotacao,
+        // reusado pelo cliente independente desta rota).
+        path: '/api/discador/ligacao/:taskId/super-fa',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const taskId = c.req.param('taskId');
+          try {
+            const r = await marcarLeadSuperFa(taskId, assignee);
+            if (!r.temLead) {
+              return c.json({ status: 'ok', temLead: false, aviso: 'Ligação sem lead vinculado — nada marcado.' });
+            }
+            return c.json({ status: 'ok', temLead: true });
+          } catch (e) {
+            // LGPD: nunca logar taskId/telefone — só a mensagem genérica.
+            console.error('[discador] erro ao marcar super-fã:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao marcar super-fã' }, 502);
           }
         },
       },
