@@ -1406,6 +1406,68 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             </div>
           </div>
         )}
+
+        {/* PAINEL da biblioteca — renderizado DENTRO da conversa (correção
+            2026-08-23): abre SOBRE a conversa, não na lista. */}
+        {conteudosAberto && (
+          <div
+            className="au-libsheet-wrap"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Biblioteca de conteúdos"
+            onClick={() => setConteudosAberto(false)}
+          >
+            <div className="au-libsheet" onClick={(e) => e.stopPropagation()}>
+              <div className="au-libgrab" aria-hidden="true" />
+              <div className="au-libtop">
+                <div className="au-libtabs">
+                  <button type="button" className={"au-libtab" + (modoConteudos === "enviar" ? " on" : "")} onClick={() => setModoConteudos("enviar")}>
+                    Enviar
+                  </button>
+                  <button type="button" className={"au-libtab" + (modoConteudos === "gerenciar" ? " on" : "")} onClick={() => setModoConteudos("gerenciar")}>
+                    Gerenciar
+                  </button>
+                </div>
+                <button type="button" className="au-libx" onClick={() => setConteudosAberto(false)} aria-label="Fechar">
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="au-libbody">
+                {modoConteudos === "enviar" ? (
+                  <>
+                    <div className="au-libhint">
+                      Toque num conteúdo: texto e link entram no campo pra você revisar; imagem, vídeo e áudio vão direto.
+                    </div>
+                    {conteudosCarregando ? (
+                      <div className="au-libvazio">Carregando…</div>
+                    ) : conteudos.length === 0 ? (
+                      <div className="au-libvazio">
+                        Nada cadastrado ainda. Toque em <b>Gerenciar</b> pra adicionar.
+                      </div>
+                    ) : (
+                      conteudosPorCategoria.map(([cat, itens]) => (
+                        <div key={cat} className="au-libgrupo">
+                          <div className="au-libcat">{cat}</div>
+                          {itens.map((cnt) => (
+                            <button key={cnt.id} type="button" className="au-libitem" onClick={() => void escolherConteudo(cnt)}>
+                              <span className="au-libtag">{cnt.tipo}</span>
+                              <span className="au-libtxt">
+                                <span className="au-libnome">{cnt.titulo}</span>
+                                <span className="au-libsub">{cnt.tipo === "texto" ? (cnt.texto ?? "") : (cnt.url ?? "")}</span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ))
+                    )}
+                  </>
+                ) : (
+                  <BibliotecaConteudos onChange={() => void recarregarConteudos()} />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1637,77 +1699,6 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         </div>
       )}
 
-      {/* ── PAINEL da BIBLIOTECA (redesenho 2026-08-23): bottom-sheet DENTRO da
-            conversa, responsivo, com abas Enviar/Gerenciar — a gestão fica
-            embutida aqui, sem tela cheia separada. ── */}
-      {conteudosAberto && (
-        <div
-          className="au-libsheet-wrap"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Biblioteca de conteúdos"
-          onClick={() => setConteudosAberto(false)}
-        >
-          <div className="au-libsheet" onClick={(e) => e.stopPropagation()}>
-            <div className="au-libgrab" aria-hidden="true" />
-            <div className="au-libtop">
-              <div className="au-libtabs">
-                <button
-                  type="button"
-                  className={"au-libtab" + (modoConteudos === "enviar" ? " on" : "")}
-                  onClick={() => setModoConteudos("enviar")}
-                >
-                  Enviar
-                </button>
-                <button
-                  type="button"
-                  className={"au-libtab" + (modoConteudos === "gerenciar" ? " on" : "")}
-                  onClick={() => setModoConteudos("gerenciar")}
-                >
-                  Gerenciar
-                </button>
-              </div>
-              <button type="button" className="au-libx" onClick={() => setConteudosAberto(false)} aria-label="Fechar">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="au-libbody">
-              {modoConteudos === "enviar" ? (
-                <>
-                  <div className="au-libhint">
-                    Toque num conteúdo: texto e link entram no campo pra você revisar; imagem, vídeo e áudio vão direto.
-                  </div>
-                  {conteudosCarregando ? (
-                    <div className="au-libvazio">Carregando…</div>
-                  ) : conteudos.length === 0 ? (
-                    <div className="au-libvazio">
-                      Nada cadastrado ainda. Toque em <b>Gerenciar</b> pra adicionar.
-                    </div>
-                  ) : (
-                    conteudosPorCategoria.map(([cat, itens]) => (
-                      <div key={cat} className="au-libgrupo">
-                        <div className="au-libcat">{cat}</div>
-                        {itens.map((cnt) => (
-                          <button key={cnt.id} type="button" className="au-libitem" onClick={() => void escolherConteudo(cnt)}>
-                            <span className="au-libtag">{cnt.tipo}</span>
-                            <span className="au-libtxt">
-                              <span className="au-libnome">{cnt.titulo}</span>
-                              <span className="au-libsub">{cnt.tipo === "texto" ? (cnt.texto ?? "") : (cnt.url ?? "")}</span>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    ))
-                  )}
-                </>
-              ) : (
-                <BibliotecaConteudos onChange={() => void recarregarConteudos()} />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 
