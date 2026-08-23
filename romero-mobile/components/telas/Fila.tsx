@@ -303,7 +303,18 @@ export function Fila({
         observacao: obsTel,
         superFa: superFaTel,
       });
-    const okAnotacao = await registrarAnotacaoLigacao(alvoTel.taskId, textoAnotacao);
+    // Quick-260822-tdj: escrita dupla best-effort em anotacoes_ligacao — o
+    // gate de sucesso (okAnotacao) continua igual (só falha se o
+    // ClickUp/rota falhar; a linha Supabase é best-effort NO BACKEND).
+    const okAnotacao = await registrarAnotacaoLigacao(alvoTel.taskId, textoAnotacao, {
+      classificacao: classificacaoTel,
+      demanda: demandaTel || undefined,
+      observacao: obsTel || undefined,
+      canal: "telefone",
+      aposWhatsapp: alvoTel.origem === "apos-whatsapp",
+      resultado: "atendida",
+      superFa: superFaTel,
+    });
     const okVoto = okAnotacao && (await registrarVotoTel(alvoTel.taskId, { romero: votoRomero, andressa: votoAndressa }));
     const okDesfecho = okVoto && (await registrarDesfechoTel(alvoTel.taskId, "atendida"));
     setEnviandoTel(false);
@@ -325,6 +336,19 @@ export function Fila({
     setErroTel(false);
     // R9: tag no lead é best-effort — não bloqueia/gate o desfecho.
     if (superFaTel) await registrarSuperFa(alvoTel.taskId);
+    // Quick-260822-tdj: persiste os campos estruturados em anotacoes_ligacao,
+    // best-effort e SEM gate (não pode bloquear o `ok` do desfecho) — texto
+    // VAZIO porque o comentário ClickUp já sai pelo /desfecho abaixo (evita
+    // comentário duplicado).
+    void registrarAnotacaoLigacao(alvoTel.taskId, "", {
+      classificacao: classificacaoTel || undefined,
+      demanda: demandaTel || undefined,
+      observacao: obsTel || undefined,
+      canal: "telefone",
+      aposWhatsapp: alvoTel.origem === "apos-whatsapp",
+      resultado: "nao_atendida",
+      superFa: superFaTel,
+    });
     const ok = await registrarDesfechoTel(alvoTel.taskId, "nao_atendida", {
       categoria: categoriaTel,
       classificacao: classificacaoTel || undefined,
