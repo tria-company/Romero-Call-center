@@ -97,12 +97,23 @@ export function Fila({
     };
   }, []);
 
+  // UX-LENTIDAO (quick-260822-rht): `ligar()` já era navegação instantânea e
+  // não-bloqueante — o "congelamento" percebido é do DESTINO (boot do PWA
+  // `/discador` + fetch `GET /api/discador/ligacao/:taskId` no backend/
+  // ClickUp), fora deste app e fora de mudança de contrato de backend. A
+  // alavanca em escopo é feedback otimista: `abrindoDiscador` liga um overlay
+  // full-screen NO MESMO GESTO do toque, antes de atribuir `location.href`
+  // (sem `await` no meio — invalidaria o gesto, mesmo cuidado do token acima).
+  const [abrindoDiscador, setAbrindoDiscador] = React.useState<{ nome: string } | null>(null);
+
   // Chamado no gesto do toque. MESMO ENDERECO (u7): navega na MESMA aba pro
   // discador (mesma origem) — sem abrir aba nova órfã. A fila já tem a Ligação
   // (item.taskId), então passa &task pro discador abrir a chamada exata (auto-
   // loga por #token). Ao VOLTAR, o discador devolve o gestor pra ESTA fila (/fila).
   function ligar(item: ItemFilaReal) {
+    if (abrindoDiscador) return; // guarda contra re-toques durante a transição
     vibrar();
+    setAbrindoDiscador({ nome: item.nome });
     window.location.href = urlCallCenter(tokenCC, item.taskId);
   }
 
@@ -716,6 +727,17 @@ export function Fila({
         {secaoLigar}
         {modalPular}
         {retornoTel}
+        {abrindoDiscador && (
+          <div className="fp-abrindo" role="status" aria-live="polite">
+            <div className="fp-abrindo-card">
+              <span className="fp-spin" />
+              <div className="fp-abrindo-txt">
+                <b>Abrindo o discador…</b>
+                {abrindoDiscador.nome && <span>{abrindoDiscador.nome}</span>}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -896,7 +918,7 @@ const FP_CSS = `
 .fp-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:fpSpin .7s linear infinite; }
 .fp-spin--dim{ border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--dim); }
 @keyframes fpSpin{ to{ transform:rotate(360deg); } }
-@media (prefers-reduced-motion:reduce){ .fp-spin,.fp-pcard{ animation:none!important; } }
+@media (prefers-reduced-motion:reduce){ .fp-spin,.fp-pcard,.fp-abrindo-card{ animation:none!important; } }
 
 /* Alvo de toque mínimo ≥48px (R2/D-02) — modificador aplicado junto de
    classes já existentes (.seg/.fp-telchoice/.fp-telsegbtn/.fp-pgo) sem mexer
@@ -908,6 +930,16 @@ const FP_CSS = `
 .fp-atualizando{ display:flex; align-items:center; gap:6px; margin-top:8px; font-size:11.5px; font-weight:700; color:var(--dim); }
 
 .fp-teleravi{ font-size:11px; color:var(--alert); font-weight:700; margin-top:6px; }
+
+/* UX-LENTIDAO (quick-260822-rht): overlay otimista "Abrindo o discador…" —
+   mesmo molde de z-index/backdrop dos modais acima, sem botão de fechar (a
+   navegação para /discador substitui a página; existe só pro intervalo de
+   transição). Reusa .fp-spin (já coberto por prefers-reduced-motion). */
+.fp-abrindo{ position:fixed; inset:0; z-index:320; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:0 16px; }
+.fp-abrindo-card{ width:min(360px, 100%); background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:22px; display:flex; align-items:center; gap:14px; animation:fpUp .18s ease both; }
+.fp-abrindo-txt{ display:flex; flex-direction:column; gap:2px; font-size:14px; color:var(--ink); }
+.fp-abrindo-txt b{ font-weight:800; }
+.fp-abrindo-txt span{ font-size:12.5px; color:var(--dim); }
 
 /* Card vertical (R2/R7, rr6): avatar+nome no topo, seções recolhíveis no
    meio, ações grandes embaixo — substitui o layout horizontal antigo
