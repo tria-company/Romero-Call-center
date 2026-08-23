@@ -103,7 +103,10 @@ import { regenerarDossieDoLead } from './gerar-dossie.ts';
 // Correlação do lead a partir da Ligação (LEITURA-05, 19-05) sob a flag —
 // substitui resolverLeadDaLigacao (ClickUp) quando FONTE_LIGACOES='supabase'
 // dentro de consolidarEFecharLigacao (19-08).
-import { marcarEventoWebhook, resolverLeadDaLigacaoSupabase } from './supabase.ts';
+// inserirTranscricaoLigacao (quick-260822-ubk): linha estruturada de
+// transcrição/análise-IA — RETRY-BACKED (não best-effort), chamada FORA de
+// try/catch em processarRecordJob (ver comentário no call site).
+import { marcarEventoWebhook, resolverLeadDaLigacaoSupabase, inserirTranscricaoLigacao } from './supabase.ts';
 
 import {
   lerTaskAtiva,
@@ -769,6 +772,41 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     transcricao,
     // CR-02: leva o verdict de baixa aderência/sinais ao SoT/espelho sob supabase.
     revisaoAnalise,
+  });
+
+  // DEVIATION APROVADA PELO USUÁRIO (quick-260822-ubk, 2026-08-22): grava a
+  // linha estruturada da transcrição/análise-IA em transcricoes_ligacao.
+  // NÃO é best-effort — "o clickup pode até dar erro mas no banco não".
+  // Roda AQUI (APÓS a consolidação ClickUp bem-sucedida acima, ANTES da marca
+  // durável de processado — marcarEventoWebhook logo abaixo e
+  // marcarRecordProcessado no fim) e FORA de try/catch: falha do Supabase
+  // LANÇA (mesmo espírito retentável dos outros passos deste job) e o
+  // worker/BullMQ retenta o JOB INTEIRO até gravar. Crash-safe por design:
+  // dedup CR-02 (recordJaProcessado só pula depois de marcarRecordProcessado)
+  // + upsert on_conflict=call_id (inserirTranscricaoLigacao) garantem que o
+  // retry nunca duplica nem refaz efeito no banco. Exceção no-op: sem env do
+  // Supabase (dev local) a função não lança — log 1x, nunca vira loop de retry.
+  let leadTaskIdTranscricao: string | null = null;
+  try {
+    // Best-effort SÓ para este metadado auxiliar — nunca bloqueia a escrita
+    // da linha principal por causa da correlação lead<->ligação.
+    leadTaskIdTranscricao = await resolverLeadDaLigacao(taskId);
+  } catch (e) {
+    console.error('[processador] falha ao resolver lead da ligacao (transcricoes_ligacao):', e);
+    leadTaskIdTranscricao = null;
+  }
+  await inserirTranscricaoLigacao({
+    call_id: callId,
+    ligacao_task_id: taskId,
+    lead_task_id: leadTaskIdTranscricao,
+    // Nota de topologia (ver plano): homolog não tem cópia canônica
+    // (guardarGravacao só existe na main, Fase 19.1) — storage_path fica
+    // null aqui; a main popula no cherry-pick.
+    storage_path: null,
+    url_gravacao_wavoip: recordUrl,
+    transcricao,
+    analise_ia: resultadoAnalise ?? null,
+    duracao_seg: derivarDuracao(payload),
   });
 
   // Reconciliação (2026-08-20, "se ligou, sai da lista"): a chamada desta

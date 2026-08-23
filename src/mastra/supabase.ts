@@ -31,6 +31,7 @@ import {
   SUPABASE_TABLE_LIGACOES,
   SUPABASE_TABLE_AUDIOS_ENVIOS,
   SUPABASE_TABLE_ANOTACOES_LIGACAO,
+  SUPABASE_TABLE_TRANSCRICOES_LIGACAO,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -1723,5 +1724,73 @@ export async function marcarSuperFaEspelho(leadTaskId: string): Promise<void> {
   }
   if (!res.ok && res.status !== 404) {
     throw new Error(`[supabase] HTTP ${res.status} ao marcar super-fa em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+}
+
+// ===== Linha estruturada de transcrição/análise-IA (quick-260822-ubk) =====
+//
+// DEVIATION APROVADA PELO USUÁRIO (2026-08-22): esta escrita NÃO é best-effort
+// (diferente de inserirAnotacaoLigacao acima) — é RETRY-BACKED. "O clickup
+// pode até dar erro mas no banco não". O caller (processarRecordJob) chama
+// esta função FORA de try/catch, DEPOIS da consolidação ClickUp e ANTES da
+// marca durável de processado (marcarRecordProcessado) — em falha de
+// rede/HTTP, LANÇA (mesmo contrato de erro do módulo, WR-03) e o job INTEIRO
+// é retentado pelo worker/BullMQ. Crash-safe por design: `call_id` UNIQUE +
+// upsert `on_conflict=call_id` garante que o retry nunca duplica nem refaz
+// efeito no banco (idempotência de escrita), então "retentar até gravar"
+// nunca produz uma segunda linha. Chaveada por `call_id` (id da chamada
+// Wavoip) — SEM FK para `ligacoes` (sql/escala/21). NUNCA logar
+// transcrição/telefone/CPF (LGPD).
+
+export interface TranscricaoLigacaoRow {
+  call_id: string;
+  ligacao_task_id?: string | null;
+  lead_task_id?: string | null;
+  storage_path?: string | null;
+  url_gravacao_wavoip?: string | null;
+  transcricao?: string | null;
+  /** Coluna jsonb — objeto ResultadoAnalise (ou equivalente) serializado. */
+  analise_ia?: unknown;
+  duracao_seg?: number | null;
+}
+
+// Log 1x (não a cada chamada) quando o env do Supabase está ausente — evita
+// que dev local (sem SUPABASE_URL/SUPABASE_SERVICE_KEY) vire ruído de log a
+// cada RECORD processado, sem esconder de todo o modo no-op.
+let avisouTranscricaoSemEnv = false;
+
+/** Insere/atualiza (upsert por `call_id`) UMA linha estruturada da ligação
+ *  transcrita. No-op (com log 1x) sem Supabase configurado — nunca vira loop
+ *  de retry em dev local. Erro de rede/HTTP LANÇA — o caller (processador)
+ *  NÃO faz try/catch: o worker/BullMQ retenta o job inteiro até gravar. */
+export async function inserirTranscricaoLigacao(row: TranscricaoLigacaoRow): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    if (!avisouTranscricaoSemEnv) {
+      console.warn(
+        '[supabase] SUPABASE_URL/SUPABASE_SERVICE_KEY ausentes — inserirTranscricaoLigacao no-op (dev local); este aviso não repete.',
+      );
+      avisouTranscricaoSemEnv = true;
+    }
+    return;
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_TRANSCRICOES_LIGACAO}?on_conflict=call_id`,
+      {
+        method: 'POST',
+        headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify([row]),
+      },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao inserir transcricao da ligacao: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `[supabase] HTTP ${res.status} ao inserir transcricao em ${SUPABASE_TABLE_TRANSCRICOES_LIGACAO}`,
+    );
   }
 }
