@@ -17,7 +17,7 @@ import {
 import { iniciais } from "@/lib/leads-util";
 import type { ItemFilaReal, VotoReal } from "@/lib/discador-servidor";
 import { pularLigacao, useFilaReal } from "@/lib/fila-real";
-import { copiarTelefone, fmtTelefone, linkTelefone, urlCallCenter, vibrar } from "@/lib/contato";
+import { copiarTelefone, fmtTelefone, linkTelefone, telefoneParaCopia, urlCallCenter, vibrar } from "@/lib/contato";
 import {
   carregarContextoLead,
   carregarLigacaoDetalhe,
@@ -202,6 +202,10 @@ export function Fila({
   const [erroTel, setErroTel] = React.useState(false);
   const [copiadoId, setCopiadoId] = React.useState<string | null>(null);
   const [avisoTelId, setAvisoTelId] = React.useState<string | null>(null);
+  // UX-DDD (quick-260822-rht): quando o cadastro do lead não tem DDD
+  // derivável, `copiar()` não falha em silêncio — sinaliza este id pro card
+  // mostrar um aviso curto em vez de copiar string vazia/formatada.
+  const [copiaSemDddId, setCopiaSemDddId] = React.useState<string | null>(null);
 
   // Abre a tela de retorno tel: pra uma Ligação — reseta TODO o formulário
   // (compartilhado pelo card, "Ligar pelo telefone", E a chegada por telapos).
@@ -266,7 +270,16 @@ export function Fila({
 
   async function copiar(item: ItemFilaReal) {
     const ok = await copiarTelefone(item.telefone);
-    if (!ok) return;
+    if (!ok) {
+      // UX-DDD: distingue "sem DDD" (cadastro incompleto) de "clipboard
+      // indisponível" — só o primeiro caso tem aviso dedicado; ambos não
+      // copiam nada (nunca string vazia/formatada).
+      if (telefoneParaCopia(item.telefone) == null) {
+        setCopiaSemDddId(item.taskId);
+        window.setTimeout(() => setCopiaSemDddId((atual) => (atual === item.taskId ? null : atual)), 2500);
+      }
+      return;
+    }
     setCopiadoId(item.taskId);
     window.setTimeout(() => setCopiadoId((atual) => (atual === item.taskId ? null : atual)), 1500);
   }
@@ -684,6 +697,7 @@ export function Fila({
           onCopiar={copiar}
           copiado={copiadoId === itens[0].taskId}
           avisoTelInvalido={avisoTelId === itens[0].taskId}
+          avisoCopiaSemDdd={copiaSemDddId === itens[0].taskId}
           scriptTexto={scriptTexto}
           scriptCarregando={scriptCarregando}
           dossieTexto={dossieTexto}
@@ -765,6 +779,7 @@ function CardFila({
   onCopiar,
   copiado,
   avisoTelInvalido,
+  avisoCopiaSemDdd,
   scriptTexto,
   scriptCarregando,
   dossieTexto,
@@ -778,6 +793,7 @@ function CardFila({
   onCopiar: (item: ItemFilaReal) => void;
   copiado: boolean;
   avisoTelInvalido: boolean;
+  avisoCopiaSemDdd: boolean;
   scriptTexto: string | null;
   scriptCarregando: boolean;
   dossieTexto: string | null;
@@ -849,6 +865,9 @@ function CardFila({
             <SkipForward size={16} /> Pular
           </button>
         </div>
+        {avisoCopiaSemDdd && (
+          <div className="fp-teleravi">Número sem DDD — confira o cadastro do lead.</div>
+        )}
       </div>
     </div>
   );
