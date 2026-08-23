@@ -211,6 +211,19 @@ export const CLICKUP_ESCRITA_HABILITADA = process.env.CLICKUP_ESCRITA_HABILITADA
 // sem quebrar o contrato do caller.
 export const FONTE_LIGACOES = process.env.FONTE_LIGACOES || 'clickup';
 
+// ===== Fase 20 (Fase C) — flags por-agregado dos demais espelhos =====
+//
+// Mesmo racional/molde de FONTE_LIGACOES acima (string, não boolean — deixa
+// espaço a modos futuros). Cada `FONTE_*` gateia a escrita+leitura JUNTAS
+// daquele agregado (R10 — nunca uma sem a outra). NUNCA reusar
+// FONTE_LIGACOES: o roadmap exige que áudios/leads/notas invertam e rolem de
+// volta INDEPENDENTES um do outro — um flip/rollback de um agregado não pode
+// arrastar os outros. Default 'clickup' = comportamento ATUAL em todos os
+// três. O flip acontece só no homolog na verificação final (20-08).
+export const FONTE_AUDIOS = process.env.FONTE_AUDIOS || 'clickup';
+export const FONTE_LEADS = process.env.FONTE_LEADS || 'clickup';
+export const FONTE_NOTAS = process.env.FONTE_NOTAS || 'clickup';
+
 // Workspace (team) cujos MEMBROS aparecem no painel de admin (dropdown do
 // vínculo clickup_member_id). Default = Gabinete 509 (9014971829, a mesma das
 // listas). O token enxerga várias workspaces; sem esse filtro o painel mistura
@@ -510,6 +523,22 @@ export const SUPABASE_RPC_CRIAR_LIGACAO_AVULSA =
 export const SUPABASE_RPC_REGISTRAR_VOTO = process.env.SUPABASE_RPC_REGISTRAR_VOTO || 'registrar_voto';
 export const SUPABASE_RPC_CONSOLIDAR_E_FECHAR =
   process.env.SUPABASE_RPC_CONSOLIDAR_E_FECHAR || 'consolidar_e_fechar_ligacao';
+
+// ===== Fase 20 (Fase C) — nomes das RPCs novas do Caminho B =====
+//
+// Mesmo padrão de isolamento das SUPABASE_RPC_* acima: default SEM prefixo
+// (produção); homolog sobrescreve pra 'hml_<nome>' via deploy/homolog.env —
+// sem isso, chamar do homolog escreveria nas RPCs (logo, nas tabelas) de
+// PRODUÇÃO (lição do 17-02). Corpo de cada RPC criado/aplicado nos planos que
+// estendem os agregados audios/leads/notas (20-02+); aqui só se declara o
+// NOME. Defaults sensatos -> sem console.warn.
+export const SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO =
+  process.env.SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO || 'registrar_envio_audio';
+export const SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO =
+  process.env.SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO || 'registrar_mensagem_texto';
+export const SUPABASE_RPC_REGISTRAR_ANOTACAO =
+  process.env.SUPABASE_RPC_REGISTRAR_ANOTACAO || 'registrar_anotacao';
+export const SUPABASE_RPC_GERAR_LOTE = process.env.SUPABASE_RPC_GERAR_LOTE || 'gerar_lote';
 
 // ===== Fase 19 (Fase B) — teto/threshold do worker de dreno do outbox =====
 //
