@@ -1072,16 +1072,19 @@ export async function taguearTask(taskId: string, tag: string): Promise<boolean>
  * Erros de ownership/infra da PRÓPRIA Ligação continuam lançando (WR-03) — só
  * a ausência de LEAD é um caso legítimo. Isolada de `registrarDesfecho`/
  * `FONTE_LIGACOES`: não toca status/fechamento/ramificação de escrita.
+ * `leadTaskId` (quick-260822-tdj) devolve o id resolvido pro caller espelhar
+ * `super_fa` no Supabase (marcarSuperFaEspelho) sem re-resolver — presente só
+ * quando `temLead`.
  */
 export async function marcarLeadSuperFa(
   taskId: string,
   assigneeIdEsperado: string,
-): Promise<{ temLead: boolean }> {
+): Promise<{ temLead: boolean; leadTaskId?: string }> {
   const task = await validarLigacaoDoOperador(taskId, assigneeIdEsperado);
   const leadId = await resolverLeadPelaTask(task);
   if (!leadId) return { temLead: false };
   await taguearTask(leadId, 'super-fa');
-  return { temLead: true };
+  return { temLead: true, leadTaskId: leadId };
 }
 
 /**
