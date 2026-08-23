@@ -40,6 +40,11 @@ import {
   FONTE_NOTAS,
   SUPABASE_RPC_REGISTRAR_ANOTACAO,
   SUPABASE_TABLE_LEADS_ESPELHO,
+  // Quick 260823-h1s: flag do agregado 'leads' (default 'clickup') pro
+  // caminho de CRIAÇÃO de lead nativo — POST /api/discador/lead. Débito
+  // pré-flip (dreno) documentado em sql/escala/27_rpc_criar_lead.sql;
+  // nenhum flip acontece nesta quick task.
+  FONTE_LEADS,
 } from './config';
 // Helper transacional único do Caminho B (Portão 1, Fase 18/19): toda
 // mutação de `ligacoes` sob FONTE_LIGACOES='supabase' vira UMA chamada
@@ -763,6 +768,29 @@ async function posCommitAnotacao(notaId: number): Promise<void> {
   }
 }
 
+// ============ Quick 260823-h1s — helper análogo pro agregado 'lead' (criação) ============
+//
+// posCommitCriarLead: MESMO padrão CHECADO de posCommitAnotacao/
+// posCommitEnvioAudio acima — kick do dreno do outbox da linha
+// aggregate='lead'/op='criar_task' logo após o commit local (criar_lead já
+// gravou discador_leads_espelho + a linha do outbox na MESMA tx). Sem
+// invalidação de cache de fila (leads não usa filaMem/cache-fila). NUNCA
+// fire-and-forget: sem Redis o dreno roda INLINE aqui (T-19-07-Av). A
+// criação EFETIVA da task na Lista 01 a partir desta linha de outbox depende
+// do débito pré-flip do dreno (ver rodapé de sql/escala/27_rpc_criar_lead.sql)
+// — o kick só garante que o dreno TENTA processar a linha assim que existir.
+async function posCommitCriarLead(leadId: number): Promise<void> {
+  const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: leadId });
+  if (!enfileirado) {
+    await processarDrenoOutboxJob(leadId).catch((e) => {
+      console.error(
+        '[dreno] inline criar-lead pós-commit falhou (best-effort — a linha do outbox já foi persistida, drena depois):',
+        e instanceof Error ? e.message : String(e),
+      );
+    });
+  }
+}
+
 /**
  * Reconhece um erro de NEGÓCIO lançado por `comOutboxRpc` (RAISE da RPC —
  * ligação inexistente / não pertence ao operador, sempre um 4xx do
@@ -894,6 +922,10 @@ import {
   listarNotasDoLeadSupabase,
   type NotaLeadSupabase,
   listarTabela,
+  // Quick 260823-h1s: criação de lead nativo (Fase C, Caminho B) — thin
+  // wrapper sobre comOutboxRpc(SUPABASE_RPC_CRIAR_LEAD); INSERT no espelho +
+  // outbox 'lead'/'criar_task' na mesma tx (sql/escala/27_rpc_criar_lead.sql).
+  criarLeadSupabase,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -2378,6 +2410,71 @@ export const mastra = new Mastra({
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao salvar a anotação' }, 502);
+          }
+        },
+      },
+      {
+        // Rota — criação de LEAD NATIVO (quick 260823-h1s, Fase C): sob
+        // FONTE_LEADS='supabase', cria o lead direto no Supabase (criar_lead
+        // RPC, Caminho B) + enfileira a criação da task na Lista 01 no
+        // outbox (débito pré-flip do dreno documentado em
+        // sql/escala/27_rpc_criar_lead.sql). Sob FONTE_LEADS='clickup'
+        // (default), não há caminho equivalente no ClickUp — 501.
+        path: '/api/discador/lead',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const nome = String(body.nome || '').trim();
+          const telefone = String(body.telefone || '').trim();
+          if (!nome || !telefone) return c.json({ erro: 'nome e telefone obrigatórios' }, 400);
+
+          if (FONTE_LEADS === 'supabase') {
+            const canonico = canonizarTelefone(telefone);
+            if (!canonico) return c.json({ erro: 'telefone inválido' }, 422);
+            try {
+              // Campos opcionais lidos defensivamente — NUNCA confia no shape do body.
+              const cpf = body.cpf !== undefined && body.cpf !== null ? String(body.cpf) : undefined;
+              const bairro = body.bairro !== undefined && body.bairro !== null ? String(body.bairro) : undefined;
+              const cidade = body.cidade !== undefined && body.cidade !== null ? String(body.cidade) : undefined;
+              const dossie = body.dossie !== undefined && body.dossie !== null ? String(body.dossie) : undefined;
+              const origem = body.origem !== undefined && body.origem !== null ? String(body.origem) : undefined;
+              const idSupabase =
+                body.idSupabase !== undefined && body.idSupabase !== null ? String(body.idSupabase) : undefined;
+              const tags = Array.isArray(body.tags) ? body.tags.map((t) => String(t)) : undefined;
+              const militante = typeof body.militante === 'boolean' ? body.militante : undefined;
+              const superFa = typeof body.superFa === 'boolean' ? body.superFa : undefined;
+              const elegivel = typeof body.elegivel === 'boolean' ? body.elegivel : undefined;
+              const score = typeof body.score === 'number' ? body.score : undefined;
+
+              const r = await criarLeadSupabase({
+                nome,
+                telefone,
+                cpf,
+                bairro,
+                cidade,
+                dossie,
+                tags,
+                militante,
+                superFa,
+                elegivel,
+                score,
+                idSupabase,
+                origem,
+              });
+              await posCommitCriarLead(r.lead_id);
+              return c.json({ status: 'ok', lead_id: r.lead_id, id_supabase: r.id_supabase });
+            } catch (e) {
+              // Log genérico, NUNCA PII (LGPD) — nunca cita nome/telefone/cpf.
+              console.error('[discador] erro ao criar o lead:', e instanceof Error ? e.message : String(e));
+              return c.json({ erro: 'Erro ao criar o lead' }, 502);
+            }
+          } else {
+            // FONTE_LEADS === 'clickup' (default) — não há caminho equivalente
+            // de criação nativa de lead no ClickUp neste código.
+            return c.json({ erro: 'Criação nativa de lead disponível apenas sob FONTE_LEADS=supabase' }, 501);
           }
         },
       },
