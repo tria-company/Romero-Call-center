@@ -33,6 +33,13 @@ import {
   FONTE_AUDIOS,
   SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO,
   SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO,
+  // Fase C (Phase 20, 20-07): flag do agregado 'notas' (default 'clickup',
+  // flip só no 20-08) + nome da RPC de anotação + tabela do espelho de leads
+  // (resolução best-effort de lead_id numérico p/ registrar_anotacao — notas
+  // não tem trigger de auto-resolução como ligacoes/audios_envios, 22_fundacao).
+  FONTE_NOTAS,
+  SUPABASE_RPC_REGISTRAR_ANOTACAO,
+  SUPABASE_TABLE_LEADS_ESPELHO,
 } from './config';
 // Helper transacional único do Caminho B (Portão 1, Fase 18/19): toda
 // mutação de `ligacoes` sob FONTE_LIGACOES='supabase' vira UMA chamada
@@ -737,6 +744,25 @@ async function posCommitEnvioAudio(audioId: number): Promise<void> {
   }
 }
 
+// ============ Fase C (Phase 20, 20-07) — helper análogo pro agregado 'nota' ============
+//
+// posCommitAnotacao: MESMO padrão CHECADO de posCommitLigacao/posCommitEnvioAudio
+// — kick do dreno do outbox da linha 'comentar' (não-bloqueante, R6) logo após
+// o commit local (registrar_anotacao já gravou `notas` + a linha do outbox na
+// MESMA tx). Sem invalidação de cache de fila (notas não usa filaMem/cache-fila).
+// NUNCA fire-and-forget: sem Redis o dreno roda INLINE aqui (T-19-07-Av).
+async function posCommitAnotacao(notaId: number): Promise<void> {
+  const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: notaId });
+  if (!enfileirado) {
+    await processarDrenoOutboxJob(notaId).catch((e) => {
+      console.error(
+        '[dreno] inline anotacao pós-commit falhou (best-effort — a linha do outbox já foi persistida, drena depois):',
+        e instanceof Error ? e.message : String(e),
+      );
+    });
+  }
+}
+
 /**
  * Reconhece um erro de NEGÓCIO lançado por `comOutboxRpc` (RAISE da RPC —
  * ligação inexistente / não pertence ao operador, sempre um 4xx do
@@ -861,6 +887,13 @@ import {
   buscarLeadsNuncaLigadosSupabase,
   mapaConversaPorLeadSupabase,
   listarEnviosAudioDoLeadSupabase,
+  // Fase C (Phase 20, 20-04/20-07): comentários (`notas`, aggregate='lead')
+  // do detalhe do lead atrás de FONTE_NOTAS + leitura genérica de tabela
+  // (listarTabela) reusada pra resolver o lead_id numérico best-effort na
+  // escrita (registrar_anotacao não tem trigger de auto-resolução).
+  listarNotasDoLeadSupabase,
+  type NotaLeadSupabase,
+  listarTabela,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -2269,17 +2302,58 @@ export const mastra = new Mastra({
           const texto = String(body.texto || '').trim();
           if (!texto) return c.json({ erro: 'texto obrigatório' }, 400);
           try {
-            // Guard anti-IDOR de escrita ANTES de comentar (comentarTask escreve
-            // por taskId cru, sem validar a lista).
+            // Guard anti-IDOR de escrita ANTES de comentar (comOutboxRpc/
+            // comentarTask escrevem por taskId cru, sem validar a lista).
             await validarLeadDaLista01(leadTaskId);
-            await comentarTask(leadTaskId, texto);
+            if (FONTE_NOTAS === 'supabase') {
+              // Fase C (20-07): registrar_anotacao grava `notas`
+              // (aggregate='lead') + enfileira 'comentar' (não-bloqueante) no
+              // outbox NA MESMA tx — nunca mais um comentarTask síncrono
+              // direto. p_lead_id é resolvido BEST-EFFORT via o espelho
+              // (id numérico materializado no 20-01/22_fundacao_fase_c.sql):
+              // `notas` NÃO tem trigger de auto-resolução (diferente de
+              // ligacoes/audios_envios, que têm lead_clickup_task_id) — sem
+              // resolver aqui, a leitura (listarNotasDoLeadSupabase, filtro
+              // aggregate_id=eq.<leadId>) NUNCA encontraria a nota. Falha na
+              // resolução (rede/config) não aborta a escrita — grava com
+              // aggregate_id=null (débito: nota fica órfã de leitura, caso raro).
+              let leadId: number | null = null;
+              try {
+                const rows = await listarTabela(SUPABASE_TABLE_LEADS_ESPELHO, {
+                  select: 'id',
+                  filtros: { clickup_task_id: `eq.${leadTaskId}` },
+                  limit: 1,
+                });
+                const idRaw = (rows[0] as { id?: number } | undefined)?.id;
+                leadId = idRaw !== undefined && idRaw !== null ? Number(idRaw) : null;
+              } catch (e) {
+                console.warn(
+                  '[discador] resolução do lead_id p/ registrar_anotacao falhou — grava com aggregate_id=null:',
+                  e instanceof Error ? e.message : String(e),
+                );
+              }
+              const r = await comOutboxRpc<{ nota_id: number; outbox_inseridos: number }>(
+                SUPABASE_RPC_REGISTRAR_ANOTACAO,
+                {
+                  p_aggregate: 'lead',
+                  p_lead_id: leadId,
+                  p_clickup_task_id: leadTaskId,
+                  p_autor: sess.usuario,
+                  p_corpo: texto,
+                },
+              );
+              await posCommitAnotacao(r.nota_id);
+            } else {
+              await comentarTask(leadTaskId, texto);
+            }
             // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
             derrubarLeadDetalheMem(leadTaskId);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao anotar no lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
-            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            const naoEncontrado =
+              msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01') || ehErroRpcNaoAutorizado(e);
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao salvar a anotação' }, 502);
