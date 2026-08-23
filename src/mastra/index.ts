@@ -910,6 +910,10 @@ import {
   // do espelho) sob FONTE_LIGACOES=supabase — espelho de clickup.ts::
   // lerContextoLead, resolve o lead pela Ligação local (id numérico).
   lerContextoLeadSupabase,
+  // Quick 260823: ficha+dossiê do lead a partir do espelho Supabase, servindo
+  // /api/discador/lead/:id?leve=1 (tela de conversa/áudio) sob FONTE_LEADS=
+  // supabase — sem isto a tela lê a description da task ClickUp (dossiê antigo).
+  lerLeadDetalheSupabase,
   // Quick 260822-tdj: escrita dupla best-effort dos campos estruturados do
   // retorno de ligação (rotas /anotacao e /super-fa) — inserirAnotacaoLigacao
   // grava em anotacoes_ligacao, marcarSuperFaEspelho seta
@@ -2258,9 +2262,17 @@ export const mastra = new Mastra({
             // sozinha (T-20-07-Deg): erro vira comentários vazios, NUNCA
             // derruba o detalhe. LGPD: corpo da nota nunca logado.
             const [rDetalhe, rNotas] = await Promise.allSettled([
-              FONTE_LIGACOES === 'supabase' || c.req.query('leve') === '1'
-                ? lerLeadDossieResiliente(leadTaskId)
-                : lerLeadDetalheResiliente(leadTaskId),
+              // Fase C (Quick 260823): sob FONTE_LEADS='supabase' a ficha+dossiê
+              // vêm do espelho Supabase (coluna `dossie`, formato IDENTIFICAÇÃO/
+              // HISTÓRICO/GANCHO), NÃO da description da task ClickUp — leads
+              // criados direto no banco nem têm task, e o dossiê autoritativo
+              // agora é o do Supabase. Fora do supabase: caminho resiliente
+              // ClickUp intacto (leve pula a timeline).
+              FONTE_LEADS === 'supabase'
+                ? lerLeadDetalheSupabase(leadTaskId)
+                : FONTE_LIGACOES === 'supabase' || c.req.query('leve') === '1'
+                  ? lerLeadDossieResiliente(leadTaskId)
+                  : lerLeadDetalheResiliente(leadTaskId),
               FONTE_NOTAS === 'supabase' ? listarNotasDoLeadSupabase(leadTaskId) : Promise.resolve(null),
             ]);
             if (rDetalhe.status === 'rejected') throw rDetalhe.reason;

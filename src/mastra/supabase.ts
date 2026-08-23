@@ -1034,6 +1034,82 @@ export async function lerContextoLeadSupabase(
   return { temLead: true, contexto: dossie ?? '' };
 }
 
+/**
+ * Detalhe do lead (ficha + dossiê) a partir do espelho Supabase — espelho de
+ * `clickup.ts::lerLeadDetalhe`, mas lendo `SUPABASE_TABLE_LEADS_ESPELHO` por
+ * `clickup_task_id` em vez da task da Lista 01 (cujo `description` era a fonte
+ * ANTIGA do dossiê). É o que a tela de conversa/áudio consome via
+ * `/api/discador/lead/:id?leve=1` sob FONTE_LEADS='supabase' — sem isso a tela
+ * cairia no ClickUp e mostraria o dossiê antigo (ou 502 para leads criados
+ * direto no banco). Mesmo contrato `{ lead, dossie, timeline }`; `timeline` é
+ * `[]` nesta fase (variante LEVE não usa timeline; `ligacoes.lead_id` numérico
+ * é débito conhecido). Shape ESTRUTURAL (supabase.ts nunca importa clickup.ts).
+ * Erros de infra/validação LANÇAM (WR-03) — o caller (index.ts) mapeia 404/502.
+ */
+export interface LeadDetalheEspelho {
+  leadTaskId: string;
+  nome: string;
+  telefone: string;
+  cpf: string;
+  bairro: string;
+  cidade: string;
+  uf: string;
+  confirmouRomero: string | null;
+  confirmouAndressa: string | null;
+  militante: boolean;
+  observacao: string;
+  ultimoContato: string;
+  proximoContato: string;
+}
+export async function lerLeadDetalheSupabase(
+  leadTaskId: string,
+): Promise<{ lead: LeadDetalheEspelho; dossie: string; timeline: never[] }> {
+  checarConfig();
+  const params = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select:
+      'clickup_task_id,nome,telefone,cpf,bairro,cidade,confirmou_romero,confirmou_andressa,militante,observacao_consolidada,ultimo_contato,proximo_contato,dossie',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler o detalhe do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler o detalhe do lead em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<Record<string, unknown>>;
+  const row = Array.isArray(data) ? data[0] : undefined;
+  if (!row) {
+    // MESMA string de validação de clickup.ts (mapeada a 404 no caller) — lead
+    // inexistente nunca vira 502.
+    throw new Error(`[supabase] lead ${leadTaskId} nao encontrada no espelho`);
+  }
+  const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
+  const lead: LeadDetalheEspelho = {
+    leadTaskId: str(row.clickup_task_id),
+    nome: str(row.nome),
+    telefone: str(row.telefone),
+    cpf: str(row.cpf),
+    bairro: str(row.bairro),
+    cidade: str(row.cidade),
+    uf: '',
+    confirmouRomero: row.confirmou_romero === null || row.confirmou_romero === undefined ? null : str(row.confirmou_romero),
+    confirmouAndressa: row.confirmou_andressa === null || row.confirmou_andressa === undefined ? null : str(row.confirmou_andressa),
+    militante: row.militante === true,
+    observacao: str(row.observacao_consolidada),
+    ultimoContato: formatarDataLigacaoSupabase(typeof row.ultimo_contato === 'string' ? row.ultimo_contato : null),
+    proximoContato: formatarDataLigacaoSupabase(typeof row.proximo_contato === 'string' ? row.proximo_contato : null),
+  };
+  return { lead, dossie: str(row.dossie), timeline: [] };
+}
+
 /** Formata `inicio` (timestamptz ISO) em "DD/MM/AAAA HH:MM" Brasília — mesmo
  *  resultado visual de clickup.ts::formatarDataLigacao (fonte diferente: ISO
  *  aqui, epoch-ms lá). Entrada vazia/inválida devolve '' (nunca lança). */
