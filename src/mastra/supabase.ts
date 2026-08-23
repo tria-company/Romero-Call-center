@@ -32,6 +32,7 @@ import {
   SUPABASE_TABLE_AUDIOS_ENVIOS,
   SUPABASE_TABLE_ANOTACOES_LIGACAO,
   SUPABASE_TABLE_TRANSCRICOES_LIGACAO,
+  SUPABASE_TABLE_NOTAS,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -1442,6 +1443,178 @@ export async function listarEnviosAudioDoLeadSupabase(leadTaskId: string): Promi
     texto: r.tipo === 'texto' ? (r.corpo ?? null) : null,
     audioUrl: r.midia_ref ?? null,
     transcricao: r.transcricao_audio ?? null,
+  }));
+}
+
+/** Lead elegível para o lote — shape que o runner (20-06) precisa para
+ *  montar o script e chamar `gerar_lote`. */
+export interface LeadLoteElegivelSupabase {
+  id: number;
+  clickupTaskId: string;
+  telefone: string;
+  nome: string;
+  score: number;
+  tentativas: number;
+  proximoContato: string | null;
+}
+
+/**
+ * Seleção do lote elegível por SQL (LEITURA-06, design §5(1)) — PREVIEW/
+ * paridade de teste: a RPC `gerar_lote` (`sql/escala/26_rpc_gerar_lote.sql`,
+ * 20-03) JÁ faz a seleção + o INSERT de `ligacoes` atomicamente server-side
+ * (both-or-neither) — ESTA função NÃO decide quem entra no lote real; serve
+ * o preview/contagem do runner (20-06) e a paridade de teste com
+ * `lote.ts::selecionarLoteElegivel`, reproduzindo a MESMA ordem
+ * (`retorno_necessario DESC, score DESC, tentativas ASC`, `ix_leads_lote`) e
+ * o MESMO filtro (`elegivel=true`, sem Ligação ABERTA — anti-join por
+ * `lead_id`, mesmo padrão de `buscarLeadsNuncaLigadosSupabase`). Uma corrida
+ * entre este preview e `gerar_lote` é aceitável (preview não commita nada).
+ * Erro de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function selecionarLoteElegiveisSupabase(tamanho: number): Promise<LeadLoteElegivelSupabase[]> {
+  checarConfig();
+  const paramsLig = new URLSearchParams({
+    select: 'lead_id',
+    status: 'eq.aberta',
+    lead_id: 'not.is.null',
+  });
+  let resLig: Response;
+  try {
+    resLig = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${paramsLig.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler ligacoes abertas para a selecao do lote: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLig.ok) {
+    throw new Error(`[supabase] HTTP ${resLig.status} ao ler ligacoes abertas para a selecao do lote`);
+  }
+  const dataLig = (await resLig.json()) as Array<{ lead_id?: number | null }>;
+  const idsComLigacaoAberta = [
+    ...new Set(
+      (Array.isArray(dataLig) ? dataLig : [])
+        .map((r) => r.lead_id)
+        .filter((v): v is number => v !== null && v !== undefined),
+    ),
+  ];
+
+  const params = new URLSearchParams({
+    select: 'id,clickup_task_id,telefone,nome,score,tentativas,proximo_contato',
+    elegivel: 'eq.true',
+    order: 'retorno_necessario.desc,score.desc,tentativas.asc',
+    limit: String(tamanho),
+  });
+  if (idsComLigacaoAberta.length > 0) {
+    params.set('id', `not.in.(${idsComLigacaoAberta.join(',')})`);
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao selecionar o lote elegivel: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao selecionar o lote elegivel em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<{
+    id?: number;
+    clickup_task_id?: string;
+    telefone?: string;
+    nome?: string;
+    score?: number;
+    tentativas?: number;
+    proximo_contato?: string | null;
+  }>;
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    id: Number(r.id ?? 0),
+    clickupTaskId: String(r.clickup_task_id ?? ''),
+    telefone: String(r.telefone ?? ''),
+    nome: String(r.nome ?? ''),
+    score: Number(r.score ?? 0),
+    tentativas: Number(r.tentativas ?? 0),
+    proximoContato: r.proximo_contato ?? null,
+  }));
+}
+
+/** Uma nota (comentário) de `notas` (`aggregate='lead'`). */
+export interface NotaLeadSupabase {
+  id: number;
+  autor: string | null;
+  corpo: string;
+  criadoEm: string;
+}
+
+/**
+ * Notas (comentários) de um lead para o detalhe/timeline (LEITURA-04, design
+ * §2.6/§4) — resolve o lead (`discador_leads_espelho` por `clickup_task_id`)
+ * e lê `notas WHERE aggregate='lead' AND aggregate_id=$1 ORDER BY
+ * criado_em` (`ix_notas_aggregate`, `sql/escala/23_indices_fase_c.sql`). Sem
+ * lead resolvido -> `[]` (resultado legítimo). NUNCA loga o `corpo`/telefone
+ * (LGPD). Erro de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function listarNotasDoLeadSupabase(leadTaskId: string): Promise<NotaLeadSupabase[]> {
+  checarConfig();
+  if (!leadTaskId) {
+    throw new Error('[supabase] listarNotasDoLeadSupabase chamado sem leadTaskId');
+  }
+  const paramsLead = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select: 'id',
+    limit: '1',
+  });
+  let resLead: Response;
+  try {
+    resLead = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${paramsLead.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o lead das notas: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLead.ok) {
+    throw new Error(`[supabase] HTTP ${resLead.status} ao resolver o lead das notas`);
+  }
+  const dataLead = (await resLead.json()) as Array<{ id?: number }>;
+  const leadId = dataLead?.[0]?.id;
+  if (leadId === undefined || leadId === null) return [];
+
+  const params = new URLSearchParams({
+    aggregate: 'eq.lead',
+    aggregate_id: `eq.${leadId}`,
+    select: 'id,autor,corpo,criado_em',
+    order: 'criado_em.asc',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_NOTAS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar as notas do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao listar as notas em ${SUPABASE_TABLE_NOTAS}`);
+  }
+  const data = (await res.json()) as Array<{
+    id?: number;
+    autor?: string | null;
+    corpo?: string | null;
+    criado_em?: string;
+  }>;
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    id: Number(r.id ?? 0),
+    autor: r.autor ?? null,
+    corpo: String(r.corpo ?? ''),
+    criadoEm: r.criado_em ?? '',
   }));
 }
 
