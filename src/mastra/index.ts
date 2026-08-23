@@ -2198,16 +2198,37 @@ export const mastra = new Mastra({
             // para vazia sob supabase — a ficha/dossiê seguem completos e o
             // contrato { lead, dossie, timeline } é preservado. Caminho
             // 'clickup' (lerLeadDetalheResiliente/lerLeadDossieResiliente) intacto.
-            const detalhe =
+            // Fase C (20-07): sob FONTE_NOTAS='supabase' os comentários do
+            // lead (`notas`, aggregate='lead') são servidos ADITIVAMENTE
+            // aqui — o caminho ClickUp NUNCA teve uma leitura de comentários
+            // (lerLeadDetalhe só lê a description como dossiê; comentarTask é
+            // write-only), então o campo `notas` só existe sob supabase
+            // (contrato preservado: nunca remove/troca um campo existente).
+            // Em paralelo com o detalhe (Promise.allSettled, mesmo padrão de
+            // /campanha e /painel-numeros) — a leitura de notas degrada
+            // sozinha (T-20-07-Deg): erro vira comentários vazios, NUNCA
+            // derruba o detalhe. LGPD: corpo da nota nunca logado.
+            const [rDetalhe, rNotas] = await Promise.allSettled([
               FONTE_LIGACOES === 'supabase' || c.req.query('leve') === '1'
-                ? await lerLeadDossieResiliente(leadTaskId)
-                : await lerLeadDetalheResiliente(leadTaskId);
+                ? lerLeadDossieResiliente(leadTaskId)
+                : lerLeadDetalheResiliente(leadTaskId),
+              FONTE_NOTAS === 'supabase' ? listarNotasDoLeadSupabase(leadTaskId) : Promise.resolve(null),
+            ]);
+            if (rDetalhe.status === 'rejected') throw rDetalhe.reason;
+            const detalhe = rDetalhe.value;
+            if (rNotas.status === 'rejected') {
+              console.warn(
+                '[discador] leitura das notas do lead falhou — comentários vazios (detalhe segue servido):',
+                rNotas.reason instanceof Error ? rNotas.reason.message : String(rNotas.reason),
+              );
+            }
+            const notas: NotaLeadSupabase[] | null = rNotas.status === 'fulfilled' ? rNotas.value : [];
             // conhecimento pra ordenação da fila + geração sob demanda:
             // abriu ficha sem dossiê → gera em background (single-flight).
             const temDossie = (detalhe.dossie ?? '').trim() !== '';
             temDossiePorLead.set(leadTaskId, temDossie);
             if (!temDossie) gerarDossieSobDemanda(leadTaskId);
-            return c.json(detalhe);
+            return c.json(FONTE_NOTAS === 'supabase' ? { ...detalhe, notas: notas ?? [] } : detalhe);
           } catch (e) {
             console.error('[discador] erro ao ler detalhe do lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
