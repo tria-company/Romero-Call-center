@@ -184,6 +184,10 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   // aba ativa do painel: "enviar" (escolher pra mandar) ou "gerenciar" (CRUD),
   // tudo DENTRO do mesmo painel deslizante — sem tela cheia separada.
   const [modoConteudos, setModoConteudos] = React.useState<"enviar" | "gerenciar">("enviar");
+  // preview de mídia ANTES de enviar (pedido do gestor): o operador vê a imagem/
+  // vídeo/áudio e confirma; só então manda.
+  const [previewConteudo, setPreviewConteudo] = React.useState<ConteudoReal | null>(null);
+  const [enviandoConteudo, setEnviandoConteudo] = React.useState(false);
 
   async function recarregarConteudos() {
     setConteudosCarregando(true);
@@ -200,23 +204,30 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   }
 
   /* Escolher um conteúdo:
-     - TEXTO/LINK → INSERE no campo (o operador revisa e toca enviar; reusa o
-       fluxo de texto existente). Anexa ao que já estiver digitado.
-     - IMAGEM/VÍDEO/ÁUDIO → envio NATIVO one-tap (não dá pra "inserir" mídia no
-       campo de texto): manda direto via /conteudos/:id/enviar e recarrega a
-       conversa. */
-  async function escolherConteudo(cnt: ConteudoReal) {
+     - TEXTO/LINK → INSERE no campo (o operador revisa e toca enviar).
+     - IMAGEM/VÍDEO/ÁUDIO → abre PREVIEW (o operador vê a mídia e confirma); só
+       então envia via /conteudos/:id/enviar. */
+  function escolherConteudo(cnt: ConteudoReal) {
     if (cnt.tipo === "imagem" || cnt.tipo === "video" || cnt.tipo === "audio") {
-      setConteudosAberto(false);
-      if (!leadAberto) return;
-      const alvo = leadAberto.leadTaskId;
-      const ok = await enviarConteudoParaLead(cnt.id, alvo);
-      if (ok) window.setTimeout(() => void atualizarConversa(alvo, true), 1200);
+      setPreviewConteudo(cnt);
       return;
     }
     const trecho = cnt.tipo === "link" ? (cnt.url ?? "") : (cnt.texto ?? "");
     if (trecho) setTextoDigitado((t) => (t.trim() ? t + "\n" : "") + trecho);
     setConteudosAberto(false);
+  }
+
+  /* Confirma o envio da mídia pré-visualizada (imagem/vídeo/áudio). */
+  async function confirmarEnvioConteudo() {
+    if (!previewConteudo || !leadAberto || enviandoConteudo) return;
+    const alvo = leadAberto.leadTaskId;
+    const id = previewConteudo.id;
+    setEnviandoConteudo(true);
+    const ok = await enviarConteudoParaLead(id, alvo);
+    setEnviandoConteudo(false);
+    setPreviewConteudo(null);
+    setConteudosAberto(false);
+    if (ok) window.setTimeout(() => void atualizarConversa(alvo, true), 1200);
   }
 
   // agrupa por categoria pra render (categoria vazia vira "Geral").
@@ -1468,6 +1479,51 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             </div>
           </div>
         )}
+
+        {/* PREVIEW da mídia ANTES de enviar (imagem/vídeo/áudio): o operador vê
+            e confirma; só então manda. */}
+        {previewConteudo && (
+          <div
+            className="au-libsheet-wrap"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Pré-visualizar conteúdo"
+            onClick={() => {
+              if (!enviandoConteudo) setPreviewConteudo(null);
+            }}
+          >
+            <div className="au-libsheet au-libprev" onClick={(e) => e.stopPropagation()}>
+              <div className="au-libgrab" aria-hidden="true" />
+              <div className="au-libtop">
+                <div className="au-libprevtit">Enviar este conteúdo?</div>
+                <button type="button" className="au-libx" onClick={() => setPreviewConteudo(null)} disabled={enviandoConteudo} aria-label="Fechar">
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="au-libprevbody">
+                {previewConteudo.tipo === "imagem" ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img className="au-libprevmedia" src={previewConteudo.url ?? ""} alt={previewConteudo.titulo} />
+                ) : previewConteudo.tipo === "video" ? (
+                  // eslint-disable-next-line jsx-a11y/media-has-caption
+                  <video className="au-libprevmedia" src={previewConteudo.url ?? ""} controls />
+                ) : (
+                  // eslint-disable-next-line jsx-a11y/media-has-caption
+                  <audio className="au-libprevaudio" src={previewConteudo.url ?? ""} controls />
+                )}
+                <div className="au-libprevnome">{previewConteudo.titulo}</div>
+              </div>
+              <div className="au-libprevacts">
+                <button type="button" className="seg" onClick={() => setPreviewConteudo(null)} disabled={enviandoConteudo}>
+                  Cancelar
+                </button>
+                <button type="button" className="au-libprevgo" onClick={() => void confirmarEnvioConteudo()} disabled={enviandoConteudo}>
+                  {enviandoConteudo ? "Enviando…" : "Enviar"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1804,6 +1860,16 @@ const AU_CSS = `
 .au-libtxt{ display:flex; flex-direction:column; gap:2px; min-width:0; }
 .au-libnome{ font-size:14.5px; font-weight:700; color:var(--ink); }
 .au-libsub{ font-size:12px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+/* preview da mídia antes de enviar */
+.au-libprev{ max-height:92vh; }
+.au-libprevtit{ font-size:15px; font-weight:800; color:var(--ink); }
+.au-libprevbody{ flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; display:flex; flex-direction:column; align-items:center; gap:12px; padding:8px 0; }
+.au-libprevmedia{ max-width:100%; max-height:58vh; border-radius:14px; object-fit:contain; background:var(--bg-0); }
+.au-libprevaudio{ width:100%; margin:24px 0; }
+.au-libprevnome{ font-size:14px; font-weight:700; color:var(--ink); text-align:center; }
+.au-libprevacts{ flex:none; display:flex; gap:10px; justify-content:flex-end; padding-top:12px; }
+.au-libprevgo{ display:inline-flex; align-items:center; justify-content:center; border:none; border-radius:12px; padding:12px 24px; background:var(--go); color:#062015; font-weight:800; font-size:15px; cursor:pointer; min-height:48px; -webkit-tap-highlight-color:transparent; }
+.au-libprevgo:disabled{ opacity:.6; cursor:default; }
 .au-pgo:disabled{ opacity:.55; cursor:default; }
 .au-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--go); animation:auSpin .7s linear infinite; }
 .au-spin.lg{ width:20px; height:20px; border-color:rgba(6,32,21,.35); border-top-color:#062015; }

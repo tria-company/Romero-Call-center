@@ -3421,7 +3421,14 @@ export const mastra = new Mastra({
             const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
             return naoEncontrado ? c.json({ erro: 'Lead não encontrado' }, 404) : c.json({ erro: 'Erro ao carregar o lead' }, 502);
           }
-          const textoParaChat = conteudo.tipo === 'texto' ? (conteudo.texto ?? '') : (conteudo.url ?? '');
+          // o que aparece na conversa: texto → o texto; link → a URL; mídia →
+          // "📎 título" (não a URL crua).
+          const textoParaChat =
+            conteudo.tipo === 'texto'
+              ? (conteudo.texto ?? '')
+              : conteudo.tipo === 'link'
+                ? (conteudo.url ?? '')
+                : `📎 ${conteudo.titulo}`;
           try {
             if (conteudo.tipo === 'texto') {
               if (!conteudo.texto) return c.json({ erro: 'Conteúdo de texto vazio' }, 422);
@@ -3432,7 +3439,27 @@ export const mastra = new Mastra({
             } else {
               if (!conteudo.url) return c.json({ erro: 'Conteúdo de mídia sem URL' }, 422);
               const mediatype = conteudo.tipo === 'imagem' ? 'image' : conteudo.tipo === 'video' ? 'video' : 'audio';
-              await enviarMidia(telefoneE164, { mediatype, media: conteudo.url, caption: conteudo.titulo || undefined });
+              // Baixa a mídia e envia como BASE64 — garante que a Evolution mande
+              // como IMAGEM/mídia, e NÃO como preview de link da URL (bug relatado).
+              // mimetype/fileName derivados da extensão da URL.
+              const urlLimpa = conteudo.url.split('?')[0];
+              const ext = (urlLimpa.split('.').pop() || '').toLowerCase();
+              const MIME: Record<string, string> = {
+                png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+                mp4: 'video/mp4', mov: 'video/quicktime', ogg: 'audio/ogg', mp3: 'audio/mpeg', m4a: 'audio/mp4',
+              };
+              const mimetype = MIME[ext];
+              const fileName = urlLimpa.split('/').pop() || `conteudo-${id}.${ext || 'bin'}`;
+              let mediaB64: string;
+              try {
+                const rMedia = await fetch(conteudo.url);
+                if (!rMedia.ok) throw new Error(`download HTTP ${rMedia.status}`);
+                mediaB64 = Buffer.from(await rMedia.arrayBuffer()).toString('base64');
+              } catch (e) {
+                console.error('[discador] falha ao baixar mídia do conteudo:', e instanceof Error ? e.message : String(e));
+                return c.json({ erro: 'Não deu para baixar a mídia do conteúdo' }, 502);
+              }
+              await enviarMidia(telefoneE164, { mediatype, media: mediaB64, mimetype, fileName, caption: conteudo.titulo || undefined });
             }
           } catch (e) {
             console.error('[discador] falha ao enviar conteudo via Evolution:', e instanceof Error ? e.message : String(e));
@@ -3446,7 +3473,7 @@ export const mastra = new Mastra({
             de_nos: true,
             ts: new Date().toISOString(),
             tipo: 'texto',
-            texto: conteudo.tipo === 'texto' ? textoParaChat : `${conteudo.titulo}${textoParaChat ? ` — ${textoParaChat}` : ''}`,
+            texto: textoParaChat,
           }).catch((e) => console.warn('[discador] persistência do conteudo falhou:', e instanceof Error ? e.message : String(e)));
           return c.json({ status: 'ok' });
         },
