@@ -154,9 +154,88 @@ async function testarHistoricoFiltraLeadIdEOrdena() {
   }
 }
 
+// ===== (d) seleção do lote elegível filtra elegivel + order + limit =====
+
+async function testarLoteSelecionaElegivelOrdemELimit() {
+  const { selecionarLoteElegiveisSupabase } = await import('../src/mastra/supabase.ts');
+  const fetchReal = global.fetch;
+  let urlLote = '';
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const metodo = (opts.method || 'GET').toUpperCase();
+    if (u.includes('api.clickup.com')) fetchInesperado(u, metodo);
+    if (u.includes('/rest/v1/ligacoes')) {
+      return ok([]); // nenhuma ligacao aberta no cenario sintetico
+    }
+    if (u.includes('/rest/v1/discador_leads_espelho')) {
+      urlLote = u;
+      return ok([
+        {
+          id: 9,
+          clickup_task_id: 'T9',
+          telefone: '+5511988887777',
+          nome: 'Ciclana',
+          score: 10,
+          tentativas: 0,
+          proximo_contato: '2026-08-20',
+        },
+      ]);
+    }
+    fetchInesperado(u, metodo);
+  };
+  try {
+    const lote = await selecionarLoteElegiveisSupabase(5);
+    const dLote = dec(urlLote);
+    checar(dLote.includes('elegivel=eq.true'), `a selecao do lote deveria filtrar elegivel=eq.true — recebido: ${dLote}`);
+    checar(
+      dLote.includes('order=retorno_necessario.desc,score.desc,tentativas.asc'),
+      `a selecao do lote deveria ordenar retorno_necessario desc, score desc, tentativas asc — recebido: ${dLote}`,
+    );
+    checar(dLote.includes('limit=5'), `a selecao do lote deveria limitar pelo tamanho pedido — recebido: ${dLote}`);
+    checar(lote.length === 1 && lote[0].clickupTaskId === 'T9', 'a leitura deveria devolver o lead elegivel mapeado');
+  } finally {
+    global.fetch = fetchReal;
+  }
+}
+
+// ===== (e) notas filtram aggregate=eq.lead =====
+
+async function testarNotasFiltramAggregateLead() {
+  const { listarNotasDoLeadSupabase } = await import('../src/mastra/supabase.ts');
+  const fetchReal = global.fetch;
+  let urlNotas = '';
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const metodo = (opts.method || 'GET').toUpperCase();
+    if (u.includes('api.clickup.com')) fetchInesperado(u, metodo);
+    if (u.includes('/rest/v1/discador_leads_espelho')) {
+      return ok([{ id: 11 }]);
+    }
+    if (u.includes('/rest/v1/notas')) {
+      urlNotas = u;
+      return ok([{ id: 1, autor: 'romero', corpo: 'nota sintetica', criado_em: '2026-08-22T10:00:00Z' }]);
+    }
+    fetchInesperado(u, metodo);
+  };
+  try {
+    const notas = await listarNotasDoLeadSupabase('T11');
+    const dNotas = dec(urlNotas);
+    checar(dNotas.includes('aggregate=eq.lead'), `as notas deveriam filtrar aggregate=eq.lead — recebido: ${dNotas}`);
+    checar(
+      dNotas.includes('aggregate_id=eq.11'),
+      `as notas deveriam filtrar aggregate_id=eq.<id resolvido> — recebido: ${dNotas}`,
+    );
+    checar(notas.length === 1 && notas[0].corpo === 'nota sintetica', 'a leitura deveria devolver a nota mapeada');
+  } finally {
+    global.fetch = fetchReal;
+  }
+}
+
 testarNuncaLigadosAntiJoinPorLeadId()
   .then(testarMapaConversaLeAudiosEnvios)
   .then(testarHistoricoFiltraLeadIdEOrdena)
+  .then(testarLoteSelecionaElegivelOrdemELimit)
+  .then(testarNotasFiltramAggregateLead)
   .then(() => {
     if (falhas.length > 0) {
       console.error('=== SMOKE FAIL ===');
