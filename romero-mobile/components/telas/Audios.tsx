@@ -451,7 +451,15 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
      dois botões de microfone (modo fast e conversa). */
   function alternarGravacao() {
     if (estadoGravacao === "gravando") pararGravacao();
-    else if (estadoGravacao === "vazio") {
+    else if (estadoGravacao === "vazio" || estadoGravacao === "preview") {
+      // "preview" entra aqui quando o áudio já foi enviado a ESTE lead
+      // (Audios.tsx:1215 esconde o ramo "regravar" nesse caso e mostra o
+      // microfone) — sem este ramo o toque virava no-op e o microfone
+      // ficava morto para o mesmo lead. iniciarGravacao() sobrescreve
+      // audioBase64/audioUrl quando a gravação termina, então o novo áudio
+      // não bate mais com audioEnviadoPorLead[lead] e a barra reabre o
+      // envio — o áudio ANTIGO continua ofertável aos PRÓXIMOS leads (D-03),
+      // pois a marca é por lead.
       porToqueRef.current = true;
       iniciarGravacao();
     }
