@@ -38,14 +38,23 @@ create table if not exists hml_anotacoes_ligacao (like anotacoes_ligacao includi
 -- ============================================================================
 create table if not exists hml_transcricoes_ligacao (like transcricoes_ligacao including all);
 
+-- ============================================================================
+-- Fase 2 (roadmap) — biblioteca de conteúdos recorrentes (escala/27).
+-- REQUER que sql/escala/27_conteudos.sql já tenha sido aplicado em PROD (o LIKE
+-- abaixo exige `conteudos` já existir): aplicar a migração 27 ANTES de re-aplicar
+-- este arquivo.
+-- ============================================================================
+create table if not exists hml_conteudos (like conteudos including all);
+
 -- Débito de LIKE ser snapshot único: hml_discador_leads_espelho pode ter sido
 -- criada ANTES do ALTER aditivo de sql/escala/20 — repetir aqui, explicitamente,
 -- o MESMO ADD COLUMN IF NOT EXISTS (idempotente).
 alter table hml_discador_leads_espelho add column if not exists super_fa boolean not null default false;
 
 -- Escrita via PostgREST é feita como `service_role` (o backend). NUNCA conceder
--- a anon/authenticated: estas tabelas contêm telefone/CPF (mesma disciplina de
--- LGPD do espelho de produção).
+-- a anon/authenticated: a maioria destas tabelas contém telefone/CPF (mesma
+-- disciplina de LGPD do espelho de produção); hml_conteudos não tem dado pessoal,
+-- mas segue o mesmo grant restrito por consistência.
 grant all on table
   hml_discador_leads_espelho,
   hml_votos_ligacao,
@@ -53,5 +62,6 @@ grant all on table
   hml_webhook_eventos,
   hml_discador_usuarios,
   hml_anotacoes_ligacao,
-  hml_transcricoes_ligacao
+  hml_transcricoes_ligacao,
+  hml_conteudos
   to service_role;

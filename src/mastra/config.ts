@@ -456,6 +456,15 @@ export const SUPABASE_TABLE_ANOTACOES_LIGACAO =
 // console.warn.
 export const SUPABASE_TABLE_TRANSCRICOES_LIGACAO =
   process.env.SUPABASE_TABLE_TRANSCRICOES_LIGACAO || 'transcricoes_ligacao';
+
+// ===== Fase 2 (roadmap) — biblioteca de conteúdos recorrentes (sql/escala/27) =====
+//
+// Tabela nova para os conteúdos/links prontos que o Romero envia na conversa (o
+// Felipe deixa pronto a pedido do Romero). Mesmo padrão de isolamento das
+// SUPABASE_TABLE_* acima: default SEM prefixo (produção); homolog sobrescreve para
+// 'hml_conteudos' via deploy/homolog.env. Default sensato -> sem console.warn.
+export const SUPABASE_TABLE_CONTEUDOS =
+  process.env.SUPABASE_TABLE_CONTEUDOS || 'conteudos';
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook

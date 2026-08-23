@@ -700,6 +700,12 @@ import {
   // rotas abaixo faz try/catch e loga-e-segue (nunca quebra o fluxo ClickUp).
   inserirAnotacaoLigacao,
   marcarSuperFaEspelho,
+  // Fase 2 (roadmap): biblioteca de conteúdos recorrentes (mensagens/links prontos).
+  listarConteudos,
+  criarConteudo,
+  atualizarConteudo,
+  excluirConteudo,
+  type ConteudoInput,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -2229,6 +2235,108 @@ export const mastra = new Mastra({
           }
         },
       },
+
+      // ============ API CONTEÚDOS (biblioteca de mensagens/links prontos) ============
+      // Fase 2 do roadmap. Mesmo gate romero-only das rotas de áudio (sessaoRomero).
+      // MVP: tipo in {texto,link} (imagem/vídeo/áudio ficam para fase posterior).
+      // Degrada gracioso quando o Supabase não está configurado (listar -> []).
+      {
+        path: '/api/discador/conteudos',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const categoria = c.req.query('categoria') || undefined;
+            const conteudos = await listarConteudos({ categoria });
+            return c.json({ conteudos });
+          } catch (e) {
+            console.error('[discador] erro ao listar conteudos:', e instanceof Error ? e.message : String(e));
+            // selo neutro: a UI de conversa nunca deve quebrar por causa da biblioteca.
+            return c.json({ conteudos: [] });
+          }
+        },
+      },
+      {
+        path: '/api/discador/conteudos',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const titulo = String(body.titulo || '').trim();
+          const tipo = body.tipo === 'link' ? 'link' : body.tipo === 'texto' ? 'texto' : '';
+          const texto = body.texto != null ? String(body.texto) : '';
+          const url = body.url != null ? String(body.url) : '';
+          if (!titulo) return c.json({ erro: 'titulo obrigatório' }, 400);
+          if (tipo !== 'texto' && tipo !== 'link') return c.json({ erro: "tipo deve ser 'texto' ou 'link'" }, 400);
+          if (tipo === 'link' && !url.trim()) return c.json({ erro: 'url obrigatória para tipo link' }, 400);
+          if (tipo === 'texto' && !texto.trim()) return c.json({ erro: 'texto obrigatório para tipo texto' }, 400);
+          try {
+            const conteudo = await criarConteudo({
+              categoria: body.categoria != null ? String(body.categoria) : null,
+              titulo,
+              tipo,
+              texto: texto || null,
+              url: url || null,
+              ordem: body.ordem != null ? Number(body.ordem) : 0,
+            });
+            if (!conteudo) return c.json({ erro: 'Biblioteca indisponível (Supabase não configurado)' }, 503);
+            return c.json({ conteudo });
+          } catch (e) {
+            console.error('[discador] erro ao criar conteudo:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao criar o conteúdo' }, 502);
+          }
+        },
+      },
+      {
+        path: '/api/discador/conteudos/:id',
+        method: 'PATCH',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          if (body.tipo !== undefined && body.tipo !== 'texto' && body.tipo !== 'link') {
+            return c.json({ erro: "tipo deve ser 'texto' ou 'link'" }, 400);
+          }
+          // aplica só os campos presentes no body (edição parcial).
+          const patch: Partial<ConteudoInput> = {};
+          if (body.categoria !== undefined) patch.categoria = body.categoria != null ? String(body.categoria) : null;
+          if (body.titulo !== undefined) patch.titulo = String(body.titulo);
+          if (body.tipo !== undefined) patch.tipo = body.tipo === 'link' ? 'link' : 'texto';
+          if (body.texto !== undefined) patch.texto = body.texto != null ? String(body.texto) : null;
+          if (body.url !== undefined) patch.url = body.url != null ? String(body.url) : null;
+          if (body.ordem !== undefined) patch.ordem = Number(body.ordem);
+          if (body.ativo !== undefined) patch.ativo = Boolean(body.ativo);
+          try {
+            const conteudo = await atualizarConteudo(id, patch);
+            if (!conteudo) return c.json({ erro: 'Conteúdo não encontrado' }, 404);
+            return c.json({ conteudo });
+          } catch (e) {
+            console.error('[discador] erro ao atualizar conteudo:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao atualizar o conteúdo' }, 502);
+          }
+        },
+      },
+      {
+        path: '/api/discador/conteudos/:id',
+        method: 'DELETE',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          try {
+            const ok = await excluirConteudo(id); // soft-delete (ativo=false)
+            if (!ok) return c.json({ erro: 'Biblioteca indisponível (Supabase não configurado)' }, 503);
+            return c.json({ ok: true });
+          } catch (e) {
+            console.error('[discador] erro ao excluir conteudo:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao excluir o conteúdo' }, 502);
+          }
+        },
+      },
+
       {
         // Estado real da instância dedicada Evolution — fonte do banner de
         // conexão (D-08): o banner NUNCA finge conectado. Uma falha na
