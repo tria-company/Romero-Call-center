@@ -445,6 +445,17 @@ export const SUPABASE_TABLE_VOTOS_LIGACAO =
 // Default sensato -> sem console.warn.
 export const SUPABASE_TABLE_ANOTACOES_LIGACAO =
   process.env.SUPABASE_TABLE_ANOTACOES_LIGACAO || 'anotacoes_ligacao';
+
+// ===== Quick 260822-ubk — linha estruturada de transcrição/análise-IA =====
+//
+// Tabela nova (sql/escala/21_transcricoes_ligacao.sql) para a linha
+// estruturada/queryável de cada ligação transcrita (transcrição, análise-IA,
+// metadados). Mesmo padrão de isolamento das SUPABASE_TABLE_* acima: default
+// SEM prefixo (produção); homolog sobrescreve para
+// 'hml_transcricoes_ligacao' via deploy/homolog.env. Default sensato -> sem
+// console.warn.
+export const SUPABASE_TABLE_TRANSCRICOES_LIGACAO =
+  process.env.SUPABASE_TABLE_TRANSCRICOES_LIGACAO || 'transcricoes_ligacao';
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook

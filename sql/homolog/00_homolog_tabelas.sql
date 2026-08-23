@@ -30,6 +30,14 @@ create table if not exists hml_discador_usuarios       (like discador_usuarios  
 -- ============================================================================
 create table if not exists hml_anotacoes_ligacao (like anotacoes_ligacao including all);
 
+-- ============================================================================
+-- Quick 260822-ubk — linha estruturada de transcrição/análise-IA (escala/21).
+-- REQUER que sql/escala/21_transcricoes_ligacao.sql já tenha sido aplicado em
+-- PROD (o LIKE abaixo exige `transcricoes_ligacao` já existir): aplicar a
+-- migração 21 ANTES de re-aplicar este arquivo.
+-- ============================================================================
+create table if not exists hml_transcricoes_ligacao (like transcricoes_ligacao including all);
+
 -- Débito de LIKE ser snapshot único: hml_discador_leads_espelho pode ter sido
 -- criada ANTES do ALTER aditivo de sql/escala/20 — repetir aqui, explicitamente,
 -- o MESMO ADD COLUMN IF NOT EXISTS (idempotente).
@@ -44,5 +52,6 @@ grant all on table
   hml_mensagens_whatsapp,
   hml_webhook_eventos,
   hml_discador_usuarios,
-  hml_anotacoes_ligacao
+  hml_anotacoes_ligacao,
+  hml_transcricoes_ligacao
   to service_role;
