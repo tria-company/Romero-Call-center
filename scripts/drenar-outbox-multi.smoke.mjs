@@ -213,6 +213,285 @@ function testeGrepSemListagemDeTasks() {
   );
 }
 
+// ===== Task 2 — asserções do switch multi-agregado (a-f) =====
+//
+// Mocks de fetch com estado, molde de gap-19-13.smoke.mjs (roteia por
+// característica da URL/método). Cada teste isola global.fetch e restaura no
+// finally — nunca vaza estado entre testes.
+
+/** (a) criar_task 'audio' → Lista 03 AUDIOS + back-fill em audios_envios. */
+function instalarMockCriarTaskAudio() {
+  const chamadas = { criarTaskPost: 0, urlCriarTask: '', backfillPatch: 0, urlBackfill: '' };
+  const linha = {
+    id: 101,
+    aggregate: 'audio',
+    aggregate_id: 7,
+    op: 'criar_task',
+    bloqueante: true,
+    payload: {
+      origem: 'lote',
+      tipo: 'audio',
+      telefone_canonico: '+5511999999999',
+      lead_clickup_task_id: 'LEAD_1',
+      enviado_por: 'romero',
+    },
+    dedup_key: 'audio:7:criar',
+    seq: 1,
+    status: 'pendente',
+    tentativas: 0,
+  };
+  const estado = { audioTaskId: null };
+
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const m = (opts.method || 'GET').toUpperCase();
+    const ok = (data) => new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+    const okVazio = () => new Response(null, { status: 200 });
+
+    if (u.includes('api.clickup.com') && u.includes('/task') && m === 'POST') {
+      chamadas.criarTaskPost += 1;
+      chamadas.urlCriarTask = u;
+      return ok({ id: 'TASK_AUDIO_NOVA' });
+    }
+    if (u.includes('/rest/v1/')) {
+      if (m === 'GET' && u.includes('op=eq.criar_task') && u.includes('status=eq.enviando')) return ok([]);
+      if (m === 'GET' && u.includes('select=clickup_task_id')) return ok([{ clickup_task_id: estado.audioTaskId }]);
+      if (m === 'GET' && u.includes('status=in')) return ok(linha.status === 'pendente' ? [{ ...linha }] : []);
+      if (m === 'PATCH' && u.includes('status=in.')) {
+        linha.status = 'enviando';
+        return ok([{ ...linha }]);
+      }
+      if (m === 'PATCH' && u.includes('clickup_task_id=is.null')) {
+        chamadas.backfillPatch += 1;
+        chamadas.urlBackfill = u;
+        estado.audioTaskId = 'TASK_AUDIO_NOVA';
+        return okVazio();
+      }
+      if (m === 'PATCH') {
+        linha.status = 'enviado';
+        return okVazio();
+      }
+    }
+    throw new Error(`fetch inesperado no smoke: ${m} ${u}`);
+  };
+  return { chamadas };
+}
+
+async function testeCriarTaskAudio() {
+  const { processarDrenoOutboxJob } = await import('../src/mastra/drenar-outbox.ts');
+  const fetchReal = global.fetch;
+  try {
+    const { chamadas } = instalarMockCriarTaskAudio();
+    const r = await processarDrenoOutboxJob(7);
+    checar(chamadas.criarTaskPost === 1, `(a) criar_task audio: criarTask deveria ser chamado 1x — recebido ${chamadas.criarTaskPost}`);
+    checar(
+      chamadas.urlCriarTask.includes('/list/1000320000003180/task'),
+      `(a) criar_task audio deveria criar na Lista 03 AUDIOS — URL: ${chamadas.urlCriarTask}`,
+    );
+    checar(chamadas.backfillPatch === 1, `(a) criar_task audio deveria back-fillar 1x — recebido ${chamadas.backfillPatch}`);
+    checar(
+      chamadas.urlBackfill.includes('/audios_envios?'),
+      `(a) back-fill de audio deveria gravar em audios_envios — URL: ${chamadas.urlBackfill}`,
+    );
+    checar(r.enviadas === 1, `(a) deveria reportar 1 enviada — recebido ${JSON.stringify(r)}`);
+  } finally {
+    global.fetch = fetchReal;
+  }
+}
+
+/** (b) comentar 'nota' resolve o alvo por payload.clickup_task_id (sem criar_task/back-fill). */
+function instalarMockComentarNota() {
+  const chamadas = { comentarPost: 0, urlComentar: '' };
+  const linha = {
+    id: 201,
+    aggregate: 'nota',
+    aggregate_id: 55,
+    op: 'comentar',
+    bloqueante: false,
+    payload: { clickup_task_id: 'LEAD_ALVO', texto: 'nota de teste' },
+    dedup_key: 'nota:55:comentar',
+    seq: 1,
+    status: 'pendente',
+    tentativas: 0,
+  };
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const m = (opts.method || 'GET').toUpperCase();
+    const ok = (data) => new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+    const okVazio = () => new Response(null, { status: 200 });
+
+    if (u.includes('api.clickup.com') && u.includes('/comment') && m === 'POST') {
+      chamadas.comentarPost += 1;
+      chamadas.urlComentar = u;
+      return ok({ id: 'COMMENT_1' });
+    }
+    if (u.includes('/rest/v1/')) {
+      if (m === 'GET' && u.includes('op=eq.criar_task') && u.includes('status=eq.enviando')) return ok([]);
+      if (m === 'GET' && u.includes('status=in')) return ok(linha.status === 'pendente' ? [{ ...linha }] : []);
+      if (m === 'PATCH') {
+        linha.status = 'enviado';
+        return okVazio();
+      }
+    }
+    throw new Error(`fetch inesperado no smoke: ${m} ${u}`);
+  };
+  return { chamadas };
+}
+
+async function testeComentarNotaPorPayload() {
+  const { processarDrenoOutboxJob } = await import('../src/mastra/drenar-outbox.ts');
+  const fetchReal = global.fetch;
+  try {
+    const { chamadas } = instalarMockComentarNota();
+    const r = await processarDrenoOutboxJob(55);
+    checar(chamadas.comentarPost === 1, `(b) comentar nota: comentarTask deveria ser chamado 1x — recebido ${chamadas.comentarPost}`);
+    checar(
+      chamadas.urlComentar.includes('/task/LEAD_ALVO/comment'),
+      `(b) comentar nota deveria resolver o alvo por payload.clickup_task_id (sem criar_task) — URL: ${chamadas.urlComentar}`,
+    );
+    checar(r.enviadas === 1, `(b) deveria reportar 1 enviada — recebido ${JSON.stringify(r)}`);
+  } finally {
+    global.fetch = fetchReal;
+  }
+}
+
+/** (c) set_campo 'lead' escolhe CAMPOS_LEADS e resolve o alvo por payload.clickup_task_id. */
+function instalarMockSetCampoLead() {
+  const chamadas = { setCampoPost: 0, urlSetCampo: '' };
+  const linha = {
+    id: 301,
+    aggregate: 'lead',
+    aggregate_id: 88,
+    op: 'set_campo',
+    bloqueante: true,
+    payload: { clickup_task_id: 'LEAD_ALVO_2', campo: 'SCORE', valor: 42 },
+    dedup_key: 'lead:88:campo:SCORE',
+    seq: 1,
+    status: 'pendente',
+    tentativas: 0,
+  };
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const m = (opts.method || 'GET').toUpperCase();
+    const ok = (data) => new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+    const okVazio = () => new Response(null, { status: 200 });
+
+    if (u.includes('api.clickup.com') && u.includes('/field/') && m === 'POST') {
+      chamadas.setCampoPost += 1;
+      chamadas.urlSetCampo = u;
+      return ok({});
+    }
+    if (u.includes('/rest/v1/')) {
+      if (m === 'GET' && u.includes('op=eq.criar_task') && u.includes('status=eq.enviando')) return ok([]);
+      if (m === 'GET' && u.includes('status=in')) return ok(linha.status === 'pendente' ? [{ ...linha }] : []);
+      if (m === 'PATCH') {
+        linha.status = 'enviado';
+        return okVazio();
+      }
+    }
+    throw new Error(`fetch inesperado no smoke: ${m} ${u}`);
+  };
+  return { chamadas };
+}
+
+async function testeSetCampoLeadPorPayload() {
+  const { processarDrenoOutboxJob } = await import('../src/mastra/drenar-outbox.ts');
+  const { CAMPOS_LEADS } = await import('../src/mastra/clickup.ts');
+  const fetchReal = global.fetch;
+  try {
+    const { chamadas } = instalarMockSetCampoLead();
+    const r = await processarDrenoOutboxJob(88);
+    checar(chamadas.setCampoPost === 1, `(c) set_campo lead: setCustomField deveria ser chamado 1x — recebido ${chamadas.setCampoPost}`);
+    checar(
+      chamadas.urlSetCampo.includes(`/task/LEAD_ALVO_2/field/${CAMPOS_LEADS.SCORE}`),
+      `(c) set_campo lead deveria usar CAMPOS_LEADS.SCORE e o alvo de payload.clickup_task_id — URL: ${chamadas.urlSetCampo}`,
+    );
+    checar(r.enviadas === 1, `(c) deveria reportar 1 enviada — recebido ${JSON.stringify(r)}`);
+  } finally {
+    global.fetch = fetchReal;
+  }
+}
+
+/** (d) anexar não-bloqueante que falha (download do store canônico) cai na DLQ por-linha, sem travar o agregado. */
+function instalarMockAnexarFalha() {
+  const chamadas = { storageGet: 0, dlqPatch: 0 };
+  const linha = {
+    id: 401,
+    aggregate: 'audio',
+    aggregate_id: 9,
+    op: 'anexar',
+    bloqueante: false,
+    payload: { midia_ref: 'gravacoes/foo/bar.ogg' },
+    dedup_key: 'audio:9:anexar',
+    seq: 2,
+    status: 'pendente',
+    tentativas: 0,
+  };
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const m = (opts.method || 'GET').toUpperCase();
+    const ok = (data) => new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+
+    // Supabase Storage — falha proposital (simula binário indisponível/erro de infra).
+    if (u.includes('/storage/v1/object/')) {
+      chamadas.storageGet += 1;
+      return new Response('erro', { status: 500 });
+    }
+    if (u.includes('/rest/v1/')) {
+      if (m === 'GET' && u.includes('op=eq.criar_task') && u.includes('status=eq.enviando')) return ok([]);
+      if (m === 'GET' && u.includes('select=clickup_task_id')) return ok([{ clickup_task_id: 'TASK_AUDIO_EXIST' }]);
+      if (m === 'GET' && u.includes('status=in')) return ok(linha.status === 'pendente' ? [{ ...linha }] : []);
+      if (m === 'PATCH') {
+        chamadas.dlqPatch += 1;
+        linha.status = 'dlq';
+        return new Response(null, { status: 200 });
+      }
+    }
+    throw new Error(`fetch inesperado no smoke: ${m} ${u}`);
+  };
+  return { chamadas };
+}
+
+async function testeAnexarFalhaVaiParaDlq() {
+  const { processarDrenoOutboxJob } = await import('../src/mastra/drenar-outbox.ts');
+  const fetchReal = global.fetch;
+  try {
+    const { chamadas } = instalarMockAnexarFalha();
+    const r = await processarDrenoOutboxJob(9);
+    checar(chamadas.storageGet === 1, `(d) anexar deveria tentar baixar do store canônico 1x — recebido ${chamadas.storageGet}`);
+    checar(
+      chamadas.dlqPatch === 1,
+      `(d) anexar não-bloqueante que falha deveria cair na DLQ por-linha 1x, sem travar o agregado — recebido ${chamadas.dlqPatch}`,
+    );
+    checar(r.emDlq === 1, `(d) deveria reportar 1 em DLQ — recebido ${JSON.stringify(r)}`);
+    checar(r.enviadas === 0, `(d) nada deveria ser marcado enviado nesta passada — recebido ${JSON.stringify(r)}`);
+  } finally {
+    global.fetch = fetchReal;
+  }
+}
+
+/** (e) nenhum caminho chama a listagem geral de tasks — coberto por testeGrepSemListagemDeTasks (!/listartasks/i). */
+
+/** (f) marcarEnviado NULA o payload (scrub pós-drain, LGPD-03) — prova funcional do corpo do PATCH. */
+async function testeMarcarEnviadoNulaPayload() {
+  const repo = await import('../src/mastra/outbox-repo.ts');
+  const fetchReal = global.fetch;
+  try {
+    let corpoEnviado = null;
+    global.fetch = async (_url, opts = {}) => {
+      corpoEnviado = opts.body ? JSON.parse(opts.body) : null;
+      return new Response(null, { status: 200 });
+    };
+    await repo.marcarEnviado(999);
+    checar(
+      Boolean(corpoEnviado) && corpoEnviado.payload === null && corpoEnviado.status === 'enviado',
+      `(f) marcarEnviado deveria NULAR o payload no PATCH (scrub pós-drain, LGPD-03) — recebido ${JSON.stringify(corpoEnviado)}`,
+    );
+  } finally {
+    global.fetch = fetchReal;
+  }
+}
+
 async function main() {
   await testeResolverPorAgregado();
   await testeResolverLeadNotaLanca();
@@ -220,6 +499,12 @@ async function main() {
   await testeBackfillPorAgregado();
   await testeModulosCarregam();
   testeGrepSemListagemDeTasks();
+
+  await testeCriarTaskAudio();
+  await testeComentarNotaPorPayload();
+  await testeSetCampoLeadPorPayload();
+  await testeAnexarFalhaVaiParaDlq();
+  await testeMarcarEnviadoNulaPayload();
 
   if (falhas.length > 0) {
     console.error('=== SMOKE FAIL ===');

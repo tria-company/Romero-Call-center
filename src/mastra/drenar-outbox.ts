@@ -1,23 +1,35 @@
 // drenar-outbox.ts — worker de dreno do transactional outbox (ESCRITA-02 +
-// LGPD-03, Fase B, Phase 19 Plano 03). Generaliza `sync-clickup.ts`: drena o
+// LGPD-03, Fase B, Phase 19 Plano 03 — generalizado multi-agregado na Fase C,
+// Phase 20 Plano 02, ESCRITA-05). Generaliza `sync-clickup.ts`: drena o
 // `clickup_outbox` de UM `aggregate_id` por vez, EM ORDEM DE SEQ
 // (outbox-repo.ts::proximasPendentes), idempotente por `dedup_key` (o UNIQUE
 // e o ON CONFLICT ficam nas RPCs, 19-02) — reusa o choke `fetchClickUp`
 // (clickup.ts:41, rate-limiter incluso) e as primitivas por-ID
-// (criarTask/setCustomField/atualizarTask/comentarTask/fecharLigacao), NUNCA
-// a listagem de tasks (os endpoints por-ID sobreviveram ao incidente 2026-08-20).
+// (criarTask/setCustomField/atualizarTask/comentarTask/fecharLigacao/
+// anexarArquivoNaTask), NUNCA a listagem de tasks (os endpoints por-ID
+// sobreviveram ao incidente 2026-08-20).
 //
-// `op='criar_task'` resolve o `clickup_task_id` e faz BACK-FILL na linha de
-// `ligacoes` (outbox-repo.ts::backfillClickupTaskId) — mas é IDEMPOTENTE A
-// CRASH (CR-01): se o agregado já tem `clickup_task_id` resolvido (uma passada
-// anterior criou a task mas morreu ANTES de `marcarEnviado`, a linha ficou
-// pendente), a re-execução NÃO chama `criarTask` de novo (zero task ClickUp
-// duplicada) — reusa o id e só marca `enviado`. ops seguintes daquele
-// aggregate que precisam do id ADIAM (a linha continua pendente) enquanto
-// `clickup_task_id` for `null` — preserva a ordem por `seq`: nunca pula uma
-// linha bloqueada para processar a próxima (isso destruiria a ordem). Após
-// CADA envio bem-sucedido, `marcarEnviado` marca `enviado` e NULA o payload
-// (scrub de PII pós-drain, LGPD-03/Riscos R13).
+// MULTI-AGREGADO (Phase 20 Plano 02): o `aggregate` de uma linha de outbox é
+// 'ligacao' | 'audio' | 'lead' | 'nota'. Só 'ligacao'/'audio' têm
+// `criar_task`+back-fill (a task-alvo AINDA NÃO existe no ClickUp, o dreno
+// cria e persiste o id). 'lead'/'nota' NUNCA criam task nova — a lead/ligação
+// já existe, o alvo vem de `payload.clickup_task_id` gravado pela RPC que
+// enfileirou a linha (`comentar` de nota / `set_campo` de lead). O agregado
+// de UMA passada é sempre o mesmo (todas as linhas de `proximasPendentes`
+// pertencem ao mesmo `aggregate_id`, que é local por-tabela — nunca
+// mistura ligacao com audio na mesma passada).
+//
+// `op='criar_task'` resolve o `clickup_task_id` e faz BACK-FILL na linha da
+// tabela do agregado (`outbox-repo.ts::backfillClickupTaskId`) — mas é
+// IDEMPOTENTE A CRASH (CR-01): se o agregado já tem `clickup_task_id`
+// resolvido (uma passada anterior criou a task mas morreu ANTES de
+// `marcarEnviado`, a linha ficou pendente), a re-execução NÃO chama
+// `criarTask` de novo (zero task ClickUp duplicada) — reusa o id e só marca
+// `enviado`. ops seguintes daquele aggregate que precisam do id ADIAM (a
+// linha continua pendente) enquanto `clickup_task_id` for `null` — preserva
+// a ordem por `seq`: nunca pula uma linha bloqueada para processar a próxima
+// (isso destruiria a ordem). Após CADA envio bem-sucedido, `marcarEnviado`
+// marca `enviado` e NULA o payload (scrub de PII pós-drain, LGPD-03/Riscos R13).
 //
 // WR-A (19-13, 19-REVIEW-2.md) — fecha a janela residual do CR-01: o
 // `clickup_task_id` só é conhecido DEPOIS de `criarTask` e persistido por uma
@@ -58,17 +70,21 @@
 // só existe entre réplicas concorrentes e o inline é single-shot; ver
 // `drenoInlineLiberadoSemRedis`.
 //
-// LGPD/WR-01: NUNCA loga payload/telefone/URL — só `aggregateId`, `linha.op`,
-// `linha.dedup_key`, `linha.status` e a classe/mensagem do erro (propagada
-// pelas primitivas de clickup.ts, que já seguem essa disciplina).
+// LGPD/WR-01: NUNCA loga payload/telefone/URL/midia_ref — só `aggregateId`,
+// `linha.op`, `linha.dedup_key`, `linha.status` e a classe/mensagem do erro
+// (propagada pelas primitivas de clickup.ts, que já seguem essa disciplina).
 //
-// FORA DE ESCOPO deste plano (débito documentado, não implementado aqui): o
-// `op='anexar'` (áudios) segue como não-bloqueante/pulada — o store canônico
-// de mídia é Phase 20; hoje não faz I/O nenhum ao ClickUp (não passa pelo
-// rate limiter nem pode cair em DLQ, porque não lança).
+// `op='anexar'` (áudios, Phase 20 Plano 02): lê o binário do store canônico
+// (Supabase Storage, `payload.midia_ref` no formato `bucket/path` — mesmo
+// contrato de `notas.ts::subirGravacaoStorage`) e anexa via
+// `clickup.ts::anexarArquivoNaTask` — a MESMA primitiva usada por
+// `registrarEnvioAudio`. NÃO-bloqueante (`bloqueante=false`, design §3.2):
+// falha cai em DLQ por-linha (`marcarDlqLinha`), nunca trava o aggregate.
 
-import { CAMPOS_LIGACOES, CLICKUP_LIST_LIGACOES } from './clickup.ts';
-import { criarTask, atualizarTask, setCustomField, comentarTask, fecharLigacao } from './clickup.ts';
+import { CAMPOS_LIGACOES, CAMPOS_AUDIOS, CAMPOS_LEADS, CLICKUP_LIST_LIGACOES, CLICKUP_LIST_AUDIOS } from './clickup.ts';
+import { criarTask, atualizarTask, setCustomField, comentarTask, fecharLigacao, anexarArquivoNaTask } from './clickup.ts';
+import { mascararTelefone } from './mascarar.ts';
+import { SUPABASE_URL, SUPABASE_SERVICE_KEY } from './config.ts';
 import {
   proximasPendentes,
   resolverClickupTaskId,
@@ -83,20 +99,31 @@ import {
 } from './outbox-repo.ts';
 import { adquirirTokenDreno, modoRateLimiterDreno } from './rate-limiter-dreno.ts';
 
+/** Agregados com `criar_task`+back-fill — a task-alvo ainda não existe. */
+const AGREGADOS_COM_CRIAR_TASK = new Set(['ligacao', 'audio']);
+
+// Endpoint do Supabase Storage montado do env — instância self-hosted, nunca
+// hardcoded (D-P4-11). Mesmo molde self-contido de outbox-repo.ts.
+const SUPABASE_STORAGE_URL = `${SUPABASE_URL}/storage/v1`;
+
+/** Body de `criarTask` — mesmo shape usado por `clickup.ts::criarTask`. */
+type BodyCriarTask = {
+  name: string;
+  description?: string;
+  assignees?: number[];
+  custom_fields?: Array<{ id: string; value: unknown }>;
+};
+
 /**
- * Monta o body de `criarTask` a partir do payload de uma linha
- * `op='criar_task'` (ex.: `{ origem:'avulsa', telefone_canonico, ... }`,
- * gravado pela RPC `criar_ligacao_avulsa`, sql/escala/16). Função PURA (sem
- * I/O) — o `telefone_canonico` já vem em E.164 (telefone-canonico.ts, 19-01),
- * pronto para o custom field TELEFONE (tipo "phone" do ClickUp). NUNCA loga o
+ * Monta o body de `criarTask` de uma linha `op='criar_task'` de LIGAÇÃO
+ * (ex.: `{ origem:'avulsa', telefone_canonico, ... }`, gravado pela RPC
+ * `criar_ligacao_avulsa`, sql/escala/16). Função PURA (sem I/O) — o
+ * `telefone_canonico` já vem em E.164 (telefone-canonico.ts, 19-01), pronto
+ * para o custom field TELEFONE (tipo "phone" do ClickUp). NUNCA loga o
  * payload — o `name` da task vai para o ClickUp (dado operacional), não para
  * um log.
  */
-function montarBodyDaTask(payload: Record<string, unknown>): {
-  name: string;
-  assignees?: number[];
-  custom_fields?: Array<{ id: string; value: unknown }>;
-} {
+function montarBodyDaLigacao(payload: Record<string, unknown>): BodyCriarTask {
   const telefone = typeof payload.telefone_canonico === 'string' ? payload.telefone_canonico : '';
   const origem = typeof payload.origem === 'string' ? payload.origem : 'lote';
   const leadTaskId = typeof payload.lead_clickup_task_id === 'string' ? payload.lead_clickup_task_id : '';
@@ -113,6 +140,124 @@ function montarBodyDaTask(payload: Record<string, unknown>): {
     ...(Number.isFinite(assigneeNum) ? { assignees: [assigneeNum] } : {}),
     ...(customFields.length > 0 ? { custom_fields: customFields } : {}),
   };
+}
+
+/**
+ * Monta o body de `criarTask` de uma linha `op='criar_task'` de ÁUDIO (Lista
+ * 03 AUDIOS — Fase C, Phase 20 Plano 02), gravado pelas RPCs
+ * `registrar_envio_audio`/`registrar_mensagem_texto` (20-03): payload com
+ * `origem`, `tipo` ('audio'|'texto'), `lead_clickup_task_id`,
+ * `telefone_canonico`, `enviado_por`, `corpo` (só texto). Função PURA (sem
+ * I/O). O PREFIXO do título ("Áudio enviado —"/"Mensagem enviada —") é o
+ * MESMO CONTRATO que `clickup.ts::listarEnviosAudioDoLead` usa para
+ * distinguir texto de áudio (`String(t.name).startsWith('Mensagem enviada')`)
+ * — reproduzido aqui byte-a-byte. Telefone MASCARADO no título (IN-01/LGPD);
+ * em claro só no custom field TELEFONE. NUNCA loga o payload.
+ */
+function montarBodyDoAudio(payload: Record<string, unknown>): BodyCriarTask {
+  const telefone = typeof payload.telefone_canonico === 'string' ? payload.telefone_canonico : '';
+  const leadTaskId = typeof payload.lead_clickup_task_id === 'string' ? payload.lead_clickup_task_id : '';
+  const enviadoPor = typeof payload.enviado_por === 'string' ? payload.enviado_por : '';
+  const tipo = payload.tipo === 'texto' ? 'texto' : 'audio';
+  const corpo = typeof payload.corpo === 'string' ? payload.corpo : '';
+  const dataDoEnvio = typeof payload.data_do_envio === 'number' ? payload.data_do_envio : Date.now();
+
+  const customFields: Array<{ id: string; value: unknown }> = [{ id: CAMPOS_AUDIOS.DATA_DO_ENVIO, value: dataDoEnvio }];
+  if (enviadoPor) customFields.push({ id: CAMPOS_AUDIOS.ENVIADO_POR, value: enviadoPor });
+  if (telefone) customFields.push({ id: CAMPOS_AUDIOS.TELEFONE, value: telefone });
+  if (leadTaskId) customFields.push({ id: CAMPOS_AUDIOS.LEAD, value: { add: [leadTaskId] } });
+
+  const prefixo = tipo === 'texto' ? 'Mensagem enviada' : 'Áudio enviado';
+  const nome = `${prefixo} — ${telefone ? mascararTelefone(telefone) : 'sem telefone'}`;
+
+  return {
+    name: nome,
+    ...(tipo === 'texto' && corpo ? { description: corpo } : {}),
+    ...(customFields.length > 0 ? { custom_fields: customFields } : {}),
+  };
+}
+
+/** Dispatcher de `montarBodyDaTask` por agregado (`criar_task`). */
+function montarBodyDaTask(aggregate: string, payload: Record<string, unknown>): BodyCriarTask {
+  return aggregate === 'audio' ? montarBodyDoAudio(payload) : montarBodyDaLigacao(payload);
+}
+
+/** Lista ClickUp-alvo de `criarTask` por agregado (`criar_task`). */
+function listaClickupDoAgregado(aggregate: string): string {
+  return aggregate === 'audio' ? CLICKUP_LIST_AUDIOS : CLICKUP_LIST_LIGACOES;
+}
+
+/** Mapa de campos lógico→field-id por agregado (`set_campo`). */
+function mapaCamposPorAgregado(aggregate: string): Record<string, string> {
+  if (aggregate === 'audio') return CAMPOS_AUDIOS as unknown as Record<string, string>;
+  if (aggregate === 'lead') return CAMPOS_LEADS as unknown as Record<string, string>;
+  return CAMPOS_LIGACOES as unknown as Record<string, string>;
+}
+
+/**
+ * Resolve a task-alvo de uma linha (`comentar`/`set_campo`): se
+ * `taskIdAtual` já está resolvido ('ligacao'/'audio' com `criar_task` já
+ * rodado), é o alvo. Para 'ligacao'/'audio' AINDA sem `criar_task` resolvido,
+ * é backpressure de ORDEM — `adiar:true` (o caller adia, preserva `seq`,
+ * NUNCA erro). Para 'lead'/'nota' (nunca têm `criar_task` — a lead/ligação
+ * JÁ EXISTE no ClickUp), o alvo vem SEMPRE de `payload.clickup_task_id`; a
+ * ausência aqui é um erro real de dado (não backpressure).
+ */
+function resolverAlvoLinha(
+  linha: LinhaOutbox,
+  payload: Record<string, unknown>,
+  taskIdAtual: string | null,
+): { alvo: string | null; adiar: boolean } {
+  if (taskIdAtual) return { alvo: taskIdAtual, adiar: false };
+  if (AGREGADOS_COM_CRIAR_TASK.has(linha.aggregate)) return { alvo: null, adiar: true };
+  const doPayload = typeof payload.clickup_task_id === 'string' ? payload.clickup_task_id : '';
+  return { alvo: doPayload || null, adiar: false };
+}
+
+/** Encoda cada segmento do path do objeto (mantendo `/` como separador de pasta) — mesmo molde de notas.ts::encodeStoragePath. */
+function encodeStoragePathRef(ref: string): string {
+  return ref
+    .split('/')
+    .filter((seg) => seg !== '')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+}
+
+/**
+ * Baixa o binário do store canônico (Supabase Storage) a partir de
+ * `midiaRef` (formato `bucket/path`, mesmo contrato de
+ * `notas.ts::subirGravacaoStorage`). Materializa em Buffer — sem streaming
+ * (diferente do download→upload de `subirGravacaoStorage`): o anexo do
+ * ClickUp precisa do buffer inteiro pro multipart, e os áudios enviados pelo
+ * discador (WhatsApp) ficam na casa de alguns MB, não dezenas/centenas de MB
+ * das gravações de chamada. LANÇA em config ausente/erro de rede/HTTP
+ * (WR-03) — o caller (`op='anexar'`, não-bloqueante) decide DLQ por-linha.
+ * NUNCA loga `midiaRef`/URL.
+ */
+async function baixarMidiaStorage(midiaRef: string): Promise<{ buffer: Buffer; contentType: string }> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    throw new Error('[drenar-outbox] SUPABASE_URL/SUPABASE_SERVICE_KEY ausente — não dá para baixar a mídia do store canônico');
+  }
+  if (!midiaRef) {
+    throw new Error('[drenar-outbox] anexar sem midia_ref no payload');
+  }
+  const url = `${SUPABASE_STORAGE_URL}/object/${encodeStoragePathRef(midiaRef)}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+  } catch (e) {
+    throw new Error(
+      `[drenar-outbox] falha de rede ao baixar mídia do store canônico: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok || !res.body) {
+    throw new Error(`[drenar-outbox] HTTP ${res.status} ao baixar mídia do store canônico`);
+  }
+  const contentType = res.headers.get('content-type') || 'application/octet-stream';
+  const arrayBuffer = await res.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), contentType };
 }
 
 /**
@@ -141,9 +286,13 @@ export async function processarDrenoOutboxJob(
 
   const aggregate = linhas[0].aggregate;
   // O clickup_task_id já resolvido (se `criar_task` já rodou numa passada
-  // anterior) — só suportado para 'ligacao' nesta fase (débito de fases
-  // futuras para 'lead'/'audio'/'nota').
-  let taskId: string | null = aggregate === 'ligacao' ? await resolverClickupTaskId(aggregate, aggregateId) : null;
+  // anterior) — suportado para 'ligacao'/'audio' (os únicos com
+  // criar_task+back-fill, Fase C Phase 20 Plano 02). 'lead'/'nota' nunca
+  // resolvem por tabela — o alvo delas vem de payload.clickup_task_id
+  // (resolverAlvoLinha, dentro de processarLinha).
+  let taskId: string | null = AGREGADOS_COM_CRIAR_TASK.has(aggregate)
+    ? await resolverClickupTaskId(aggregate, aggregateId)
+    : null;
 
   for (const linha of linhas) {
     let executada: boolean;
@@ -177,8 +326,9 @@ export async function processarDrenoOutboxJob(
 
 /**
  * WR-A (19-13, 19-REVIEW-2.md) — reconcilia uma `criar_task` PRESA em `enviando`
- * (o claim foi feito mas o processo morreu antes do back-fill do id). Dois
- * sub-casos de crash, ambos SEM re-criar a task (nunca duplicata):
+ * de UM `(aggregate, aggregateId)` (o claim foi feito mas o processo morreu
+ * antes do back-fill do id). Dois sub-casos de crash, ambos SEM re-criar a
+ * task (nunca duplicata):
  *   1. `clickup_task_id` NÃO resolvido (`resolverClickupTaskId` = null): o
  *      crash foi entre `criarTask` e o back-fill — a task PODE existir no
  *      ClickUp mas está descorrelacionada. Converte em `orphan`
@@ -187,31 +337,50 @@ export async function processarDrenoOutboxJob(
  *      faltou (crash pós-back-fill). Finaliza a(s) linha(s) `enviando` como
  *      `enviado` — o id já está persistido, as ops seguintes o reusam; nenhuma
  *      task nova é criada.
- * `linhasPresasEnviando` filtra `aggregate=eq.ligacao` + `op=eq.criar_task`, então
- * para qualquer outro aggregate/id esta função é um no-op barato (lista vazia).
- * NUNCA loga payload — só a contagem e o `aggregateId`.
+ * `linhasPresasEnviando` filtra por `aggregate=eq.<agg>` + `op=eq.criar_task`,
+ * então para qualquer outro aggregate/id esta função é um no-op barato (lista
+ * vazia). NUNCA loga payload — só a contagem e o `aggregateId`.
  */
-async function reconciliarCriarTaskPresa(aggregateId: number): Promise<void> {
-  const presas = await linhasPresasEnviando('ligacao', aggregateId);
+async function reconciliarCriarTaskPresaDoAgregado(aggregate: string, aggregateId: number): Promise<void> {
+  const presas = await linhasPresasEnviando(aggregate, aggregateId);
   if (presas.length === 0) return;
 
-  const idPersistido = await resolverClickupTaskId('ligacao', aggregateId);
+  const idPersistido = await resolverClickupTaskId(aggregate, aggregateId);
   if (idPersistido) {
     // Crash pós-back-fill: id já persistido; só faltou marcar enviado. Finaliza
     // (não re-cria — as ops seguintes reusam o id via `resolverClickupTaskId`).
     for (const linha of presas) await marcarEnviado(linha.id);
     console.warn(
-      `[drenar-outbox] WR-A: ${presas.length} criar_task presa(s) em 'enviando' com id JÁ persistido (crash pós-back-fill) — finalizada(s) como enviado, sem re-criar (aggregateId=${aggregateId})`,
+      `[drenar-outbox] WR-A: ${presas.length} criar_task presa(s) em 'enviando' com id JÁ persistido (crash pós-back-fill) — finalizada(s) como enviado, sem re-criar (aggregate=${aggregate}, aggregateId=${aggregateId})`,
     );
     return;
   }
 
   // Crash entre criarTask e o back-fill: id NÃO resolvido. A task pode existir
   // no ClickUp descorrelacionada — NUNCA re-cria; converte em órfão detectável.
-  const orfas = await marcarOrphanEnviando('ligacao', aggregateId);
+  const orfas = await marcarOrphanEnviando(aggregate, aggregateId);
   console.warn(
-    `[drenar-outbox] WR-A: ${orfas} criar_task presa(s) em 'enviando' SEM clickup_task_id resolvido (crash entre criarTask e back-fill) — roteada(s) para reconciliação/órfão (19-06), NÃO re-criada(s) (aggregateId=${aggregateId})`,
+    `[drenar-outbox] WR-A: ${orfas} criar_task presa(s) em 'enviando' SEM clickup_task_id resolvido (crash entre criarTask e back-fill) — roteada(s) para reconciliação/órfão (19-06), NÃO re-criada(s) (aggregate=${aggregate}, aggregateId=${aggregateId})`,
   );
+}
+
+/**
+ * WR-A generalizado (Fase C, Phase 20 Plano 02): `processarDrenoOutboxJob`
+ * recebe SÓ `aggregateId` (contrato inalterado — os callers de hoje, todos
+ * de 'ligacao', são fora do escopo deste plano) e `aggregate_id` é um id
+ * LOCAL por-tabela (`ligacoes.id`/`audios_envios.id` são sequências
+ * INDEPENDENTES que podem colidir numericamente). Sem saber de antemão QUAL
+ * agregado esta passada drena, reconcilia cada agregado candidato (os únicos
+ * com `criar_task`+back-fill: 'ligacao'/'audio') SEQUENCIALMENTE — o filtro
+ * `aggregate=eq.<agg>` de `linhasPresasEnviando`/`marcarOrphanEnviando`
+ * garante que cada chamada só enxerga as linhas do SEU agregado, e a
+ * primeira que encontra presas já transiciona o estado (a segunda, do outro
+ * agregado, não encontra mais nada de qualquer forma).
+ */
+async function reconciliarCriarTaskPresa(aggregateId: number): Promise<void> {
+  for (const aggregate of AGREGADOS_COM_CRIAR_TASK) {
+    await reconciliarCriarTaskPresaDoAgregado(aggregate, aggregateId);
+  }
 }
 
 /**
@@ -278,16 +447,18 @@ async function processarLinha(
     case 'criar_task': {
       // CR-01 (idempotência a crash): se o `clickup_task_id` do agregado JÁ
       // está resolvido (`taskIdAtual` != null — o `resolverClickupTaskId` no
-      // topo de `processarDrenoOutboxJob` o leu de `ligacoes`), então uma
-      // passada ANTERIOR já criou a task no ClickUp e fez o back-fill, mas
-      // MORREU antes de `marcarEnviado` (a linha continuou pendente). Recriar
-      // aqui geraria uma SEGUNDA task "Ligação avulsa —" na Lista 02 (a exata
+      // topo de `processarDrenoOutboxJob` o leu da tabela do agregado), então
+      // uma passada ANTERIOR já criou a task no ClickUp e fez o back-fill,
+      // mas MORREU antes de `marcarEnviado` (a linha continuou pendente).
+      // Recriar aqui geraria uma SEGUNDA task na lista do agregado (a exata
       // falha "op double-sends", risco #2). PULA `criarTask`: reusa o id
       // existente (o `backfillClickupTaskId` é `is.null`-guardado, idempotente
       // — não sobrescreve) e retorna true para o caller marcar `enviado` e
       // fechar a linha. NÃO consome token do dreno (não há saída ao ClickUp).
+      // Só 'ligacao'/'audio' chegam aqui com taskIdAtual não-null vindo do
+      // topo (AGREGADOS_COM_CRIAR_TASK); 'lead'/'nota' nunca têm criar_task.
       if (taskIdAtual) {
-        await backfillClickupTaskId('ligacao', aggregateId, taskIdAtual);
+        await backfillClickupTaskId(linha.aggregate, aggregateId, taskIdAtual);
         return true;
       }
       // Adquire o token do dreno ANTES do claim: se o teto global bloqueia
@@ -301,7 +472,7 @@ async function processarLinha(
       if (!reivindicada) return false;
       let nova: { id?: string } | null;
       try {
-        nova = await criarTask(CLICKUP_LIST_LIGACOES, montarBodyDaTask(payload));
+        nova = await criarTask(listaClickupDoAgregado(linha.aggregate), montarBodyDaTask(linha.aggregate, payload));
       } catch (e) {
         // `criarTask` falhou DENTRO do processo (sem crash): a task NÃO foi
         // criada. LIBERA o claim (`enviando`→`pendente`) para retry seguro e
@@ -318,25 +489,37 @@ async function processarLinha(
         );
       }
       setTaskId(nova.id);
-      await backfillClickupTaskId('ligacao', aggregateId, nova.id);
+      await backfillClickupTaskId(linha.aggregate, aggregateId, nova.id);
       return true;
     }
 
     case 'set_campo': {
-      if (!taskIdAtual) return false; // adiar: preserva ordem, tenta de novo quando criar_task resolver
+      // 'ligacao'/'audio': alvo vem de taskIdAtual (adiar se ainda não
+      // resolvido, backpressure de ordem). 'lead': alvo SEMPRE de
+      // payload.clickup_task_id (a lead já existe no ClickUp — sem
+      // criar_task/back-fill); ausência é erro real (não backpressure).
+      const { alvo, adiar } = resolverAlvoLinha(linha, payload, taskIdAtual);
+      if (adiar) return false;
+      if (!alvo) {
+        throw new Error(
+          `[drenar-outbox] set_campo sem alvo resolvido (payload.clickup_task_id ausente) (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
+        );
+      }
       const campo = typeof payload.campo === 'string' ? payload.campo : '';
-      const fieldId = campo ? (CAMPOS_LIGACOES as Record<string, string>)[campo] : undefined;
+      const fieldId = campo ? mapaCamposPorAgregado(linha.aggregate)[campo] : undefined;
       if (!fieldId) {
         throw new Error(
           `[drenar-outbox] set_campo com campo lógico desconhecido (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
         );
       }
       if (!(await garantirTokenDreno(linha))) return false;
-      await setCustomField(taskIdAtual, fieldId, payload.valor);
+      await setCustomField(alvo, fieldId, payload.valor);
       return true;
     }
 
     case 'set_status': {
+      // Só 'ligacao' usa set_status (o RPC design de audio/lead/nota não emite
+      // esta op) — mantido byte-a-byte (regressão zero).
       if (!taskIdAtual) return false;
       const status = typeof payload.status === 'string' ? payload.status : '';
       if (!status) {
@@ -350,14 +533,24 @@ async function processarLinha(
     }
 
     case 'comentar': {
-      if (!taskIdAtual) return false;
+      // 'ligacao': alvo de taskIdAtual (adiar se ainda não resolvido).
+      // 'nota': alvo SEMPRE de payload.clickup_task_id (a lead/ligação já
+      // existe — sem criar_task/back-fill); ausência é erro real.
+      const { alvo, adiar } = resolverAlvoLinha(linha, payload, taskIdAtual);
+      if (adiar) return false;
+      if (!alvo) {
+        throw new Error(
+          `[drenar-outbox] comentar sem alvo resolvido (payload.clickup_task_id ausente) (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
+        );
+      }
       const texto = typeof payload.texto === 'string' ? payload.texto : '';
       if (!(await garantirTokenDreno(linha))) return false;
-      await comentarTask(taskIdAtual, texto);
+      await comentarTask(alvo, texto);
       return true;
     }
 
     case 'fechar': {
+      // Só 'ligacao' usa fechar — mantido byte-a-byte (regressão zero).
       if (!taskIdAtual) return false;
       if (!(await garantirTokenDreno(linha))) return false;
       await fecharLigacao(taskIdAtual);
@@ -365,12 +558,22 @@ async function processarLinha(
     }
 
     case 'anexar': {
-      // Débito Phase 20 (áudios) — o store canônico de mídia ainda não
-      // existe. Não-bloqueante: pula sem tentar enviar, marca enviado (não
-      // deixa a linha travar o aggregate para sempre). NUNCA loga midia_ref.
-      console.warn(
-        `[drenar-outbox] op 'anexar' ainda não implementada (Phase 20) — pulando (aggregateId=${aggregateId})`,
-      );
+      // Fase C, Phase 20 Plano 02: lê o binário do store canônico (Supabase
+      // Storage, payload.midia_ref) e anexa à task de ÁUDIO — NÃO-bloqueante
+      // (bloqueante=false no design da RPC, §3.2): qualquer falha (config,
+      // download, upload do anexo) PROPAGA e cai em DLQ por-linha no caller
+      // (processarDrenoOutboxJob), nunca trava o aggregate. Adiar (taskIdAtual
+      // ainda null, criar_task não resolveu) preserva a ordem, como as demais.
+      if (!taskIdAtual) return false;
+      const midiaRef = typeof payload.midia_ref === 'string' ? payload.midia_ref : '';
+      if (!midiaRef) {
+        throw new Error(
+          `[drenar-outbox] anexar sem midia_ref no payload (aggregateId=${aggregateId}, dedup_key=${linha.dedup_key})`,
+        );
+      }
+      if (!(await garantirTokenDreno(linha))) return false;
+      const { buffer, contentType } = await baixarMidiaStorage(midiaRef);
+      await anexarArquivoNaTask(taskIdAtual, buffer, `${linha.aggregate}-${aggregateId}`, contentType);
       return true;
     }
 

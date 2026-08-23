@@ -269,9 +269,11 @@ function testeGrep() {
   );
   // 19-06 head-of-line/DLQ preservado.
   checar(drenar.includes('marcarDlqLinha'), 'drenar-outbox.ts deve manter a DLQ por-linha do 19-06 (marcarDlqLinha)');
-  // O claim vem ANTES de criarTask (ordem correta do WR-A).
+  // O claim vem ANTES de criarTask (ordem correta do WR-A). Fase C Phase 20
+  // Plano 02: criarTask agora recebe a lista por AGREGADO (dispatcher
+  // listaClickupDoAgregado), não mais o literal CLICKUP_LIST_LIGACOES.
   const idxClaim = drenar.indexOf('claimLinha(linha.id)');
-  const idxCriar = drenar.indexOf('criarTask(CLICKUP_LIST_LIGACOES');
+  const idxCriar = drenar.indexOf('criarTask(listaClickupDoAgregado');
   checar(idxClaim > 0 && idxCriar > 0 && idxClaim < idxCriar, 'drenar-outbox.ts deve reivindicar (claim) ANTES de criarTask (WR-A)');
 }
 
