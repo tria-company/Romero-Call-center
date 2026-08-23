@@ -1453,6 +1453,44 @@ export async function listarEnviosAudioDoLeadSupabase(leadTaskId: string): Promi
   }));
 }
 
+/**
+ * Leitor mínimo de nome por `clickup_task_id` no espelho de leads — mesma
+ * primitiva de fetch de `listarEnviosAudioDoLeadSupabase`/
+ * `listarNotasDoLeadSupabase`, mas selecionando `nome` (nenhum dos dois
+ * seleciona). Reusado pela rota `/api/discador/audios/fila` sob
+ * FONTE_LIGACOES='supabase' pra resolver o nome real do lead quando a fila
+ * Supabase entrega o telefone como nome (19-05: `ligacoes` não tem coluna
+ * nome própria). LANÇA em erro de config/rede/HTTP (WR-03) — o caller faz
+ * try/catch e mantém o telefone como nome (nunca quebra a lista). Sem
+ * `clickupTaskId`, degrada silenciosamente pra `null` (única divergência do
+ * padrão dos irmãos, que lançam nesse caso: aqui o caller quer sempre
+ * degradar pro telefone, não abortar). NUNCA logar telefone/CPF (LGPD).
+ */
+export async function lerNomeLeadEspelho(clickupTaskId: string): Promise<string | null> {
+  checarConfig();
+  if (!clickupTaskId) return null;
+  const params = new URLSearchParams({
+    clickup_task_id: `eq.${clickupTaskId}`,
+    select: 'nome',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o nome do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao resolver o nome do lead em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<{ nome?: string | null }>;
+  return data?.[0]?.nome ?? null;
+}
+
 /** Lead elegível para o lote — shape que o runner (20-06) precisa para
  *  montar o script e chamar `gerar_lote`. */
 export interface LeadLoteElegivelSupabase {
