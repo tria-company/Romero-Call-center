@@ -1184,6 +1184,267 @@ export async function resolverLeadDaLigacaoSupabase(
   return { leadId: row.lead_id ?? null, leadClickupTaskId: row.lead_clickup_task_id ?? null };
 }
 
+// ===== Fase C (20-04) — LEITURAS de audios/leads/notas do Supabase (design §4) =====
+//
+// Nunca-ligados (anti-join lead_id), selo de conversa, histórico de envios —
+// espelham o padrão de leitura provado no 19-05 (self-contained, checarConfig()
+// + LANÇA em erro de infra WR-03). NENHUMA rota chama estas funções ainda — o
+// wiring atrás de FONTE_AUDIOS/FONTE_LEADS é 20-05/20-06/20-07.
+//
+// CONTRATO: sob FONTE_AUDIOS/FONTE_LEADS=supabase, o critério de "tem
+// Ligação" passa a ser `lead_id` — a chave numérica materializada no 20-01
+// (`discador_leads_espelho.id` + trigger que resolve `lead_id` em
+// `ligacoes`/`audios_envios` a partir de `lead_clickup_task_id`) — não mais
+// o telefone-fallback que `clickup.ts::buscarLeadsNuncaLigados` usa. EDGE:
+// uma Ligação cujo `lead_id` ainda não foi resolvido (linha gravada antes do
+// 20-01 sem backfill, ou `lead_clickup_task_id` nulo) não entra no conjunto
+// "tem ligação" — o backfill do 20-01 cobre as linhas existentes; linhas
+// novas sempre resolvem via trigger no INSERT/UPDATE.
+//
+// Erro de config/rede/HTTP LANÇA (WR-03) — nunca lista vazia mascarando
+// falha. NUNCA loga telefone/nome/corpo de nota (LGPD).
+
+export interface LeadNuncaLigadoSupabase {
+  leadTaskId: string;
+  nome: string;
+  telefone: string;
+  /** CAMPOS_LEADS.ORIGEM (ClickUp) NÃO é materializado em
+   *  `discador_leads_espelho` (sql/escala/02/08) — fica sempre '' nesta
+   *  leitura. Adicionar a coluna é mudança de schema (fora do escopo desta
+   *  leitura-only, files_modified deste plano é só supabase.ts/smoke);
+   *  débito documentado para quando o wiring (20-05) precisar dos chips
+   *  dinâmicos de origem. */
+  origem: string;
+}
+
+const LIMITE_LOTE_NUNCA_LIGADOS = 200;
+
+/**
+ * Nunca-ligados por ANTI-JOIN `lead_id` (LEITURA-04, design §4) — troca a
+ * varredura cruzada de 3 listas (`clickup.ts::buscarLeadsNuncaLigados`) por
+ * duas leituras: (1) os `lead_id` DISTINTOS que já têm QUALQUER Ligação
+ * (aberta ou fechada — mesmo critério `includeClosed:true` do ClickUp,
+ * "tem Ligação" nunca depende de status) e (2) os leads cujo `id` NÃO está
+ * nesse conjunto (`id=not.in.(...)`), na mesma ordem/tamanho de lote do
+ * espelho (`LIMITE_LOTE_NUNCA_LIGADOS`, ordenado por `atualizado_em` desc —
+ * decisão do executor: prioriza os leads mais recentemente sincronizados,
+ * já que a Lista 01 real não define prioridade para o lote de nunca-ligados).
+ * `origens` fica sempre `[]` (ver `LeadNuncaLigadoSupabase.origem`). Erro de
+ * config/rede/HTTP LANÇA (WR-03); nunca chama a listagem do ClickUp.
+ */
+export async function buscarLeadsNuncaLigadosSupabase(): Promise<{
+  leads: LeadNuncaLigadoSupabase[];
+  origens: string[];
+}> {
+  checarConfig();
+  const paramsLig = new URLSearchParams({
+    select: 'lead_id',
+    lead_id: 'not.is.null',
+  });
+  let resLig: Response;
+  try {
+    resLig = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${paramsLig.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler os lead_id com ligacao: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLig.ok) {
+    throw new Error(`[supabase] HTTP ${resLig.status} ao ler os lead_id com ligacao em ${SUPABASE_TABLE_LIGACOES}`);
+  }
+  const dataLig = (await resLig.json()) as Array<{ lead_id?: number | null }>;
+  const idsComLigacao = [
+    ...new Set(
+      (Array.isArray(dataLig) ? dataLig : [])
+        .map((r) => r.lead_id)
+        .filter((v): v is number => v !== null && v !== undefined),
+    ),
+  ];
+
+  const paramsLeads = new URLSearchParams({
+    select: 'id,clickup_task_id,nome,telefone',
+    order: 'atualizado_em.desc',
+    limit: String(LIMITE_LOTE_NUNCA_LIGADOS),
+  });
+  if (idsComLigacao.length > 0) {
+    paramsLeads.set('id', `not.in.(${idsComLigacao.join(',')})`);
+  }
+  let resLeads: Response;
+  try {
+    resLeads = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${paramsLeads.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar leads nunca-ligados: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLeads.ok) {
+    throw new Error(
+      `[supabase] HTTP ${resLeads.status} ao buscar leads nunca-ligados em ${SUPABASE_TABLE_LEADS_ESPELHO}`,
+    );
+  }
+  const dataLeads = (await resLeads.json()) as Array<{
+    id?: number;
+    clickup_task_id?: string;
+    nome?: string;
+    telefone?: string;
+  }>;
+  const leads: LeadNuncaLigadoSupabase[] = (Array.isArray(dataLeads) ? dataLeads : []).map((r) => ({
+    leadTaskId: String(r.clickup_task_id ?? ''),
+    nome: String(r.nome ?? ''),
+    telefone: String(r.telefone ?? ''),
+    origem: '',
+  }));
+  return { leads, origens: [] };
+}
+
+/** Resumo do selo de conversa de UM lead — mesmo shape de
+ *  `clickup.ts::ResumoConversaLead`. */
+export interface ResumoConversaLeadSupabase {
+  envios: number;
+  temResposta: boolean;
+  respostaTexto: string | null;
+  analise: string | null;
+}
+
+/**
+ * Selo de conversa por lead (LEITURA-04, design §2.2/§4) — agrega
+ * `audios_envios` por `lead_clickup_task_id`, mesmo shape de
+ * `clickup.ts::mapaConversaPorLead`. `selo_conversa` (enum
+ * `ligar`|`nao_ligar`|`sem_conversa`) é a única coluna que hoje carrega o
+ * resultado da avaliação da resposta do lead nesta tabela — nenhuma escrita
+ * grava `respostaTexto`/`analise` (texto livre) em `audios_envios` ainda
+ * (ver `sql/escala/24_rpc_registrar_envio_audio.sql`: o INSERT não tem essas
+ * colunas) — ficam sempre `null` enquanto isso (débito de ESCRITA, fora do
+ * escopo desta leitura). `temResposta` deriva de `selo_conversa IN ('ligar',
+ * 'nao_ligar')` — um veredito já foi formado sobre a resposta do lead. Erro
+ * de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function mapaConversaPorLeadSupabase(): Promise<Map<string, ResumoConversaLeadSupabase>> {
+  checarConfig();
+  const params = new URLSearchParams({
+    select: 'lead_clickup_task_id,selo_conversa',
+    lead_clickup_task_id: 'not.is.null',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler o mapa de conversa: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler o mapa de conversa em ${SUPABASE_TABLE_AUDIOS_ENVIOS}`);
+  }
+  const data = (await res.json()) as Array<{ lead_clickup_task_id?: string | null; selo_conversa?: string | null }>;
+  const mapa = new Map<string, ResumoConversaLeadSupabase>();
+  for (const r of Array.isArray(data) ? data : []) {
+    const leadId = String(r.lead_clickup_task_id ?? '');
+    if (!leadId) continue;
+    const atual = mapa.get(leadId) ?? { envios: 0, temResposta: false, respostaTexto: null, analise: null };
+    atual.envios += 1;
+    if (r.selo_conversa === 'ligar' || r.selo_conversa === 'nao_ligar') atual.temResposta = true;
+    mapa.set(leadId, atual);
+  }
+  return mapa;
+}
+
+/** Um envio (áudio OU texto) lido de `audios_envios` — mesmo shape de
+ *  `clickup.ts::EnvioAudioHistorico`. */
+export interface EnvioAudioHistoricoSupabase {
+  taskId: string;
+  em: number;
+  por: string;
+  tipo: 'audio' | 'texto';
+  texto: string | null;
+  audioUrl: string | null;
+  transcricao: string | null;
+}
+
+/**
+ * Histórico de envios de um lead (LEITURA-04, design §2.2/§4) — resolve o
+ * lead (`discador_leads_espelho` por `clickup_task_id`) e lê `audios_envios
+ * WHERE lead_id=$1 ORDER BY enviado_em` (`ix_audios_lead`). `taskId` = id
+ * LOCAL de `audios_envios` (bigint como string). `por` (enviado_por) NÃO é
+ * persistido em `audios_envios` ainda — só passa pelo payload do outbox pro
+ * ClickUp (`sql/escala/24_rpc_registrar_envio_audio.sql`) — fica sempre `''`
+ * (débito de ESCRITA, fora do escopo desta leitura). `audioUrl` = `midia_ref`
+ * cru (ponteiro pro store canônico Supabase Storage; resolver pra URL
+ * assinada é trabalho do wiring, 20-06/07). Sem lead resolvido -> `[]`
+ * (resultado legítimo). Erro de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function listarEnviosAudioDoLeadSupabase(leadTaskId: string): Promise<EnvioAudioHistoricoSupabase[]> {
+  checarConfig();
+  if (!leadTaskId) {
+    throw new Error('[supabase] listarEnviosAudioDoLeadSupabase chamado sem leadTaskId');
+  }
+  const paramsLead = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select: 'id',
+    limit: '1',
+  });
+  let resLead: Response;
+  try {
+    resLead = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${paramsLead.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o lead do historico de envios: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLead.ok) {
+    throw new Error(`[supabase] HTTP ${resLead.status} ao resolver o lead do historico de envios`);
+  }
+  const dataLead = (await resLead.json()) as Array<{ id?: number }>;
+  const leadId = dataLead?.[0]?.id;
+  if (leadId === undefined || leadId === null) return [];
+
+  const params = new URLSearchParams({
+    lead_id: `eq.${leadId}`,
+    select: 'id,tipo,corpo,transcricao_audio,midia_ref,enviado_em',
+    order: 'enviado_em.asc',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar o historico de envios do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `[supabase] HTTP ${res.status} ao listar o historico de envios em ${SUPABASE_TABLE_AUDIOS_ENVIOS}`,
+    );
+  }
+  const data = (await res.json()) as Array<{
+    id?: number;
+    tipo?: string;
+    corpo?: string | null;
+    transcricao_audio?: string | null;
+    midia_ref?: string | null;
+    enviado_em?: string | null;
+  }>;
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    taskId: String(r.id ?? ''),
+    em: r.enviado_em ? Date.parse(r.enviado_em) || 0 : 0,
+    por: '',
+    tipo: r.tipo === 'texto' ? 'texto' : 'audio',
+    texto: r.tipo === 'texto' ? (r.corpo ?? null) : null,
+    audioUrl: r.midia_ref ?? null,
+    transcricao: r.transcricao_audio ?? null,
+  }));
+}
+
 // ===== Conversa WhatsApp por lead (Fase 13 — campanha de áudios, sql/escala/03) =====
 //
 // Read-model da conversa (dois lados) + durabilidade das mensagens do webhook

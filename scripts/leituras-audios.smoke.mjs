@@ -71,8 +71,10 @@ async function testarNuncaLigadosAntiJoinPorLeadId() {
       `o anti-join deveria filtrar id=not.in.(<lead_id com ligacao>) — recebido: ${urlLeads}`,
     );
     checar(
-      !urls.some((u) => u.toLowerCase().includes('telefone')),
-      'buscarLeadsNuncaLigadosSupabase NUNCA deveria filtrar por telefone (o critério é lead_id, não mais telefone-fallback)',
+      // `select=...,telefone` (coluna trazida na resposta) é esperado; o que
+      // NUNCA pode existir é um FILTRO por telefone (`?telefone=` / `&telefone=`).
+      !urls.some((u) => /[?&]telefone=/.test(u)),
+      'buscarLeadsNuncaLigadosSupabase NUNCA deveria FILTRAR por telefone (o critério é lead_id, não mais telefone-fallback)',
     );
     checar(
       leads.length === 1 && leads[0].leadTaskId === 'T3',
