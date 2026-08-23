@@ -73,6 +73,15 @@ import {
   lerTimelineDaLigacao,
   definirVotoLeadCampo,
   comentarTask,
+  // quick-260822-rr6 (R6/D-06): anotação aditiva na Ligação (caminho "atendeu"
+  // do retorno tel:) — ISOLADA de registrarDesfecho/FONTE_LIGACOES.
+  anotarLigacao,
+  // quick-260822-rr6 (R9): tag "super-fa" no LEAD ligado a uma Ligação — mesma
+  // isolação de anotarLigacao.
+  marcarLeadSuperFa,
+  // Quick 260822-tdj: resolve o lead_task_id (best-effort, aceitável null)
+  // pra compor a AnotacaoLigacaoRow gravada no Supabase.
+  resolverLeadDaLigacao,
   // Pular contato (2026-08-19): fecha a Ligação com motivo do Romero — mesmos
   // primitivos do desfecho (metadados + comentário + fechar), semântica própria.
   gravarMetadadosLigacao,
@@ -684,6 +693,13 @@ import {
   // Sinal de novidade (2026-08-19): ts da última mensagem persistida — o app
   // sonda a cada ~4s e recarrega lista/conversa na hora quando muda.
   ultimoTsMensagens,
+  // Quick 260822-tdj: escrita dupla best-effort dos campos estruturados do
+  // retorno de ligação (rotas /anotacao e /super-fa) — inserirAnotacaoLigacao
+  // grava em anotacoes_ligacao, marcarSuperFaEspelho seta
+  // discador_leads_espelho.super_fa. Ambas LANÇAM em erro; o caller nas
+  // rotas abaixo faz try/catch e loga-e-segue (nunca quebra o fluxo ClickUp).
+  inserirAnotacaoLigacao,
+  marcarSuperFaEspelho,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -1177,6 +1193,56 @@ export const mastra = new Mastra({
                 numero: numeroOp,
               }
             : undefined;
+          // u-v13: rastro estruturado best-effort em anotacoes_ligacao pro
+          // fluxo WhatsApp (o fluxo tel já grava a própria linha via
+          // /anotacao — quick tdj — daí o guard "[tel" abaixo). AUTOCONTIDO:
+          // nunca lança, nunca muda o status HTTP; roda DEPOIS do sucesso do
+          // caminho principal, nos dois ramos FONTE_LIGACOES (T-v13-01/02/03/04).
+          const gravarAnotacaoDesfecho = async () => {
+            try {
+              if (String(body.observacao || '').includes('[tel')) return;
+              let resultadoAnotacao: string;
+              let observacaoAnotacao: string | null;
+              if (resultado === 'recusou') {
+                resultadoAnotacao = 'recusou';
+                observacaoAnotacao = motivo?.observacao
+                  ? `Recusada pelo lead — ${motivo.observacao}`
+                  : 'Recusada pelo lead';
+              } else if (resultado === 'nao_atendida') {
+                if (motivo?.categoria) {
+                  resultadoAnotacao = 'nao_atendida';
+                  observacaoAnotacao = `${motivo.categoria}${motivo.observacao ? ' — ' + motivo.observacao : ''}`;
+                } else {
+                  // recarimbo sem motivo (retentativa, não-terminal) —
+                  // distinguível do "não atendeu com motivo".
+                  resultadoAnotacao = 'nao_atendida_retentativa';
+                  observacaoAnotacao = null;
+                }
+              } else {
+                resultadoAnotacao = 'atendida';
+                observacaoAnotacao = motivo?.observacao ?? null;
+              }
+              await inserirAnotacaoLigacao({
+                ligacao_task_id: taskId,
+                lead_task_id: null,
+                operador: sess.usuario,
+                canal: 'whatsapp',
+                resultado: resultadoAnotacao,
+                observacao: observacaoAnotacao,
+                classificacao: null,
+                demanda: null,
+                apos_whatsapp: null,
+                super_fa: null,
+              });
+            } catch (eSupabase) {
+              // LGPD: nunca logar taskId/telefone/observacao — só a mensagem
+              // genérica (mesmo padrão do best-effort de /anotacao).
+              console.error(
+                '[discador] falha best-effort ao gravar anotacao de desfecho no Supabase:',
+                eSupabase instanceof Error ? eSupabase.message : String(eSupabase),
+              );
+            }
+          };
           try {
             await registrarDesfecho(taskId, assignee, resultado, motivo);
             // Métrica "chamadas por número" (Fase 1): conta 1 chamada por DESFECHO,
@@ -1193,6 +1259,7 @@ export const mastra = new Mastra({
             await removerDaFilaCache(assignee, taskId);
             await invalidarFilaCache(assignee);
             derrubarFilaMem(assignee);
+            await gravarAnotacaoDesfecho();
             return c.json({ status: 'ok' });
           } catch (e) {
             // LGPD: nunca logar telefone/CPF/taskId em claro — so a mensagem
@@ -1206,6 +1273,145 @@ export const mastra = new Mastra({
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao registrar desfecho' }, 502);
+          }
+        },
+      },
+      {
+        // ANOTAÇÃO na Ligação (quick-260822-rr6, R6/D-06): rota ADITIVA e
+        // ISOLADA — o caminho "atendeu" do retorno tel: usa isto pra persistir
+        // classificação/demanda/observação num comentário (registrarDesfecho
+        // ignora observação em 'atendida'; a anotação do LEAD é gestor-only).
+        // NUNCA muda status/fecha/grava custom field; NÃO toca
+        // registrarDesfecho nem a ramificação FONTE_LIGACOES. Débito
+        // documentado (SUMMARY do quick): comentário ClickUp funciona
+        // PRÉ-FLIP; PÓS-FLIP (supabase) não é relido.
+        //
+        // Quick-260822-tdj: aceita também os campos ESTRUTURADOS (além de
+        // `texto`) e grava uma escrita DUPLA best-effort em
+        // `anotacoes_ligacao` (Supabase) — nunca substitui o comentário
+        // ClickUp, só soma dado queryável. `texto` deixa de ser obrigatório
+        // quando há ao menos um campo estruturado (o caminho "não atendeu"
+        // chama sem texto, só pra persistir os campos — o comentário dele já
+        // sai pelo /desfecho).
+        path: '/api/discador/ligacao/:taskId/anotacao',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const taskId = c.req.param('taskId');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const texto = String(body.texto || '').trim().slice(0, 500);
+          const classificacao = typeof body.classificacao === 'string' ? body.classificacao.trim() || undefined : undefined;
+          const demanda = typeof body.demanda === 'string' ? body.demanda.trim() || undefined : undefined;
+          const observacao = typeof body.observacao === 'string' ? body.observacao.trim() || undefined : undefined;
+          const canal = typeof body.canal === 'string' ? body.canal.trim() || undefined : undefined;
+          const aposWhatsapp = typeof body.aposWhatsapp === 'boolean' ? body.aposWhatsapp : undefined;
+          const resultado = typeof body.resultado === 'string' ? body.resultado.trim() || undefined : undefined;
+          const superFa = typeof body.superFa === 'boolean' ? body.superFa : undefined;
+          const temEstruturado =
+            classificacao !== undefined ||
+            demanda !== undefined ||
+            observacao !== undefined ||
+            canal !== undefined ||
+            aposWhatsapp !== undefined ||
+            resultado !== undefined ||
+            superFa !== undefined;
+          if (!texto && !temEstruturado) return c.json({ erro: 'texto obrigatório' }, 400);
+          try {
+            if (texto) {
+              await anotarLigacao(taskId, assignee, texto);
+            } else {
+              // Sem texto: ainda assim exige o guard IDOR (assignee sempre da
+              // sessão, nunca do body) ANTES de qualquer escrita no Supabase.
+              await validarLigacaoDoOperador(taskId, assignee);
+            }
+            // Escrita Supabase best-effort — DEPOIS do fluxo ClickUp (que já
+            // validou ownership acima). Falha aqui NUNCA quebra a resposta
+            // 200: só loga (LGPD-safe) e segue.
+            try {
+              const leadTaskId = await resolverLeadDaLigacao(taskId).catch(() => null);
+              await inserirAnotacaoLigacao({
+                ligacao_task_id: taskId,
+                lead_task_id: leadTaskId,
+                operador: sess.usuario,
+                classificacao: classificacao ?? null,
+                demanda: demanda ?? null,
+                observacao: observacao ?? null,
+                canal: canal ?? null,
+                apos_whatsapp: aposWhatsapp ?? null,
+                super_fa: superFa ?? null,
+                resultado: resultado ?? null,
+              });
+            } catch (eSupabase) {
+              // LGPD: nunca logar taskId/telefone/texto — só a mensagem genérica.
+              console.error(
+                '[discador] falha best-effort ao gravar anotacao estruturada no Supabase:',
+                eSupabase instanceof Error ? eSupabase.message : String(eSupabase),
+              );
+            }
+            return c.json({ status: 'ok' });
+          } catch (e) {
+            // LGPD: nunca logar taskId/texto/telefone — só a mensagem genérica.
+            console.error('[discador] erro ao anotar ligação:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao registrar anotação' }, 502);
+          }
+        },
+      },
+      {
+        // SUPER-FÃ (quick-260822-rr6, R9): tag PERMANENTE "super-fa" no LEAD
+        // ligado a esta Ligação (Lista 01) — rota ADITIVA e ISOLADA, mesmo
+        // padrão de /anotacao. NUNCA muda status/fecha/grava custom field na
+        // Ligação; NÃO toca registrarDesfecho nem FONTE_LIGACOES. Sem lead
+        // resolvido -> 200 com aviso (não falha o fluxo — o marcador
+        // "[super-fa]" no comentário da Ligação segue via /anotacao,
+        // reusado pelo cliente independente desta rota).
+        path: '/api/discador/ligacao/:taskId/super-fa',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          const assignee = assigneeDoOperador(sess.usuario);
+          if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
+          const taskId = c.req.param('taskId');
+          try {
+            const r = await marcarLeadSuperFa(taskId, assignee);
+            if (!r.temLead) {
+              return c.json({ status: 'ok', temLead: false, aviso: 'Ligação sem lead vinculado — nada marcado.' });
+            }
+            // Espelho Supabase best-effort (quick-260822-tdj): a tag ClickUp
+            // acima é autoritativa; falha aqui NUNCA quebra a resposta 200.
+            if (r.leadTaskId) {
+              try {
+                await marcarSuperFaEspelho(r.leadTaskId);
+              } catch (eSupabase) {
+                // LGPD: nunca logar taskId/telefone — só a mensagem genérica.
+                console.error(
+                  '[discador] falha best-effort ao marcar super-fa no espelho Supabase:',
+                  eSupabase instanceof Error ? eSupabase.message : String(eSupabase),
+                );
+              }
+            }
+            return c.json({ status: 'ok', temLead: true });
+          } catch (e) {
+            // LGPD: nunca logar taskId/telefone — só a mensagem genérica.
+            console.error('[discador] erro ao marcar super-fã:', e instanceof Error ? e.message : String(e));
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoAutorizada =
+              msg.includes('nao encontrada') ||
+              msg.includes('nao e uma Ligacao da Lista 02') ||
+              msg.includes('nao pertence ao operador');
+            return naoAutorizada
+              ? c.json({ erro: 'Ligação não encontrada' }, 404)
+              : c.json({ erro: 'Erro ao marcar super-fã' }, 502);
           }
         },
       },

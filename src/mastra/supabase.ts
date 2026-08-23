@@ -28,6 +28,8 @@ import {
   SUPABASE_TABLE_LEADS_ESPELHO,
   SUPABASE_TABLE_MENSAGENS_WHATSAPP,
   SUPABASE_TABLE_VOTOS_LIGACAO,
+  SUPABASE_TABLE_ANOTACOES_LIGACAO,
+  SUPABASE_TABLE_TRANSCRICOES_LIGACAO,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -1131,4 +1133,146 @@ export async function contarVotosPorOperador(): Promise<Map<string, number>> {
     contagem.set(op, (contagem.get(op) ?? 0) + 1);
   }
   return contagem;
+}
+
+// ===== Anotações estruturadas da ligação (quick-260822-tdj) =====
+//
+// Escrita DUPLA best-effort ao lado dos marcadores ClickUp (quick-260822-rr6):
+// dá ao gestor dados estruturados/queryáveis (não só texto em comentário)
+// sobre cada ligação. Chaveada por `ligacao_task_id` (task_id do ClickUp da
+// Ligação, Lista 02) — SEM FK para `ligacoes` (sql/escala/20). Mesmo padrão de
+// erro do módulo (WR-03): LANÇA em falha de rede/HTTP — o CALLER na rota é
+// quem faz try/catch e loga-e-segue (o retorno da ligação nunca quebra por
+// causa do Supabase). NUNCA logar telefone/CPF.
+
+export interface AnotacaoLigacaoRow {
+  ligacao_task_id: string;
+  lead_task_id?: string | null;
+  operador?: string | null;
+  classificacao?: string | null;
+  demanda?: string | null;
+  observacao?: string | null;
+  canal?: string | null;
+  apos_whatsapp?: boolean | null;
+  super_fa?: boolean | null;
+  resultado?: string | null;
+}
+
+/** Insere UMA linha de anotação estruturada. No-op sem Supabase configurado;
+ *  erro de rede/HTTP LANÇA (o caller loga-e-segue). Normaliza `classificacao`
+ *  para minúsculas antes de gravar — o mobile manda "Receptiva"/"Indecisa"/
+ *  "Negativa" mas o CHECK da tabela é 'receptiva'/'indecisa'/'negativa'
+ *  (evita drop silencioso do insert no best-effort, T-tdj-05). */
+export async function inserirAnotacaoLigacao(row: AnotacaoLigacaoRow): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  const corpo = [{
+    ...row,
+    classificacao: row.classificacao ? row.classificacao.toLowerCase() : row.classificacao,
+  }];
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_ANOTACOES_LIGACAO}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'return=minimal' },
+      body: JSON.stringify(corpo),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao inserir anotacao da ligacao: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao inserir anotacao em ${SUPABASE_TABLE_ANOTACOES_LIGACAO}`);
+  }
+}
+
+/** Marca `discador_leads_espelho.super_fa = true` para o lead (atributo
+ *  PERMANENTE da pessoa, além da tag ClickUp no LEAD). No-op sem Supabase
+ *  configurado; 404 TOLERADO (lead ainda não espelhado — corrida benigna,
+ *  mesmo tratamento de `atualizarMensagemWhatsapp`); demais erro de
+ *  rede/HTTP LANÇA (o caller loga-e-segue). */
+export async function marcarSuperFaEspelho(leadTaskId: string): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?clickup_task_id=eq.${encodeURIComponent(leadTaskId)}`,
+      { method: 'PATCH', headers: { ...headers(), 'Prefer': 'return=minimal' }, body: JSON.stringify({ super_fa: true }) },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao marcar super-fa no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`[supabase] HTTP ${res.status} ao marcar super-fa em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+}
+
+// ===== Linha estruturada de transcrição/análise-IA (quick-260822-ubk) =====
+//
+// DEVIATION APROVADA PELO USUÁRIO (2026-08-22): esta escrita NÃO é best-effort
+// (diferente de inserirAnotacaoLigacao acima) — é RETRY-BACKED. "O clickup
+// pode até dar erro mas no banco não". O caller (processarRecordJob) chama
+// esta função FORA de try/catch, DEPOIS da consolidação ClickUp e ANTES da
+// marca durável de processado (marcarRecordProcessado) — em falha de
+// rede/HTTP, LANÇA (mesmo contrato de erro do módulo, WR-03) e o job INTEIRO
+// é retentado pelo worker/BullMQ. Crash-safe por design: `call_id` UNIQUE +
+// upsert `on_conflict=call_id` garante que o retry nunca duplica nem refaz
+// efeito no banco (idempotência de escrita), então "retentar até gravar"
+// nunca produz uma segunda linha. Chaveada por `call_id` (id da chamada
+// Wavoip) — SEM FK para `ligacoes` (sql/escala/21). NUNCA logar
+// transcrição/telefone/CPF (LGPD).
+
+export interface TranscricaoLigacaoRow {
+  call_id: string;
+  ligacao_task_id?: string | null;
+  lead_task_id?: string | null;
+  storage_path?: string | null;
+  url_gravacao_wavoip?: string | null;
+  transcricao?: string | null;
+  /** Coluna jsonb — objeto ResultadoAnalise (ou equivalente) serializado. */
+  analise_ia?: unknown;
+  duracao_seg?: number | null;
+}
+
+// Log 1x (não a cada chamada) quando o env do Supabase está ausente — evita
+// que dev local (sem SUPABASE_URL/SUPABASE_SERVICE_KEY) vire ruído de log a
+// cada RECORD processado, sem esconder de todo o modo no-op.
+let avisouTranscricaoSemEnv = false;
+
+/** Insere/atualiza (upsert por `call_id`) UMA linha estruturada da ligação
+ *  transcrita. No-op (com log 1x) sem Supabase configurado — nunca vira loop
+ *  de retry em dev local. Erro de rede/HTTP LANÇA — o caller (processador)
+ *  NÃO faz try/catch: o worker/BullMQ retenta o job inteiro até gravar. */
+export async function inserirTranscricaoLigacao(row: TranscricaoLigacaoRow): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    if (!avisouTranscricaoSemEnv) {
+      console.warn(
+        '[supabase] SUPABASE_URL/SUPABASE_SERVICE_KEY ausentes — inserirTranscricaoLigacao no-op (dev local); este aviso não repete.',
+      );
+      avisouTranscricaoSemEnv = true;
+    }
+    return;
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_TRANSCRICOES_LIGACAO}?on_conflict=call_id`,
+      {
+        method: 'POST',
+        headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify([row]),
+      },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao inserir transcricao da ligacao: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `[supabase] HTTP ${res.status} ao inserir transcricao em ${SUPABASE_TABLE_TRANSCRICOES_LIGACAO}`,
+    );
+  }
 }

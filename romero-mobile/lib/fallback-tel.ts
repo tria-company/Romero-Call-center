@@ -15,13 +15,23 @@ import type { VotoReal } from "@/lib/discador-servidor";
    UI. LGPD: nenhum console.log de telefone/token.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/** R8 (quick-260822-rr6): origem da ligação tel: — "direto" do card, ou
+ *  "apos-whatsapp" quando veio do gancho "Tentar pelo telefone" na tela de
+ *  motivo do discador (chamada WhatsApp não atendida, mesma task). */
+export type OrigemTel = "direto" | "apos-whatsapp";
+
 export type LigacaoTelPendente = {
   taskId: string;
   nome: string;
   telefone: string;
+  origem: OrigemTel;
 };
 
 const CHAVE = "romero:tel:pendente";
+
+function origemValida(v: unknown): v is OrigemTel {
+  return v === "direto" || v === "apos-whatsapp";
+}
 
 /** Marca uma ligação `tel:` em andamento (D-03) — sobrevive a sair/voltar da
  *  tela até o atendente responder ou tocar "Não consegui ligar". SSR-safe. */
@@ -34,7 +44,9 @@ export function marcarLigacaoTelPendente(p: LigacaoTelPendente): void {
   }
 }
 
-/** Lê a ligação `tel:` pendente, se houver. `null` sem guard-rail ativo. */
+/** Lê a ligação `tel:` pendente, se houver. `null` sem guard-rail ativo.
+ *  `origem` ausente/inválida (guard-rail gravado pelo pzh, antes de R8)
+ *  normaliza para "direto" — compat retroativa. */
 export function lerLigacaoTelPendente(): LigacaoTelPendente | null {
   try {
     if (typeof window === "undefined") return null;
@@ -42,7 +54,12 @@ export function lerLigacaoTelPendente(): LigacaoTelPendente | null {
     if (!bruto) return null;
     const p = JSON.parse(bruto) as Partial<LigacaoTelPendente>;
     if (!p || typeof p.taskId !== "string" || typeof p.telefone !== "string") return null;
-    return { taskId: p.taskId, nome: typeof p.nome === "string" ? p.nome : "", telefone: p.telefone };
+    return {
+      taskId: p.taskId,
+      nome: typeof p.nome === "string" ? p.nome : "",
+      telefone: p.telefone,
+      origem: origemValida(p.origem) ? p.origem : "direto",
+    };
   } catch {
     return null;
   }
@@ -60,18 +77,69 @@ export function limparLigacaoTelPendente(): void {
   }
 }
 
+/** Tamanho máximo do texto composto por `montarMarcadores` — < limite 500 do
+ *  backend (categoria/observação/anotação), com folga pra outros prefixos que
+ *  o caller possa somar (ex.: "📞 Atendida (tel)\n"). */
+const LIMITE_MARCADORES = 480;
+
+/**
+ * Monta os marcadores em pt-BR embutidos na observação/comentário (R5/R6/R8,
+ * D-05/D-06/D-08) — sem migração, sem coluna dedicada. Sempre começa com a
+ * origem (`[tel direto]`/`[tel apos-whatsapp]`, SUBSTITUI o antigo `[tel]` do
+ * pzh), seguida de `[classificacao] …` e `[demanda] …` quando presentes, e por
+ * fim a observação livre. Corta em `LIMITE_MARCADORES` chars. NUNCA inclui
+ * telefone/CPF — só texto digitado pelo atendente + rótulos fixos.
+ */
+export function montarMarcadores(p: {
+  origem: OrigemTel;
+  classificacao?: string;
+  demanda?: string;
+  observacao?: string;
+  /** R9 (quick-260822-rr6): "⭐ Super fã" — item 2 (marcador no comentário).
+   *  O item 1 (tag permanente no lead) é feito à parte via `registrarSuperFa`. */
+  superFa?: boolean;
+}): string {
+  const partes: string[] = [p.origem === "apos-whatsapp" ? "[tel apos-whatsapp]" : "[tel direto]"];
+  if (p.classificacao) partes.push(`[classificacao] ${p.classificacao}`);
+  if (p.demanda?.trim()) partes.push(`[demanda] ${p.demanda.trim()}`);
+  if (p.superFa) partes.push("[super-fa]");
+  let texto = partes.join(" ");
+  if (p.observacao?.trim()) texto = `${texto} ${p.observacao.trim()}`;
+  return texto.slice(0, LIMITE_MARCADORES);
+}
+
 /**
  * Registra o desfecho da ligação `tel:` pela rota-ponte `/api/mobile/desfecho`
  * (mesmo contrato do backend do discador). `duracao:0` — a duração real da
  * ligação nativa não é observável pelo app (fora do circuito Wavoip).
+ * `resultado==="nao_atendida"` compõe a `observacao` final via
+ * `montarMarcadores` (R5/R6/R8) — substitui o antigo prefixo fixo `[tel] `.
  * Nunca lança; retorna `r.ok`.
  */
 export async function registrarDesfechoTel(
   taskId: string,
   resultado: "atendida" | "nao_atendida",
-  opts?: { categoria?: string; observacao?: string },
+  opts?: {
+    categoria?: string;
+    classificacao?: string;
+    demanda?: string;
+    observacao?: string;
+    origem?: OrigemTel;
+    /** R9 (quick-260822-rr6): embutido no marcador via `montarMarcadores`. */
+    superFa?: boolean;
+  },
 ): Promise<boolean> {
   try {
+    const observacao =
+      resultado === "nao_atendida"
+        ? montarMarcadores({
+            origem: opts?.origem ?? "direto",
+            classificacao: opts?.classificacao,
+            demanda: opts?.demanda,
+            observacao: opts?.observacao,
+            superFa: opts?.superFa,
+          })
+        : opts?.observacao;
     const r = await fetch("/api/mobile/desfecho", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -79,13 +147,107 @@ export async function registrarDesfechoTel(
         taskId,
         resultado,
         categoria: opts?.categoria,
-        observacao: opts?.observacao,
+        observacao,
         duracao: 0,
       }),
     });
     return r.ok;
   } catch {
     return false;
+  }
+}
+
+/** Quick-260822-tdj: campos estruturados do retorno de ligação, repassados
+ *  (além de `texto`) pra rota-ponte `/api/mobile/ligacao/:taskId/anotacao` —
+ *  o backend grava uma escrita DUPLA best-effort em `anotacoes_ligacao`
+ *  (Supabase), ao lado do comentário/marcadores ClickUp. Todos opcionais. */
+export type AnotacaoEstruturada = {
+  classificacao?: string;
+  demanda?: string;
+  observacao?: string;
+  canal?: "whatsapp" | "telefone";
+  aposWhatsapp?: boolean;
+  resultado?: string;
+  superFa?: boolean;
+};
+
+/**
+ * Anota a Ligação (caminho "atendeu" do retorno tel:, R6/D-06) pela rota-ponte
+ * `/api/mobile/ligacao/:taskId/anotacao` — persiste classificação/demanda/
+ * observação num comentário (a rota do desfecho 'atendida' ignora
+ * observação). `estruturado` (quick-260822-tdj, opcional) repassa os mesmos
+ * campos, além de `texto`, pra escrita dupla best-effort no Supabase — nunca
+ * substitui o comentário ClickUp. Nunca lança; retorna `r.ok`.
+ */
+export async function registrarAnotacaoLigacao(
+  taskId: string,
+  texto: string,
+  estruturado?: AnotacaoEstruturada,
+): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/mobile/ligacao/${encodeURIComponent(taskId)}/anotacao`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ texto, ...estruturado }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Marca o LEAD ligado à Ligação como "super-fã" (R9, quick-260822-rr6) pela
+ * rota-ponte `/api/mobile/ligacao/:taskId/super-fa` — item 1 (tag PERMANENTE
+ * na pessoa, Lista 01); o marcador `[super-fa]` no comentário/observação é o
+ * item 2, embutido via `montarMarcadores`. Best-effort: nunca lança. `r.ok`
+ * cobre também o caso "sem lead vinculado" (o backend responde 200 com aviso
+ * — não é falha, só não havia o que taguear).
+ */
+export async function registrarSuperFa(taskId: string): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/mobile/ligacao/${encodeURIComponent(taskId)}/super-fa`, { method: "POST" });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Detalhe leve da Ligação (nome/telefone/script) — R7/D-07, card ANTES de
+ *  ligar. Nunca lança; `null` em falha (o card degrada escondendo a seção). */
+export async function carregarLigacaoDetalhe(
+  taskId: string,
+): Promise<{ nome: string; telefone: string; script: string } | null> {
+  try {
+    const r = await fetch(`/api/mobile/ligacao/${encodeURIComponent(taskId)}`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const d = (await r.json().catch(() => null)) as
+      | { ligacao?: { nome?: string; telefone?: string; script?: string } }
+      | null;
+    if (!d?.ligacao) return null;
+    return {
+      nome: typeof d.ligacao.nome === "string" ? d.ligacao.nome : "",
+      telefone: typeof d.ligacao.telefone === "string" ? d.ligacao.telefone : "",
+      script: typeof d.ligacao.script === "string" ? d.ligacao.script : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Dossiê (contexto) do lead ligado à Ligação — R7/D-07. `""` quando a
+ *  Ligação não tem lead resolvido, `null` em falha (o card degrada
+ *  escondendo a seção). Nunca lança. */
+export async function carregarContextoLead(taskId: string): Promise<string | null> {
+  try {
+    const r = await fetch(`/api/mobile/contexto/${encodeURIComponent(taskId)}`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const d = (await r.json().catch(() => null)) as { temLead?: boolean; contexto?: string } | null;
+    if (!d) return null;
+    if (!d.temLead) return "";
+    return typeof d.contexto === "string" ? d.contexto : "";
+  } catch {
+    return null;
   }
 }
 
