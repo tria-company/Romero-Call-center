@@ -11,6 +11,8 @@ import { chamarDiscador } from "@/lib/discador-servidor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// margem: o envio de mídia (Evolution baixa a URL) pode passar dos 10s default.
+export const maxDuration = 30;
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const gate = await exigirRomero();

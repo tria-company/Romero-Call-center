@@ -3450,16 +3450,11 @@ export const mastra = new Mastra({
               };
               const mimetype = MIME[ext];
               const fileName = urlLimpa.split('/').pop() || `conteudo-${id}.${ext || 'bin'}`;
-              let mediaB64: string;
-              try {
-                const rMedia = await fetch(conteudo.url);
-                if (!rMedia.ok) throw new Error(`download HTTP ${rMedia.status}`);
-                mediaB64 = Buffer.from(await rMedia.arrayBuffer()).toString('base64');
-              } catch (e) {
-                console.error('[discador] falha ao baixar mídia do conteudo:', e instanceof Error ? e.message : String(e));
-                return c.json({ erro: 'Não deu para baixar a mídia do conteúdo' }, 502);
-              }
-              await enviarMidia(telefoneE164, { mediatype, media: mediaB64, mimetype, fileName, caption: conteudo.titulo || undefined });
+              // Manda a URL pra Evolution baixar SERVER-SIDE — rápido pro nosso
+              // backend. (Baixar+base64 aqui dava timeout/502 em imagem grande.)
+              // mimetype + fileName fazem a Evolution enviar como IMAGEM/mídia,
+              // não como preview de link.
+              await enviarMidia(telefoneE164, { mediatype, media: conteudo.url, mimetype, fileName, caption: conteudo.titulo || undefined });
             }
           } catch (e) {
             console.error('[discador] falha ao enviar conteudo via Evolution:', e instanceof Error ? e.message : String(e));
