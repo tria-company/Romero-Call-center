@@ -103,6 +103,8 @@ export type LeadResumoReal = {
   confirmouAndressa: VotoReal | null;
   militante: boolean;
   semContato: boolean;
+  /** Fase 3: o Romero já iniciou conversa com este lead (histórico de relacionamento). */
+  romeroJaFalou: boolean;
 };
 
 /** Item da timeline de ligações de um lead (`timeline`). */

@@ -538,7 +538,7 @@ export async function upsertLeadsEspelho(rows: LeadEspelhoRow[]): Promise<number
   return rows.length;
 }
 
-export type RecorteEspelho = 'todos' | 'romero' | 'andressa' | 'militante' | 'sem-contato';
+export type RecorteEspelho = 'todos' | 'romero' | 'andressa' | 'militante' | 'sem-contato' | 'romero-ja-falou';
 
 /** Resumo de lead servido da Base (mesma forma do LeadResumo do ClickUp). */
 export interface LeadEspelhoResumo {
@@ -552,6 +552,8 @@ export interface LeadEspelhoResumo {
   confirmouAndressa: string | null;
   militante: boolean;
   semContato: boolean;
+  /** Fase 3: o Romero já iniciou conversa com este lead (write-through no envio). */
+  romeroJaFalou: boolean;
 }
 
 /**
@@ -572,7 +574,7 @@ export async function listarLeadsEspelho(opts: {
   const params = new URLSearchParams();
   params.set(
     'select',
-    'clickup_task_id,nome,telefone,cpf,bairro,cidade,confirmou_romero,confirmou_andressa,militante,sem_contato',
+    'clickup_task_id,nome,telefone,cpf,bairro,cidade,confirmou_romero,confirmou_andressa,militante,sem_contato,romero_ja_falou',
   );
   params.set('order', 'nome_lower.asc');
   params.set('limit', String(limit));
@@ -584,6 +586,7 @@ export async function listarLeadsEspelho(opts: {
     case 'andressa': params.set('confirmou_andressa', 'eq.sim'); break;
     case 'militante': params.set('militante', 'is.true'); break;
     case 'sem-contato': params.set('sem_contato', 'is.true'); break;
+    case 'romero-ja-falou': params.set('romero_ja_falou', 'is.true'); break;
     default: break;
   }
   let res: Response;
@@ -616,8 +619,32 @@ export async function listarLeadsEspelho(opts: {
     confirmouAndressa: (r.confirmou_andressa as string) ?? null,
     militante: Boolean(r.militante),
     semContato: Boolean(r.sem_contato),
+    romeroJaFalou: Boolean(r.romero_ja_falou),
   }));
   return { leads, total };
+}
+
+/**
+ * Write-through da flag "Romero já falou" no ESPELHO (Fase 3). PATCH por
+ * clickup_task_id. Sem Supabase -> false (no-op). Erro de rede/HTTP NÃO lança
+ * (best-effort, mesmo espírito do write-through de voto): o envio já aconteceu; a
+ * flag é conveniência de filtro. Retorna true se o PATCH foi aceito.
+ */
+export async function marcarRomeroJaFalouEspelho(leadTaskId: string): Promise<boolean> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !leadTaskId) return false;
+  try {
+    const res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?clickup_task_id=eq.${encodeURIComponent(leadTaskId)}`,
+      {
+        method: 'PATCH',
+        headers: { ...headers(), 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ romero_ja_falou: true }),
+      },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**

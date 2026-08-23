@@ -50,6 +50,8 @@ create table if not exists hml_conteudos (like conteudos including all);
 -- criada ANTES do ALTER aditivo de sql/escala/20 — repetir aqui, explicitamente,
 -- o MESMO ADD COLUMN IF NOT EXISTS (idempotente).
 alter table hml_discador_leads_espelho add column if not exists super_fa boolean not null default false;
+-- Fase 3 (escala/29): flag "Romero já falou" também no espelho de homolog.
+alter table hml_discador_leads_espelho add column if not exists romero_ja_falou boolean not null default false;
 
 -- Escrita via PostgREST é feita como `service_role` (o backend). NUNCA conceder
 -- a anon/authenticated: a maioria destas tabelas contém telefone/CPF (mesma

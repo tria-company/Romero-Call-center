@@ -680,6 +680,7 @@ import {
   marcarEventoWebhook,
   listarLeadsEspelho,
   atualizarVotoEspelho,
+  marcarRomeroJaFalouEspelho,
   type RecorteEspelho,
   // Fase 13: conversa WhatsApp persistida (read-model + durabilidade do webhook Evolution)
   salvarMensagemWhatsapp,
@@ -1652,7 +1653,7 @@ export const mastra = new Mastra({
           const cursor = c.req.query('cursor');
           const limit = Number(c.req.query('limit')) || 50;
           const recorteReq = c.req.query('recorte') || 'todos';
-          const recorte = (['romero', 'andressa', 'militante', 'sem-contato'].includes(recorteReq)
+          const recorte = (['romero', 'andressa', 'militante', 'sem-contato', 'romero-ja-falou'].includes(recorteReq)
             ? recorteReq
             : 'todos') as RecorteEspelho;
 
@@ -2433,6 +2434,9 @@ export const mastra = new Mastra({
             // sessão fora, pra não instruir "reconecte o WhatsApp" à toa.
             return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
+          // Fase 3: "Romero já falou" — write-through no espelho (best-effort,
+          // fire-and-forget: o envio já aconteceu; a flag é conveniência de filtro).
+          void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
           // Registro best-effort na Lista Audios (WR-03) — o envio (efeito
           // primário) já aconteceu; uma falha aqui nunca desfaz/mascara o envio.
           // enviadoPor vem do TOKEN (gate.usuario), nunca do body do cliente.
@@ -2536,6 +2540,8 @@ export const mastra = new Mastra({
             console.error('[discador] falha ao enviar texto via Evolution:', msg);
             return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
+          // Fase 3: "Romero já falou" — write-through no espelho (best-effort).
+          void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
           const registroTxt = await registrarMensagemTexto({ telefone: telefoneE164, enviadoPor: gate.usuario, texto, leadTaskId: leadId });
           // Conversa persistida (sql/escala/03) — mesma lógica do envio de áudio.
           void salvarMensagemWhatsapp({
