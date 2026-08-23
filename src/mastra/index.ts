@@ -716,6 +716,27 @@ async function posCommitLigacao(assignee: string, ligacaoId: number): Promise<vo
   }
 }
 
+// ============ Fase C (Phase 20, 20-05) — helper análogo pro agregado 'audio' ============
+//
+// posCommitEnvioAudio: MESMO padrão CHECADO de posCommitLigacao acima — kick
+// do dreno do outbox do registro de áudio/mensagem (audios_envios) logo após
+// o commit local (a RPC registrar_envio_audio/registrar_mensagem_texto já
+// gravou o agregado + a linha do outbox na MESMA tx). Sem invalidação de
+// cache de fila (audios não usa filaMem/cache-fila — isso é só de `ligacoes`).
+// NUNCA fire-and-forget: sem Redis o dreno roda INLINE aqui (T-19-07-Av,
+// mesma decisão 9 aplicada ao novo agregado).
+async function posCommitEnvioAudio(audioId: number): Promise<void> {
+  const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: audioId });
+  if (!enfileirado) {
+    await processarDrenoOutboxJob(audioId).catch((e) => {
+      console.error(
+        '[dreno] inline envio-áudio pós-commit falhou (best-effort — a linha do outbox já foi persistida, drena depois):',
+        e instanceof Error ? e.message : String(e),
+      );
+    });
+  }
+}
+
 /**
  * Reconhece um erro de NEGÓCIO lançado por `comOutboxRpc` (RAISE da RPC —
  * ligação inexistente / não pertence ao operador, sempre um 4xx do
@@ -2770,6 +2791,72 @@ export const mastra = new Mastra({
             // sessão fora, pra não instruir "reconecte o WhatsApp" à toa.
             return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
+          // Fase C (20-05): sob FONTE_AUDIOS='supabase' o ENVIO PRIMÁRIO
+          // (Evolution API, acima) já aconteceu IDÊNTICO — só o REGISTRO na
+          // Lista 03 troca de registrarEnvioAudio (ClickUp direto) por
+          // comOutboxRpc(SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO, ...): grava
+          // audios_envios + enfileira criar_task no MESMO tx, depois kicka o
+          // dreno (posCommitEnvioAudio, padrão CHECADO do 19-07). Best-effort
+          // (WR-03) — falha aqui nunca desfaz/mascara o envio já feito.
+          if (FONTE_AUDIOS === 'supabase') {
+            const canonico = canonizarTelefone(telefoneE164);
+            let audioId: number | null = null;
+            try {
+              const r = await comOutboxRpc<{ audio_id: number; outbox_inseridos: number }>(
+                SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO,
+                {
+                  p_lead_clickup_task_id: leadId,
+                  p_lead_id: null,
+                  p_telefone_canonico: canonico,
+                  p_enviado_por: gate.usuario,
+                  // DÉBITO (fora do escopo — files_modified deste plano é só
+                  // index.ts): upload do binário pro Supabase Storage ainda
+                  // não existe; sem midia_ref a RPC não enfileira a linha
+                  // 'anexar' — o registro na Lista 03, quando drenado, sai
+                  // sem o áudio anexado (ver 20-05-SUMMARY.md).
+                  p_midia_ref: null,
+                  p_transcricao: null,
+                },
+              );
+              audioId = r.audio_id;
+            } catch (e) {
+              console.warn(
+                '[discador] registrar_envio_audio (supabase) falhou — envio já feito, registro não persistido:',
+                e instanceof Error ? e.message : String(e),
+              );
+            }
+            if (audioId !== null) {
+              await posCommitEnvioAudio(audioId);
+              const idRegistro = `registro-${audioId}`;
+              // Conversa persistida — mesma lógica do caminho ClickUp abaixo.
+              void salvarMensagemWhatsapp({
+                id: idRegistro,
+                lead_task_id: leadId,
+                telefone_canonico: telefoneCanonico(telefoneE164),
+                de_nos: true,
+                ts: new Date().toISOString(),
+                tipo: 'audio',
+                midia_base64: audioBase64,
+                midia_mime: mimetype ?? 'audio/webm',
+              }).catch((e) =>
+                console.warn('[discador] persistência do envio falhou:', e instanceof Error ? e.message : String(e)),
+              );
+              void (async () => {
+                try {
+                  const texto = await transcreverBuffer(Buffer.from(audioBase64, 'base64'), mimetype);
+                  // DÉBITO: sem RPC de UPDATE pra transcricao_audio em
+                  // audios_envios ainda — persiste só no read-model da
+                  // conversa (mensagens_whatsapp, já Supabase); NÃO chama
+                  // setCustomField (idRegistro aqui é o id LOCAL de
+                  // audios_envios, não um clickup_task_id).
+                  if (texto) await atualizarMensagemWhatsapp(idRegistro, { transcricao: texto });
+                } catch (e) {
+                  console.warn('[discador] transcrição do áudio enviado falhou:', e instanceof Error ? e.message : String(e));
+                }
+              })();
+            }
+            return c.json({ status: 'ok' });
+          }
           // Registro best-effort na Lista Audios (WR-03) — o envio (efeito
           // primário) já aconteceu; uma falha aqui nunca desfaz/mascara o envio.
           // enviadoPor vem do TOKEN (gate.usuario), nunca do body do cliente.
@@ -2872,6 +2959,47 @@ export const mastra = new Mastra({
             const msg = e instanceof Error ? e.message : String(e);
             console.error('[discador] falha ao enviar texto via Evolution:', msg);
             return c.json(await classificarFalhaEnvioAudio(e), 502);
+          }
+          // Fase C (20-05): mesmo racional de /enviar acima — o ENVIO
+          // PRIMÁRIO (Evolution, acima) já aconteceu IDÊNTICO; só o REGISTRO
+          // troca de registrarMensagemTexto (ClickUp direto) por
+          // comOutboxRpc(SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO, ...).
+          if (FONTE_AUDIOS === 'supabase') {
+            const canonico = canonizarTelefone(telefoneE164);
+            let audioId: number | null = null;
+            try {
+              const r = await comOutboxRpc<{ audio_id: number; outbox_inseridos: number }>(
+                SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO,
+                {
+                  p_lead_clickup_task_id: leadId,
+                  p_lead_id: null,
+                  p_telefone_canonico: canonico,
+                  p_enviado_por: gate.usuario,
+                  p_texto: texto,
+                },
+              );
+              audioId = r.audio_id;
+            } catch (e) {
+              console.warn(
+                '[discador] registrar_mensagem_texto (supabase) falhou — envio já feito, registro não persistido:',
+                e instanceof Error ? e.message : String(e),
+              );
+            }
+            if (audioId !== null) {
+              await posCommitEnvioAudio(audioId);
+              void salvarMensagemWhatsapp({
+                id: `registro-${audioId}`,
+                lead_task_id: leadId,
+                telefone_canonico: telefoneCanonico(telefoneE164),
+                de_nos: true,
+                ts: new Date().toISOString(),
+                tipo: 'texto',
+                texto,
+              }).catch((e) =>
+                console.warn('[discador] persistência do texto falhou:', e instanceof Error ? e.message : String(e)),
+              );
+            }
+            return c.json({ status: 'ok' });
           }
           const registroTxt = await registrarMensagemTexto({ telefone: telefoneE164, enviadoPor: gate.usuario, texto, leadTaskId: leadId });
           // Conversa persistida (sql/escala/03) — mesma lógica do envio de áudio.
