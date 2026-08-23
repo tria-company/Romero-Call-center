@@ -901,6 +901,11 @@ import {
   buscarFilaSupabase,
   buscarLigacoesDoLeadSupabase,
   resolverLeadDaLigacaoSupabase,
+  // Quick 260823-kwu: resolução do nome real do lead (via discador_leads_
+  // espelho por clickup_task_id) na fila de áudios sob FONTE_LIGACOES=
+  // supabase — paridade com o ramo ClickUp (lerTask), sem o qual a fila
+  // Supabase mostraria o telefone cru como nome.
+  lerNomeLeadEspelho,
   // Quick 260822-tdj: escrita dupla best-effort dos campos estruturados do
   // retorno de ligação (rotas /anotacao e /super-fa) — inserirAnotacaoLigacao
   // grava em anotacoes_ligacao, marcarSuperFaEspelho seta
@@ -2789,12 +2794,17 @@ export const mastra = new Mastra({
           const assignee = assigneeDoOperador(gate.usuario);
           if (!assignee) return c.json({ leads: [], semMapeamento: true });
           try {
-            // resiliente: fresca por 20s; ClickUp fora → última cópia boa.
-            // A fila em si (buscarFilaResiliente, Ligações do operador) já
-            // ramifica por FONTE_LIGACOES em quem a alimenta (19-09) — fora do
-            // escopo de FONTE_AUDIOS. Só o selo de conversa (Lista 03/
-            // audios_envios) inverte aqui.
-            const fila = await buscarFilaResiliente(assignee);
+            // Quick 260823-kwu: a fila agora ramifica por FONTE_LIGACOES
+            // (paridade com GET /api/discador/fila, 19-09) — sob
+            // 'supabase' lê buscarFilaSupabase(gate.usuario) (operador =
+            // LOGIN, não assignee); senão mantém buscarFilaResiliente
+            // (assignee), resiliente/fresca por 20s, ClickUp fora → última
+            // cópia boa. O selo de conversa (Lista 03/audios_envios) segue
+            // ramificando à parte por FONTE_AUDIOS, logo abaixo.
+            const fila =
+              FONTE_LIGACOES === 'supabase'
+                ? await buscarFilaSupabase(gate.usuario)
+                : await buscarFilaResiliente(assignee);
             const mapa =
               FONTE_AUDIOS === 'supabase'
                 ? await mapaConversaPorLeadSupabase().catch((e) => {
@@ -2819,9 +2829,16 @@ export const mastra = new Mastra({
                 let nome = i.nome.replace(/^Ligação( avulsa)?\s*[—-]\s*/i, '');
                 if (leadTaskId && /^\+?\d[\d\s()-]*$/.test(nome)) {
                   try {
-                    const task = await lerTask(leadTaskId);
-                    const doLead = task ? valorCampoLead(task as Parameters<typeof valorCampoLead>[0], CAMPOS_LEADS.NOME) : '';
-                    if (doLead) nome = doLead;
+                    // Quick 260823-kwu: sob FONTE_LIGACOES=supabase resolve
+                    // pelo espelho (nunca ClickUp); ramo clickup inalterado.
+                    if (FONTE_LIGACOES === 'supabase') {
+                      const doLead = await lerNomeLeadEspelho(leadTaskId);
+                      if (doLead) nome = doLead;
+                    } else {
+                      const task = await lerTask(leadTaskId);
+                      const doLead = task ? valorCampoLead(task as Parameters<typeof valorCampoLead>[0], CAMPOS_LEADS.NOME) : '';
+                      if (doLead) nome = doLead;
+                    }
                   } catch {
                     /* mantém o telefone como nome — melhor que quebrar a lista */
                   }
