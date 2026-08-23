@@ -181,16 +181,22 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   const [conteudos, setConteudos] = React.useState<ConteudoReal[]>([]);
   const [conteudosCarregando, setConteudosCarregando] = React.useState(false);
   const [conteudosCarregou, setConteudosCarregou] = React.useState(false);
-  const [gerenciarConteudos, setGerenciarConteudos] = React.useState(false);
+  // aba ativa do painel: "enviar" (escolher pra mandar) ou "gerenciar" (CRUD),
+  // tudo DENTRO do mesmo painel deslizante — sem tela cheia separada.
+  const [modoConteudos, setModoConteudos] = React.useState<"enviar" | "gerenciar">("enviar");
 
-  async function abrirConteudos() {
-    setConteudosAberto(true);
-    if (conteudosCarregou || conteudosCarregando) return;
+  async function recarregarConteudos() {
     setConteudosCarregando(true);
     const lista = await listarConteudos();
     setConteudos(lista);
     setConteudosCarregando(false);
     setConteudosCarregou(true);
+  }
+  async function abrirConteudos() {
+    setModoConteudos("enviar");
+    setConteudosAberto(true);
+    if (conteudosCarregou || conteudosCarregando) return;
+    await recarregarConteudos();
   }
 
   /* Escolher um conteúdo:
@@ -1631,67 +1637,76 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
         </div>
       )}
 
-      {/* ── bottom-sheet da BIBLIOTECA DE CONTEÚDOS (Fase 2): lista os prontos
-            por categoria; tocar INSERE no campo de texto pra revisar e enviar. ── */}
+      {/* ── PAINEL da BIBLIOTECA (redesenho 2026-08-23): bottom-sheet DENTRO da
+            conversa, responsivo, com abas Enviar/Gerenciar — a gestão fica
+            embutida aqui, sem tela cheia separada. ── */}
       {conteudosAberto && (
         <div
-          className="au-pmodal"
+          className="au-libsheet-wrap"
           role="dialog"
           aria-modal="true"
           aria-label="Biblioteca de conteúdos"
           onClick={() => setConteudosAberto(false)}
         >
-          <div className="au-pcard au-libcard" onClick={(e) => e.stopPropagation()}>
-            <div className="au-libhead">
-              <div className="au-ptit au-libtit-h">
-                <FolderOpen size={17} /> Conteúdos prontos
+          <div className="au-libsheet" onClick={(e) => e.stopPropagation()}>
+            <div className="au-libgrab" aria-hidden="true" />
+            <div className="au-libtop">
+              <div className="au-libtabs">
+                <button
+                  type="button"
+                  className={"au-libtab" + (modoConteudos === "enviar" ? " on" : "")}
+                  onClick={() => setModoConteudos("enviar")}
+                >
+                  Enviar
+                </button>
+                <button
+                  type="button"
+                  className={"au-libtab" + (modoConteudos === "gerenciar" ? " on" : "")}
+                  onClick={() => setModoConteudos("gerenciar")}
+                >
+                  Gerenciar
+                </button>
               </div>
-              <button type="button" className="au-libger" onClick={() => setGerenciarConteudos(true)}>
-                Gerenciar
+              <button type="button" className="au-libx" onClick={() => setConteudosAberto(false)} aria-label="Fechar">
+                <X size={20} />
               </button>
             </div>
-            <div className="au-phint">Toque para inserir no campo — você revisa e envia.</div>
-            <div className="au-liblist">
-              {conteudosCarregando ? (
-                <div className="au-libvazio">Carregando…</div>
-              ) : conteudos.length === 0 ? (
-                <div className="au-libvazio">Nenhum conteúdo cadastrado ainda.</div>
-              ) : (
-                conteudosPorCategoria.map(([cat, itens]) => (
-                  <div key={cat} className="au-libgrupo">
-                    <div className="au-libcat">{cat}</div>
-                    {itens.map((cnt) => (
-                      <button key={cnt.id} type="button" className="au-libitem" onClick={() => void escolherConteudo(cnt)}>
-                        <span className="au-libtag">{cnt.tipo === "link" ? "link" : "texto"}</span>
-                        <span className="au-libtxt">
-                          <span className="au-libnome">{cnt.titulo}</span>
-                          <span className="au-libsub">{cnt.tipo === "link" ? (cnt.url ?? "") : (cnt.texto ?? "")}</span>
-                        </span>
-                      </button>
-                    ))}
+
+            <div className="au-libbody">
+              {modoConteudos === "enviar" ? (
+                <>
+                  <div className="au-libhint">
+                    Toque num conteúdo: texto e link entram no campo pra você revisar; imagem, vídeo e áudio vão direto.
                   </div>
-                ))
+                  {conteudosCarregando ? (
+                    <div className="au-libvazio">Carregando…</div>
+                  ) : conteudos.length === 0 ? (
+                    <div className="au-libvazio">
+                      Nada cadastrado ainda. Toque em <b>Gerenciar</b> pra adicionar.
+                    </div>
+                  ) : (
+                    conteudosPorCategoria.map(([cat, itens]) => (
+                      <div key={cat} className="au-libgrupo">
+                        <div className="au-libcat">{cat}</div>
+                        {itens.map((cnt) => (
+                          <button key={cnt.id} type="button" className="au-libitem" onClick={() => void escolherConteudo(cnt)}>
+                            <span className="au-libtag">{cnt.tipo}</span>
+                            <span className="au-libtxt">
+                              <span className="au-libnome">{cnt.titulo}</span>
+                              <span className="au-libsub">{cnt.tipo === "texto" ? (cnt.texto ?? "") : (cnt.url ?? "")}</span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ))
+                  )}
+                </>
+              ) : (
+                <BibliotecaConteudos onChange={() => void recarregarConteudos()} />
               )}
-            </div>
-            <div className="au-pacts">
-              <button type="button" className="seg" onClick={() => setConteudosAberto(false)}>
-                Fechar
-              </button>
             </div>
           </div>
         </div>
-      )}
-
-      {/* tela de GESTÃO dos conteúdos (Fatia 3): abre por cima do sheet; ao
-          fechar, recarrega a lista do seletor pra refletir o que mudou. */}
-      {gerenciarConteudos && (
-        <BibliotecaConteudos
-          aoFechar={() => {
-            setGerenciarConteudos(false);
-            setConteudosCarregou(false);
-            void abrirConteudos();
-          }}
-        />
       )}
     </>
   );
@@ -1773,26 +1788,31 @@ const AU_CSS = `
 .au-perro{ font-size:12.5px; color:var(--alert); font-weight:700; }
 .au-pacts{ display:flex; gap:8px; justify-content:flex-end; align-items:center; }
 .au-pgo{ display:inline-flex; align-items:center; gap:6px; border:none; border-radius:12px; padding:10px 14px; background:var(--alert); color:#fff; font-weight:800; font-size:13px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
-/* ── Biblioteca de conteúdos (Fase 2) ── */
-.au-lib{ width:42px; height:42px; border-radius:50%; flex:none; border:1px solid var(--line); cursor:pointer; background:var(--bg-1); color:var(--dim); display:grid; place-items:center; transition:transform .1s, color .2s, border-color .2s; }
+/* ── Biblioteca de conteúdos (redesenho: painel DENTRO da conversa) ── */
+/* botão de acesso ÓBVIO na barra de digitar: cor de destaque pra saltar aos olhos. */
+.au-lib{ width:46px; height:46px; border-radius:50%; flex:none; cursor:pointer; border:1px solid color-mix(in srgb, var(--go) 55%, transparent); background:color-mix(in srgb, var(--go) 16%, var(--bg-1)); color:var(--go); display:grid; place-items:center; transition:transform .1s, background .2s; -webkit-tap-highlight-color:transparent; }
 .au-lib:active{ transform:scale(.92); }
-.au-lib:hover{ color:var(--ink); border-color:var(--go); }
-.au-libcard{ max-height:min(72vh, 620px); }
-.au-libtit-h{ color:var(--ink); }
-.au-liblist{ overflow-y:auto; display:flex; flex-direction:column; gap:12px; margin:2px 0; -webkit-overflow-scrolling:touch; }
-.au-libvazio{ padding:18px 4px; text-align:center; color:var(--dim); font-size:13px; }
-.au-libgrupo{ display:flex; flex-direction:column; gap:6px; }
+.au-lib:hover{ background:color-mix(in srgb, var(--go) 26%, var(--bg-1)); }
+/* painel deslizante: cola no rodapé, largura total no celular, centrado no desktop */
+.au-libsheet-wrap{ position:fixed; inset:0; z-index:320; background:rgba(0,0,0,.5); display:flex; align-items:flex-end; justify-content:center; }
+.au-libsheet{ width:100%; max-width:620px; max-height:88vh; display:flex; flex-direction:column; background:var(--bg-1); border:1px solid var(--line); border-bottom:none; border-radius:20px 20px 0 0; padding:8px 14px calc(14px + var(--safe-b)); animation:auB .2s ease both; box-shadow:0 -10px 40px rgba(0,0,0,.35); }
+.au-libgrab{ width:40px; height:4px; border-radius:99px; background:var(--line); margin:2px auto 8px; flex:none; }
+.au-libtop{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex:none; margin-bottom:8px; }
+.au-libtabs{ display:flex; gap:4px; background:var(--bg-0); border:1px solid var(--line); border-radius:12px; padding:3px; }
+.au-libtab{ appearance:none; border:none; background:none; color:var(--dim); font-size:14px; font-weight:800; padding:9px 18px; border-radius:9px; cursor:pointer; min-height:40px; -webkit-tap-highlight-color:transparent; }
+.au-libtab.on{ background:var(--go); color:#062015; }
+.au-libx{ width:40px; height:40px; flex:none; border-radius:50%; border:1px solid var(--line); background:var(--bg-0); color:var(--dim); display:grid; place-items:center; cursor:pointer; }
+.au-libbody{ flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; display:flex; flex-direction:column; gap:12px; padding:2px 0 4px; }
+.au-libhint{ font-size:12.5px; color:var(--dim); line-height:1.45; }
+.au-libvazio{ padding:26px 8px; text-align:center; color:var(--dim); font-size:13.5px; line-height:1.5; }
+.au-libgrupo{ display:flex; flex-direction:column; gap:7px; }
 .au-libcat{ font-size:11px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color:var(--dim); padding:0 2px; }
-.au-libitem{ display:flex; align-items:flex-start; gap:10px; text-align:left; width:100%; border:1px solid var(--line); background:var(--bg-1); border-radius:12px; padding:10px 12px; cursor:pointer; color:var(--ink); -webkit-tap-highlight-color:transparent; transition:border-color .15s, background .15s; }
-.au-libitem:active{ transform:scale(.99); }
-.au-libitem:hover{ border-color:var(--go); }
-.au-libtag{ flex:none; margin-top:2px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.03em; color:var(--go); border:1px solid color-mix(in srgb, var(--go) 45%, transparent); border-radius:6px; padding:2px 6px; }
+.au-libitem{ display:flex; align-items:flex-start; gap:10px; text-align:left; width:100%; border:1px solid var(--line); background:var(--bg-0); border-radius:13px; padding:12px 13px; cursor:pointer; color:var(--ink); min-height:52px; -webkit-tap-highlight-color:transparent; transition:border-color .15s, background .15s; }
+.au-libitem:active{ transform:scale(.99); background:color-mix(in srgb, var(--go) 8%, var(--bg-0)); }
+.au-libtag{ flex:none; margin-top:1px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.03em; color:var(--go); border:1px solid color-mix(in srgb, var(--go) 45%, transparent); border-radius:6px; padding:2px 6px; }
 .au-libtxt{ display:flex; flex-direction:column; gap:2px; min-width:0; }
-.au-libnome{ font-size:14px; font-weight:700; color:var(--ink); }
+.au-libnome{ font-size:14.5px; font-weight:700; color:var(--ink); }
 .au-libsub{ font-size:12px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
-.au-libhead{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
-.au-libger{ flex:none; border:1px solid var(--line); background:var(--bg-1); color:var(--dim); border-radius:9px; padding:6px 12px; font-size:12.5px; font-weight:700; cursor:pointer; }
-.au-libger:hover{ color:var(--ink); border-color:var(--go); }
 .au-pgo:disabled{ opacity:.55; cursor:default; }
 .au-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--go); animation:auSpin .7s linear infinite; }
 .au-spin.lg{ width:20px; height:20px; border-color:rgba(6,32,21,.35); border-top-color:#062015; }
