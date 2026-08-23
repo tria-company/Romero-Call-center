@@ -9,6 +9,7 @@ import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, enviarAudioPa
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
 import { listarConteudos } from "@/lib/conteudos-real";
 import type { ConteudoReal } from "@/lib/conteudos-real";
+import { BibliotecaConteudos } from "./BibliotecaConteudos";
 import { Autobox, Vhead } from "./blocos";
 // 2026-08-19: tocar no NOME da conversa abre a ficha (dossiê + histórico) como
 // overlay — mesma PerfilLead da Base, em modo embutido (sem navegar, o chat
@@ -180,6 +181,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   const [conteudos, setConteudos] = React.useState<ConteudoReal[]>([]);
   const [conteudosCarregando, setConteudosCarregando] = React.useState(false);
   const [conteudosCarregou, setConteudosCarregou] = React.useState(false);
+  const [gerenciarConteudos, setGerenciarConteudos] = React.useState(false);
 
   async function abrirConteudos() {
     setConteudosAberto(true);
@@ -1621,8 +1623,13 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           onClick={() => setConteudosAberto(false)}
         >
           <div className="au-pcard au-libcard" onClick={(e) => e.stopPropagation()}>
-            <div className="au-ptit au-libtit-h">
-              <FolderOpen size={17} /> Conteúdos prontos
+            <div className="au-libhead">
+              <div className="au-ptit au-libtit-h">
+                <FolderOpen size={17} /> Conteúdos prontos
+              </div>
+              <button type="button" className="au-libger" onClick={() => setGerenciarConteudos(true)}>
+                Gerenciar
+              </button>
             </div>
             <div className="au-phint">Toque para inserir no campo — você revisa e envia.</div>
             <div className="au-liblist">
@@ -1654,6 +1661,18 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* tela de GESTÃO dos conteúdos (Fatia 3): abre por cima do sheet; ao
+          fechar, recarrega a lista do seletor pra refletir o que mudou. */}
+      {gerenciarConteudos && (
+        <BibliotecaConteudos
+          aoFechar={() => {
+            setGerenciarConteudos(false);
+            setConteudosCarregou(false);
+            void abrirConteudos();
+          }}
+        />
       )}
     </>
   );
@@ -1752,6 +1771,9 @@ const AU_CSS = `
 .au-libtxt{ display:flex; flex-direction:column; gap:2px; min-width:0; }
 .au-libnome{ font-size:14px; font-weight:700; color:var(--ink); }
 .au-libsub{ font-size:12px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+.au-libhead{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.au-libger{ flex:none; border:1px solid var(--line); background:var(--bg-1); color:var(--dim); border-radius:9px; padding:6px 12px; font-size:12.5px; font-weight:700; cursor:pointer; }
+.au-libger:hover{ color:var(--ink); border-color:var(--go); }
 .au-pgo:disabled{ opacity:.55; cursor:default; }
 .au-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--go); animation:auSpin .7s linear infinite; }
 .au-spin.lg{ width:20px; height:20px; border-color:rgba(6,32,21,.35); border-top-color:#062015; }
