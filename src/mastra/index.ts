@@ -1193,6 +1193,56 @@ export const mastra = new Mastra({
                 numero: numeroOp,
               }
             : undefined;
+          // u-v13: rastro estruturado best-effort em anotacoes_ligacao pro
+          // fluxo WhatsApp (o fluxo tel já grava a própria linha via
+          // /anotacao — quick tdj — daí o guard "[tel" abaixo). AUTOCONTIDO:
+          // nunca lança, nunca muda o status HTTP; roda DEPOIS do sucesso do
+          // caminho principal, nos dois ramos FONTE_LIGACOES (T-v13-01/02/03/04).
+          const gravarAnotacaoDesfecho = async () => {
+            try {
+              if (String(body.observacao || '').includes('[tel')) return;
+              let resultadoAnotacao: string;
+              let observacaoAnotacao: string | null;
+              if (resultado === 'recusou') {
+                resultadoAnotacao = 'recusou';
+                observacaoAnotacao = motivo?.observacao
+                  ? `Recusada pelo lead — ${motivo.observacao}`
+                  : 'Recusada pelo lead';
+              } else if (resultado === 'nao_atendida') {
+                if (motivo?.categoria) {
+                  resultadoAnotacao = 'nao_atendida';
+                  observacaoAnotacao = `${motivo.categoria}${motivo.observacao ? ' — ' + motivo.observacao : ''}`;
+                } else {
+                  // recarimbo sem motivo (retentativa, não-terminal) —
+                  // distinguível do "não atendeu com motivo".
+                  resultadoAnotacao = 'nao_atendida_retentativa';
+                  observacaoAnotacao = null;
+                }
+              } else {
+                resultadoAnotacao = 'atendida';
+                observacaoAnotacao = motivo?.observacao ?? null;
+              }
+              await inserirAnotacaoLigacao({
+                ligacao_task_id: taskId,
+                lead_task_id: null,
+                operador: sess.usuario,
+                canal: 'whatsapp',
+                resultado: resultadoAnotacao,
+                observacao: observacaoAnotacao,
+                classificacao: null,
+                demanda: null,
+                apos_whatsapp: null,
+                super_fa: null,
+              });
+            } catch (eSupabase) {
+              // LGPD: nunca logar taskId/telefone/observacao — só a mensagem
+              // genérica (mesmo padrão do best-effort de /anotacao).
+              console.error(
+                '[discador] falha best-effort ao gravar anotacao de desfecho no Supabase:',
+                eSupabase instanceof Error ? eSupabase.message : String(eSupabase),
+              );
+            }
+          };
           try {
             await registrarDesfecho(taskId, assignee, resultado, motivo);
             // Métrica "chamadas por número" (Fase 1): conta 1 chamada por DESFECHO,
@@ -1209,6 +1259,7 @@ export const mastra = new Mastra({
             await removerDaFilaCache(assignee, taskId);
             await invalidarFilaCache(assignee);
             derrubarFilaMem(assignee);
+            await gravarAnotacaoDesfecho();
             return c.json({ status: 'ok' });
           } catch (e) {
             // LGPD: nunca logar telefone/CPF/taskId em claro — so a mensagem
