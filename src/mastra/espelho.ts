@@ -46,6 +46,8 @@ import {
   OPER_STATUS_EM_PROCESSAMENTO,
   LOTE_LIMITE_TENTATIVAS,
   FONTE_LIGACOES,
+  FONTE_LEADS,
+  FONTE_AUDIOS,
 } from './config.ts';
 
 export interface ResultadoSyncEspelho {
@@ -391,23 +393,55 @@ async function paginarESincronizar<TRow>(args: {
  * o `status` (de volta pra `aberta`) e o `resultado` — exatamente o clobber que o teste
  * ClickUp-morto do 19-10 exporia. Então o mirror de `ligacoes` vira no-op sob `supabase`.
  *
- * As OUTRAS listas (leads/audios) NÃO têm este guard — elas só invertem na Phase 20;
- * até lá o espelho segue populando `discador_leads_espelho`/`audios_envios` normalmente.
- * Sob `clickup` (default), o mirror de `ligacoes` segue idêntico.
+ * As OUTRAS listas (leads/audios) ganham o MESMO guard, por-agregado e independente
+ * (`leadsEspelhoDesativado`/`audiosEspelhoDesativado`, Phase 20 Plano 06, logo abaixo) —
+ * cada `FONTE_*` gateia só o próprio agregado, nunca arrasta os outros (R10). Sob
+ * `clickup` (default) em todos os três, o mirror segue idêntico.
  */
 export function ligacoesEspelhoDesativado(fonte: string = FONTE_LIGACOES): boolean {
   return fonte === 'supabase';
 }
 
+/**
+ * WR-B generalizado (Fase C, Phase 20 Plano 06) — mesmo racional de
+ * `ligacoesEspelhoDesativado` acima, agora para `discador_leads_espelho`: sob
+ * `FONTE_LEADS=supabase`, o Supabase passa a ser o writer AUTORITATIVO dos
+ * leads (a geração do lote por SQL, `gerar_lote`/`selecionarLoteElegiveisSupabase`,
+ * escreve/lê `elegivel`/`retorno_necessario`/`score`/`tentativas` direto na
+ * tabela). Se o sync espelho ClickUp→Supabase continuasse rodando depois do
+ * flip, um upsert leria a linha stale do ClickUp e SOBRESCREVERIA esses
+ * campos — o mesmo clobber que o WR-B original evitou para `ligacoes`. Sob
+ * `clickup` (default), o mirror de leads segue idêntico.
+ */
+export function leadsEspelhoDesativado(fonte: string = FONTE_LEADS): boolean {
+  return fonte === 'supabase';
+}
+
+/**
+ * WR-B generalizado (Fase C, Phase 20 Plano 06) — mesmo racional acima para
+ * `audios_envios`: sob `FONTE_AUDIOS=supabase`, as RPCs `registrar_envio_audio`/
+ * `registrar_mensagem_texto` (20-03) passam a escrever `audios_envios` direto.
+ * Sob `clickup` (default), o mirror de áudios segue idêntico.
+ */
+export function audiosEspelhoDesativado(fonte: string = FONTE_AUDIOS): boolean {
+  return fonte === 'supabase';
+}
+
 /** Deps injetáveis (seam de teste offline — gap-19-12): em produção nada é passado, e
  *  os defaults (`listarTasksComRetry`/upserts reais/`FONTE_LIGACOES`) valem. O smoke passa
- *  fakes pra contar upserts e forçar a `fonte` sem tocar rede nem env do processo. */
+ *  fakes pra contar upserts e forçar a `fonte` sem tocar rede nem env do processo.
+ *  `fonte` continua servindo o guard de `ligacoes` (retrocompatível); `fonteLeads`/
+ *  `fonteAudios` são o mesmo seam para os 2 novos guards (20-06) — campos distintos
+ *  porque os 3 agregados invertem/rollback de forma independente (R10), nunca poderiam
+ *  compartilhar uma única chave de override sem acoplar o rollback de um ao dos outros. */
 export interface DepsSyncEspelho {
   listar?: typeof listarTasksComRetry;
   upsertLeads?: typeof upsertLeadFullEspelho;
   upsertLigacoes?: typeof upsertLigacoesEspelho;
   upsertAudios?: typeof upsertAudiosEnvios;
   fonte?: string;
+  fonteLeads?: string;
+  fonteAudios?: string;
 }
 
 /** Sincroniza `discador_leads_espelho` com o registro COMPLETO da Lista 01 (§2.3) —
@@ -417,6 +451,14 @@ export async function sincronizarEspelhoLeads(
   opts: OpcoesSyncEspelho = {},
   deps: DepsSyncEspelho = {},
 ): Promise<ResultadoSyncEspelho> {
+  if (leadsEspelhoDesativado(deps.fonteLeads ?? FONTE_LEADS)) {
+    // LGPD-safe: só a decisão de gating, nenhum dado do lead.
+    console.log(
+      '[espelho:leads] pulado — FONTE_LEADS=supabase: Supabase é o writer de discador_leads_espelho; ' +
+        're-espelhar do ClickUp sobrescreveria elegivel/retorno_necessario/score/tentativas nativos (WR-B)',
+    );
+    return { paginas: 0, registros: 0, ultimaPagina: 0 };
+  }
   const agora = new Date().toISOString();
   return paginarESincronizar<LeadFullEspelhoRow>({
     listId: CLICKUP_LIST_LEADS,
@@ -451,11 +493,20 @@ export async function sincronizarEspelhoLigacoes(
   });
 }
 
-/** Sincroniza `audios_envios` a partir da Lista 03 AUDIOS (§2.2) — upsert por `clickup_task_id`. */
+/** Sincroniza `audios_envios` a partir da Lista 03 AUDIOS (§2.2) — upsert por `clickup_task_id`.
+ *  WR-B (20-06): no-op quando `FONTE_AUDIOS=supabase` (ver `audiosEspelhoDesativado`). */
 export async function sincronizarEspelhoAudios(
   opts: OpcoesSyncEspelho = {},
   deps: DepsSyncEspelho = {},
 ): Promise<ResultadoSyncEspelho> {
+  if (audiosEspelhoDesativado(deps.fonteAudios ?? FONTE_AUDIOS)) {
+    // LGPD-safe: só a decisão de gating, nenhum dado do áudio.
+    console.log(
+      '[espelho:audios] pulado — FONTE_AUDIOS=supabase: Supabase é o writer de audios_envios; ' +
+        're-espelhar do ClickUp sobrescreveria selo_conversa/transcricao_audio nativos (WR-B)',
+    );
+    return { paginas: 0, registros: 0, ultimaPagina: 0 };
+  }
   return paginarESincronizar<AudioEnvioRow>({
     listId: CLICKUP_LIST_AUDIOS,
     mapear: (task) => paraLinhaAudio(task),
