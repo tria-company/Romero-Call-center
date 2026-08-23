@@ -27,6 +27,12 @@ import {
   // na mesma tx) — /voto (caminho ligação) e /lead/:id/voto (caminho lead,
   // regra determinística p_ligacao_id=null) consomem a MESMA RPC.
   SUPABASE_RPC_REGISTRAR_VOTO,
+  // Fase C (Phase 20, 20-05): flag por-agregado 'audios' (default 'clickup',
+  // flip só no 20-08) + nomes das RPCs do Caminho B que as 2 rotas de escrita
+  // de áudio/mensagem chamam via comOutboxRpc quando FONTE_AUDIOS='supabase'.
+  FONTE_AUDIOS,
+  SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO,
+  SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO,
 } from './config';
 // Helper transacional único do Caminho B (Portão 1, Fase 18/19): toda
 // mutação de `ligacoes` sob FONTE_LIGACOES='supabase' vira UMA chamada
@@ -823,6 +829,13 @@ import {
   // rotas abaixo faz try/catch e loga-e-segue (nunca quebra o fluxo ClickUp).
   inserirAnotacaoLigacao,
   marcarSuperFaEspelho,
+  // Fase C (Phase 20, 20-04/20-05): LEITURAS de áudios/conversa atrás de
+  // FONTE_AUDIOS — mesmo contrato JSON das funções ClickUp que substituem
+  // (buscarLeadsNuncaLigados/mapaConversaPorLead/listarEnviosAudioDoLead),
+  // sem cruzar as 3 listas do ClickUp (LEITURA-04).
+  buscarLeadsNuncaLigadosSupabase,
+  mapaConversaPorLeadSupabase,
+  listarEnviosAudioDoLeadSupabase,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -2495,10 +2508,28 @@ export const mastra = new Mastra({
           const gate = await sessaoRomero(c);
           if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
           try {
-            const { leads, origens } = await buscarLeadsNuncaLigadosCacheado();
+            // Fase C (20-05): sob FONTE_AUDIOS='supabase' a lista vem do
+            // anti-join lead_id (LEITURA-04) em vez da varredura cruzada de 3
+            // listas do ClickUp. MESMO shape { leads, origens } — origens
+            // sempre [] sob supabase (débito de schema, 20-04). Caminho
+            // 'clickup' (default) intacto.
+            const { leads, origens } =
+              FONTE_AUDIOS === 'supabase' ? await buscarLeadsNuncaLigadosSupabase() : await buscarLeadsNuncaLigadosCacheado();
             // Selo por lead (Fase 13 fatia 2): agrega a Lista 03 (cache 60s);
-            // falha do mapa NÃO derruba a lista (selo sai neutro).
-            const mapa = await mapaConversaCacheado();
+            // falha do mapa NÃO derruba a lista (selo sai neutro). Sob
+            // supabase: mesma leitura de audios_envios (20-04), mesmo
+            // fail-open (selo neutro) — mapaConversaPorLeadSupabase LANÇA em
+            // erro de infra (WR-03), o handler decide degradar aqui.
+            const mapa =
+              FONTE_AUDIOS === 'supabase'
+                ? await mapaConversaPorLeadSupabase().catch((e) => {
+                    console.warn(
+                      '[discador] mapa de conversa (supabase) falhou (selo fica neutro):',
+                      e instanceof Error ? e.message : String(e),
+                    );
+                    return null;
+                  })
+                : await mapaConversaCacheado();
             // Última mensagem por lead (2026-08-19): ordena como WhatsApp (quem
             // falou por último no topo) + bolinha de "esperando resposta".
             // Falha aqui só tira a ordenação — nunca derruba a lista.
@@ -2542,8 +2573,21 @@ export const mastra = new Mastra({
           if (!assignee) return c.json({ leads: [], semMapeamento: true });
           try {
             // resiliente: fresca por 20s; ClickUp fora → última cópia boa.
+            // A fila em si (buscarFilaResiliente, Ligações do operador) já
+            // ramifica por FONTE_LIGACOES em quem a alimenta (19-09) — fora do
+            // escopo de FONTE_AUDIOS. Só o selo de conversa (Lista 03/
+            // audios_envios) inverte aqui.
             const fila = await buscarFilaResiliente(assignee);
-            const mapa = await mapaConversaCacheado();
+            const mapa =
+              FONTE_AUDIOS === 'supabase'
+                ? await mapaConversaPorLeadSupabase().catch((e) => {
+                    console.warn(
+                      '[discador] mapa de conversa (supabase) falhou (selo fica neutro, fila):',
+                      e instanceof Error ? e.message : String(e),
+                    );
+                    return null;
+                  })
+                : await mapaConversaCacheado();
             const ultimas = await ultimasMensagensWhatsapp().catch((e) => {
               console.warn('[discador] últimas mensagens indisponíveis (fila):', e instanceof Error ? e.message : String(e));
               return null;
