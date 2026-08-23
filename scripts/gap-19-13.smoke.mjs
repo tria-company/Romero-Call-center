@@ -240,8 +240,9 @@ async function testePrimitivasCas() {
     );
 
     // marcarOrphanEnviando conta a representação das linhas convertidas.
+    // (Fase C, Phase 20 Plano 02: assinatura ganhou o parâmetro `aggregate`.)
     global.fetch = async () => okJson([{ id: 1 }, { id: 2 }]);
-    const n = await repo.marcarOrphanEnviando(42);
+    const n = await repo.marcarOrphanEnviando('ligacao', 42);
     checar(n === 2, `(d) marcarOrphanEnviando deve retornar a contagem convertida — recebido ${n}`);
   } finally {
     global.fetch = fetchReal;

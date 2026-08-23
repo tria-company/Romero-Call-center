@@ -26,8 +26,23 @@ import {
   SUPABASE_SERVICE_KEY,
   SUPABASE_TABLE_CLICKUP_OUTBOX,
   SUPABASE_TABLE_LIGACOES,
+  SUPABASE_TABLE_AUDIOS_ENVIOS,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
+
+// ===== Fase C, Phase 20 Plano 02 — generalização multi-agregado =====
+//
+// Só 'ligacao' e 'audio' têm `criar_task`+back-fill (a task-alvo AINDA NÃO
+// existe, o dreno cria e persiste o `clickup_task_id` de volta). 'lead' e
+// 'nota' NUNCA criam task nova — a lead/ligação já existe no ClickUp, o alvo
+// vem de `payload.clickup_task_id` (drenar-outbox.ts resolve isso, não este
+// módulo). `TABELA_DO_AGREGADO` é privado — só os dois agregados com
+// back-fill entram aqui; qualquer outro aggregate passado a
+// `resolverClickupTaskId`/`backfillClickupTaskId` LANÇA.
+const TABELA_DO_AGREGADO: Record<string, string> = {
+  ligacao: SUPABASE_TABLE_LIGACOES,
+  audio: SUPABASE_TABLE_AUDIOS_ENVIOS,
+};
 
 // Endpoint REST montado do env — instância self-hosted, nunca hardcoded (D-P4-11).
 export const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
@@ -94,18 +109,23 @@ export async function proximasPendentes(aggregateId: number): Promise<LinhaOutbo
 
 /**
  * Resolve o `clickup_task_id` JÁ gravado do aggregate (o back-fill de
- * `criar_task` grava aqui; ops seguintes leem daqui). Só o aggregate
- * `'ligacao'` é suportado nesta fase (as tabelas de `lead`/`audio`/`nota`
- * ainda não existem — débito de fases futuras); qualquer outro aggregate
- * LANÇA (nunca finge resolver). `null` é resultado LEGÍTIMO ("ainda não
- * criada"), distinto de erro (WR-03).
+ * `criar_task` grava aqui; ops seguintes leem daqui). Suporta `'ligacao'`
+ * e `'audio'` (Fase C, Phase 20 Plano 02) — os únicos dois agregates com
+ * `criar_task`+back-fill. `'lead'`/`'nota'` NUNCA resolvem por tabela — a
+ * task-alvo delas já existe e vem de `payload.clickup_task_id`
+ * (drenar-outbox.ts); chamar isto para esses dois LANÇA (nunca finge
+ * resolver). `null` é resultado LEGÍTIMO ("ainda não criada"), distinto de
+ * erro (WR-03).
  */
 export async function resolverClickupTaskId(aggregate: string, aggregateId: number): Promise<string | null> {
   checarConfig();
-  if (aggregate !== 'ligacao') {
-    throw new Error(`[outbox-repo] resolverClickupTaskId: aggregate '${aggregate}' ainda não suportado`);
+  const tabela = TABELA_DO_AGREGADO[aggregate];
+  if (!tabela) {
+    throw new Error(
+      `[outbox-repo] resolverClickupTaskId: aggregate '${aggregate}' não resolve por tabela — a task-alvo vem do payload (clickup_task_id já existente)`,
+    );
   }
-  const url = `${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?id=eq.${aggregateId}&select=clickup_task_id`;
+  const url = `${SUPABASE_REST_URL}/${tabela}?id=eq.${aggregateId}&select=clickup_task_id`;
   let res: Response;
   try {
     res = await fetchTimeout(url, { headers: headers() });
@@ -122,15 +142,21 @@ export async function resolverClickupTaskId(aggregate: string, aggregateId: numb
 }
 
 /**
- * Grava o `clickup_task_id` resolvido pelo `criar_task` na linha de
- * `ligacoes` — SÓ quando ainda `null` (`&clickup_task_id=is.null` no
+ * Grava o `clickup_task_id` resolvido pelo `criar_task` na linha da tabela
+ * do aggregate (`'ligacao'`→`ligacoes`, `'audio'`→`audios_envios`, Fase C
+ * Phase 20 Plano 02) — SÓ quando ainda `null` (`&clickup_task_id=is.null` no
  * filtro): nunca sobrescreve um id já gravado (idempotência do back-fill,
  * reprocesso do mesmo `criar_task` não troca o id existente). LANÇA em
- * config ausente/erro de rede/HTTP (WR-03).
+ * aggregate sem tabela de back-fill (`'lead'`/`'nota'`) ou em config
+ * ausente/erro de rede/HTTP (WR-03).
  */
-export async function backfillClickupTaskId(aggregateId: number, taskId: string): Promise<void> {
+export async function backfillClickupTaskId(aggregate: string, aggregateId: number, taskId: string): Promise<void> {
   checarConfig();
-  const url = `${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?id=eq.${aggregateId}&clickup_task_id=is.null`;
+  const tabela = TABELA_DO_AGREGADO[aggregate];
+  if (!tabela) {
+    throw new Error(`[outbox-repo] backfillClickupTaskId: aggregate '${aggregate}' não tem tabela de back-fill`);
+  }
+  const url = `${SUPABASE_REST_URL}/${tabela}?id=eq.${aggregateId}&clickup_task_id=is.null`;
   let res: Response;
   try {
     res = await fetchTimeout(url, {
@@ -364,21 +390,23 @@ export async function marcarOrphan(aggregate: string, aggregateId: number): Prom
 }
 
 /**
- * WR-A (19-13) — linhas de `criar_task` PRESAS em `enviando` de UM aggregate
- * `ligacao`. Uma linha aqui significa que o dreno reivindicou a linha (claim,
- * `pendente`→`enviando`) e MORREU antes do back-fill do `clickup_task_id`
- * (crash na janela `criarTask`→`backfillClickupTaskId`). `proximasPendentes`
- * NÃO as devolve (lê só `pendente`/`erro`), então esta leitura é o único jeito
- * de o dreno detectá-las e roteá-las para reconciliação — NUNCA re-criar. O
- * filtro `aggregate=eq.ligacao` protege contra colisão numérica de
- * `aggregate_id` entre tabelas (ligacoes.id vs leads.id). LANÇA em config
- * ausente/erro de rede/HTTP (WR-03).
+ * WR-A (19-13) — linhas de `criar_task` PRESAS em `enviando` de UM
+ * `(aggregate, aggregateId)`. Uma linha aqui significa que o dreno
+ * reivindicou a linha (claim, `pendente`→`enviando`) e MORREU antes do
+ * back-fill do `clickup_task_id` (crash na janela `criarTask`→
+ * `backfillClickupTaskId`). `proximasPendentes` NÃO as devolve (lê só
+ * `pendente`/`erro`), então esta leitura é o único jeito de o dreno
+ * detectá-las e roteá-las para reconciliação — NUNCA re-criar. O `aggregate`
+ * passado por PARÂMETRO (Fase C, Phase 20 Plano 02 — antes hardcoded
+ * `'ligacao'`) protege contra colisão numérica de `aggregate_id` entre
+ * tabelas (`ligacoes.id` vs `audios_envios.id` são sequências
+ * INDEPENDENTES). LANÇA em config ausente/erro de rede/HTTP (WR-03).
  */
-export async function linhasPresasEnviando(aggregateId: number): Promise<LinhaOutbox[]> {
+export async function linhasPresasEnviando(aggregate: string, aggregateId: number): Promise<LinhaOutbox[]> {
   checarConfig();
   const url =
     `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}` +
-    `?aggregate=eq.ligacao&aggregate_id=eq.${aggregateId}&op=eq.criar_task&status=eq.enviando&order=seq.asc`;
+    `?aggregate=eq.${encodeURIComponent(aggregate)}&aggregate_id=eq.${aggregateId}&op=eq.criar_task&status=eq.enviando&order=seq.asc`;
   let res: Response;
   try {
     res = await fetchTimeout(url, { headers: headers() });
@@ -395,20 +423,23 @@ export async function linhasPresasEnviando(aggregateId: number): Promise<LinhaOu
 
 /**
  * WR-A (19-13) — reconciliação: converte as linhas `criar_task` presas em
- * `enviando` de UM aggregate `ligacao` em `orphan` (CAS por `status=eq.enviando`).
- * Chamada pelo dreno quando detecta um crash na janela `criarTask`→back-fill
- * SEM `clickup_task_id` resolvido: a task PODE ter sido criada no ClickUp mas
- * ficou descorrelacionada — a linha vira um ÓRFÃO DETECTÁVEL (reconciliável
- * pelo scanner/alerta do 19-06), NUNCA uma DUPLICATA. Converge com o mesmo
- * estado terminal de `marcarOrphan` (a ação de operador do 19-06), mas partindo
- * de `enviando` (aquela parte de `pendente`/`erro`). Retorna quantas linhas
- * foram convertidas. LANÇA em config ausente/erro de rede/HTTP (WR-03).
+ * `enviando` de UM `(aggregate, aggregateId)` em `orphan` (CAS por
+ * `status=eq.enviando`). Chamada pelo dreno quando detecta um crash na
+ * janela `criarTask`→back-fill SEM `clickup_task_id` resolvido: a task PODE
+ * ter sido criada no ClickUp mas ficou descorrelacionada — a linha vira um
+ * ÓRFÃO DETECTÁVEL (reconciliável pelo scanner/alerta do 19-06), NUNCA uma
+ * DUPLICATA. Converge com o mesmo estado terminal de `marcarOrphan` (a ação
+ * de operador do 19-06), mas partindo de `enviando` (aquela parte de
+ * `pendente`/`erro`). `aggregate` por PARÂMETRO (Fase C, Phase 20 Plano 02 —
+ * antes hardcoded `'ligacao'`), mesmo racional de `linhasPresasEnviando`.
+ * Retorna quantas linhas foram convertidas. LANÇA em config ausente/erro de
+ * rede/HTTP (WR-03).
  */
-export async function marcarOrphanEnviando(aggregateId: number): Promise<number> {
+export async function marcarOrphanEnviando(aggregate: string, aggregateId: number): Promise<number> {
   checarConfig();
   const url =
     `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CLICKUP_OUTBOX}` +
-    `?aggregate=eq.ligacao&aggregate_id=eq.${aggregateId}&op=eq.criar_task&status=eq.enviando`;
+    `?aggregate=eq.${encodeURIComponent(aggregate)}&aggregate_id=eq.${aggregateId}&op=eq.criar_task&status=eq.enviando`;
   let res: Response;
   try {
     res = await fetchTimeout(url, {

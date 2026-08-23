@@ -192,7 +192,7 @@ export async function processarDrenoOutboxJob(
  * NUNCA loga payload — só a contagem e o `aggregateId`.
  */
 async function reconciliarCriarTaskPresa(aggregateId: number): Promise<void> {
-  const presas = await linhasPresasEnviando(aggregateId);
+  const presas = await linhasPresasEnviando('ligacao', aggregateId);
   if (presas.length === 0) return;
 
   const idPersistido = await resolverClickupTaskId('ligacao', aggregateId);
@@ -208,7 +208,7 @@ async function reconciliarCriarTaskPresa(aggregateId: number): Promise<void> {
 
   // Crash entre criarTask e o back-fill: id NÃO resolvido. A task pode existir
   // no ClickUp descorrelacionada — NUNCA re-cria; converte em órfão detectável.
-  const orfas = await marcarOrphanEnviando(aggregateId);
+  const orfas = await marcarOrphanEnviando('ligacao', aggregateId);
   console.warn(
     `[drenar-outbox] WR-A: ${orfas} criar_task presa(s) em 'enviando' SEM clickup_task_id resolvido (crash entre criarTask e back-fill) — roteada(s) para reconciliação/órfão (19-06), NÃO re-criada(s) (aggregateId=${aggregateId})`,
   );
@@ -287,7 +287,7 @@ async function processarLinha(
       // — não sobrescreve) e retorna true para o caller marcar `enviado` e
       // fechar a linha. NÃO consome token do dreno (não há saída ao ClickUp).
       if (taskIdAtual) {
-        await backfillClickupTaskId(aggregateId, taskIdAtual);
+        await backfillClickupTaskId('ligacao', aggregateId, taskIdAtual);
         return true;
       }
       // Adquire o token do dreno ANTES do claim: se o teto global bloqueia
@@ -318,7 +318,7 @@ async function processarLinha(
         );
       }
       setTaskId(nova.id);
-      await backfillClickupTaskId(aggregateId, nova.id);
+      await backfillClickupTaskId('ligacao', aggregateId, nova.id);
       return true;
     }
 
