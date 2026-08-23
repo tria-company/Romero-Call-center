@@ -1,12 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, CheckCheck, Clock, Mic, Pause, Phone, Play, RotateCcw, Search, Send, SkipForward, X } from "lucide-react";
+import { ArrowLeft, CheckCheck, Clock, FolderOpen, Mic, Pause, Phone, Play, RotateCcw, Search, Send, SkipForward, X } from "lucide-react";
 import { iniciais } from "@/lib/leads-util";
 import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { iniciarLigacaoReal, preaquecerDossieLead, useLeadReal } from "@/lib/leads-real";
 import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
+import { listarConteudos, enviarConteudoParaLead } from "@/lib/conteudos-real";
+import type { ConteudoReal } from "@/lib/conteudos-real";
+import { BibliotecaConteudos } from "./BibliotecaConteudos";
 import { Autobox, Vhead } from "./blocos";
 // 2026-08-19: tocar no NOME da conversa abre a ficha (dossiê + histórico) como
 // overlay — mesma PerfilLead da Base, em modo embutido (sem navegar, o chat
@@ -169,6 +172,58 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     setPularAlvo(null);
     setPularMotivo("");
   }
+
+  /* Biblioteca de conteúdos (Fase 2 do roadmap): mensagens/links prontos que o
+     Felipe deixa cadastrados; o Romero abre a "pasta" na conversa, escolhe e o
+     conteúdo entra no campo de texto pra revisar e enviar. Carrega sob demanda
+     ao abrir — nunca bloqueia a conversa; falha vira lista vazia. */
+  const [conteudosAberto, setConteudosAberto] = React.useState(false);
+  const [conteudos, setConteudos] = React.useState<ConteudoReal[]>([]);
+  const [conteudosCarregando, setConteudosCarregando] = React.useState(false);
+  const [conteudosCarregou, setConteudosCarregou] = React.useState(false);
+  const [gerenciarConteudos, setGerenciarConteudos] = React.useState(false);
+
+  async function abrirConteudos() {
+    setConteudosAberto(true);
+    if (conteudosCarregou || conteudosCarregando) return;
+    setConteudosCarregando(true);
+    const lista = await listarConteudos();
+    setConteudos(lista);
+    setConteudosCarregando(false);
+    setConteudosCarregou(true);
+  }
+
+  /* Escolher um conteúdo:
+     - TEXTO/LINK → INSERE no campo (o operador revisa e toca enviar; reusa o
+       fluxo de texto existente). Anexa ao que já estiver digitado.
+     - IMAGEM/VÍDEO/ÁUDIO → envio NATIVO one-tap (não dá pra "inserir" mídia no
+       campo de texto): manda direto via /conteudos/:id/enviar e recarrega a
+       conversa. */
+  async function escolherConteudo(cnt: ConteudoReal) {
+    if (cnt.tipo === "imagem" || cnt.tipo === "video" || cnt.tipo === "audio") {
+      setConteudosAberto(false);
+      if (!leadAberto) return;
+      const alvo = leadAberto.leadTaskId;
+      const ok = await enviarConteudoParaLead(cnt.id, alvo);
+      if (ok) window.setTimeout(() => void atualizarConversa(alvo, true), 1200);
+      return;
+    }
+    const trecho = cnt.tipo === "link" ? (cnt.url ?? "") : (cnt.texto ?? "");
+    if (trecho) setTextoDigitado((t) => (t.trim() ? t + "\n" : "") + trecho);
+    setConteudosAberto(false);
+  }
+
+  // agrupa por categoria pra render (categoria vazia vira "Geral").
+  const conteudosPorCategoria = React.useMemo(() => {
+    const grupos = new Map<string, ConteudoReal[]>();
+    for (const c of conteudos) {
+      const cat = (c.categoria ?? "").trim() || "Geral";
+      const arr = grupos.get(cat) ?? [];
+      arr.push(c);
+      grupos.set(cat, arr);
+    }
+    return [...grupos.entries()];
+  }, [conteudos]);
 
   // "Apareça 10 e vá carregando" — por ROLAGEM (2026-08-19): o sentinela no fim
   // da lista (`au-more`) revela +10 ao entrar na viewport, no lugar do timer de
@@ -396,7 +451,15 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
      dois botões de microfone (modo fast e conversa). */
   function alternarGravacao() {
     if (estadoGravacao === "gravando") pararGravacao();
-    else if (estadoGravacao === "vazio") {
+    else if (estadoGravacao === "vazio" || estadoGravacao === "preview") {
+      // "preview" entra aqui quando o áudio já foi enviado a ESTE lead
+      // (Audios.tsx:1215 esconde o ramo "regravar" nesse caso e mostra o
+      // microfone) — sem este ramo o toque virava no-op e o microfone
+      // ficava morto para o mesmo lead. iniciarGravacao() sobrescreve
+      // audioBase64/audioUrl quando a gravação termina, então o novo áudio
+      // não bate mais com audioEnviadoPorLead[lead] e a barra reabre o
+      // envio — o áudio ANTIGO continua ofertável aos PRÓXIMOS leads (D-03),
+      // pois a marca é por lead.
       porToqueRef.current = true;
       iniciarGravacao();
     }
@@ -1249,6 +1312,18 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             </>
           ) : (
             <>
+              {/* biblioteca de conteúdos prontos (Fase 2): abre o bottom-sheet;
+                  escolher insere texto/link no campo pra revisar e enviar. */}
+              {!gravando && (
+                <button
+                  type="button"
+                  className="au-lib"
+                  onClick={() => void abrirConteudos()}
+                  aria-label="Biblioteca de conteúdos prontos"
+                >
+                  <FolderOpen size={20} />
+                </button>
+              )}
               <div className={"au-field" + (gravando ? " rec" : "")}>
                 {gravando ? (
                   <>
@@ -1555,6 +1630,69 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
           </div>
         </div>
       )}
+
+      {/* ── bottom-sheet da BIBLIOTECA DE CONTEÚDOS (Fase 2): lista os prontos
+            por categoria; tocar INSERE no campo de texto pra revisar e enviar. ── */}
+      {conteudosAberto && (
+        <div
+          className="au-pmodal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Biblioteca de conteúdos"
+          onClick={() => setConteudosAberto(false)}
+        >
+          <div className="au-pcard au-libcard" onClick={(e) => e.stopPropagation()}>
+            <div className="au-libhead">
+              <div className="au-ptit au-libtit-h">
+                <FolderOpen size={17} /> Conteúdos prontos
+              </div>
+              <button type="button" className="au-libger" onClick={() => setGerenciarConteudos(true)}>
+                Gerenciar
+              </button>
+            </div>
+            <div className="au-phint">Toque para inserir no campo — você revisa e envia.</div>
+            <div className="au-liblist">
+              {conteudosCarregando ? (
+                <div className="au-libvazio">Carregando…</div>
+              ) : conteudos.length === 0 ? (
+                <div className="au-libvazio">Nenhum conteúdo cadastrado ainda.</div>
+              ) : (
+                conteudosPorCategoria.map(([cat, itens]) => (
+                  <div key={cat} className="au-libgrupo">
+                    <div className="au-libcat">{cat}</div>
+                    {itens.map((cnt) => (
+                      <button key={cnt.id} type="button" className="au-libitem" onClick={() => void escolherConteudo(cnt)}>
+                        <span className="au-libtag">{cnt.tipo === "link" ? "link" : "texto"}</span>
+                        <span className="au-libtxt">
+                          <span className="au-libnome">{cnt.titulo}</span>
+                          <span className="au-libsub">{cnt.tipo === "link" ? (cnt.url ?? "") : (cnt.texto ?? "")}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="au-pacts">
+              <button type="button" className="seg" onClick={() => setConteudosAberto(false)}>
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* tela de GESTÃO dos conteúdos (Fatia 3): abre por cima do sheet; ao
+          fechar, recarrega a lista do seletor pra refletir o que mudou. */}
+      {gerenciarConteudos && (
+        <BibliotecaConteudos
+          aoFechar={() => {
+            setGerenciarConteudos(false);
+            setConteudosCarregou(false);
+            void abrirConteudos();
+          }}
+        />
+      )}
     </>
   );
 
@@ -1635,6 +1773,26 @@ const AU_CSS = `
 .au-perro{ font-size:12.5px; color:var(--alert); font-weight:700; }
 .au-pacts{ display:flex; gap:8px; justify-content:flex-end; align-items:center; }
 .au-pgo{ display:inline-flex; align-items:center; gap:6px; border:none; border-radius:12px; padding:10px 14px; background:var(--alert); color:#fff; font-weight:800; font-size:13px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+/* ── Biblioteca de conteúdos (Fase 2) ── */
+.au-lib{ width:42px; height:42px; border-radius:50%; flex:none; border:1px solid var(--line); cursor:pointer; background:var(--bg-1); color:var(--dim); display:grid; place-items:center; transition:transform .1s, color .2s, border-color .2s; }
+.au-lib:active{ transform:scale(.92); }
+.au-lib:hover{ color:var(--ink); border-color:var(--go); }
+.au-libcard{ max-height:min(72vh, 620px); }
+.au-libtit-h{ color:var(--ink); }
+.au-liblist{ overflow-y:auto; display:flex; flex-direction:column; gap:12px; margin:2px 0; -webkit-overflow-scrolling:touch; }
+.au-libvazio{ padding:18px 4px; text-align:center; color:var(--dim); font-size:13px; }
+.au-libgrupo{ display:flex; flex-direction:column; gap:6px; }
+.au-libcat{ font-size:11px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color:var(--dim); padding:0 2px; }
+.au-libitem{ display:flex; align-items:flex-start; gap:10px; text-align:left; width:100%; border:1px solid var(--line); background:var(--bg-1); border-radius:12px; padding:10px 12px; cursor:pointer; color:var(--ink); -webkit-tap-highlight-color:transparent; transition:border-color .15s, background .15s; }
+.au-libitem:active{ transform:scale(.99); }
+.au-libitem:hover{ border-color:var(--go); }
+.au-libtag{ flex:none; margin-top:2px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.03em; color:var(--go); border:1px solid color-mix(in srgb, var(--go) 45%, transparent); border-radius:6px; padding:2px 6px; }
+.au-libtxt{ display:flex; flex-direction:column; gap:2px; min-width:0; }
+.au-libnome{ font-size:14px; font-weight:700; color:var(--ink); }
+.au-libsub{ font-size:12px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+.au-libhead{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.au-libger{ flex:none; border:1px solid var(--line); background:var(--bg-1); color:var(--dim); border-radius:9px; padding:6px 12px; font-size:12.5px; font-weight:700; cursor:pointer; }
+.au-libger:hover{ color:var(--ink); border-color:var(--go); }
 .au-pgo:disabled{ opacity:.55; cursor:default; }
 .au-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--go); animation:auSpin .7s linear infinite; }
 .au-spin.lg{ width:20px; height:20px; border-color:rgba(6,32,21,.35); border-top-color:#062015; }

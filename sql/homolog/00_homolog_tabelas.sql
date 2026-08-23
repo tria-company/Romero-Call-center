@@ -69,9 +69,20 @@ alter table hml_discador_leads_espelho
   add column if not exists tags text[],
   add column if not exists elegivel boolean;
 
+-- ============================================================================
+-- Fase 2 (roadmap) — biblioteca de conteúdos recorrentes (escala/27).
+-- REQUER que sql/escala/27_conteudos.sql já tenha sido aplicado em PROD (o LIKE
+-- abaixo exige `conteudos` já existir): aplicar a migração 27 ANTES de re-aplicar
+-- este arquivo.
+-- ============================================================================
+create table if not exists hml_conteudos (like conteudos including all);
+-- Fase 3 (escala/29): flag "Romero já falou" também no espelho de homolog.
+alter table hml_discador_leads_espelho add column if not exists romero_ja_falou boolean not null default false;
+
 -- Escrita via PostgREST é feita como `service_role` (o backend). NUNCA conceder
--- a anon/authenticated: estas tabelas contêm telefone/CPF (mesma disciplina de
--- LGPD do espelho de produção).
+-- a anon/authenticated: a maioria destas tabelas contém telefone/CPF (mesma
+-- disciplina de LGPD do espelho de produção); hml_conteudos não tem dado pessoal,
+-- mas segue o mesmo grant restrito por consistência.
 grant all on table
   hml_discador_leads_espelho,
   hml_votos_ligacao,
@@ -84,6 +95,7 @@ grant all on table
   hml_clickup_campo_mapa,
   hml_notas,
   hml_anotacoes_ligacao,
-  hml_transcricoes_ligacao
+  hml_transcricoes_ligacao,
+  hml_conteudos
   to service_role;
 notify pgrst, 'reload schema';

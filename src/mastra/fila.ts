@@ -19,11 +19,14 @@
 // derruba o webhook. Nunca loga telefone/CPF/payload nem a REDIS_URL — so
 // ids (whatsappCallId, eventoDuravelId) e a classe do erro.
 
+import { createHash } from 'node:crypto';
+
 import { Queue } from 'bullmq';
 import {
   REDIS_URL,
-  FILA_ATTEMPTS,
   FILA_BACKOFF_MS,
+  FILA_BACKOFF_CAP_MS,
+  FILA_MAX_TENTATIVAS,
   FILA_NOME,
   ALERT_WEBHOOK_URL,
 } from './config.ts';
@@ -35,6 +38,16 @@ export interface DadosJobRecord {
   payload: Record<string, any>;
   eventoDuravelId: string | null; // linha webhook_eventos, p/ o job fechar o desfecho
   deviceId?: string; // DEVICE-03/DD-07-15: capturado no enqueue (lerCorrelacaoDevice), imune ao TTL entre CALL e RECORD
+  /**
+   * Fase 19.1 Plano 08 (DUR-02/06/07): taskId da Ligacao JA RESOLVIDO no
+   * enqueue (index.ts, branch RECORD do webhook) — correlacao DURAVEL, imune
+   * ao TTL de 6h da correlacao Redis telefone->task (mesmo racional do
+   * `telefone` acima). processarRecordJob (processador.ts) PREFERE este
+   * campo; so cai pro fallback (lerTaskAtiva/buscarLigacaoAbertaPorTelefone)
+   * quando ausente (compat com job antigo, gravado antes deste deploy, que
+   * nao tem o campo). Opcional de proposito.
+   */
+  taskId?: string;
 }
 
 export interface DadosJobFalhaTerminal {
@@ -109,18 +122,67 @@ export function conexaoFilaProducer(): object | null {
 }
 
 /**
- * Opcoes de job aplicadas em todo `queue.add` — retry com backoff
- * exponencial (FILA-03) e retencao dos jobs. `removeOnFail: false` MANTEM
- * os jobs falhos no set `failed` do BullMQ — esse set E a DLQ inspecionavel
- * (FILA-04), nunca descartada automaticamente.
+ * Curva de backoff PURA do retry-infinito (Fase 19.1 Plano 04, DUR-01) —
+ * exponencial a partir de FILA_BACKOFF_MS (5s), saturando em
+ * FILA_BACKOFF_CAP_MS (1h): 5s -> 10s -> 20s -> 40s -> ... -> capado. Zero
+ * I/O (mesmo espirito de classificar-erro.ts) — o worker (19.1-04) registra
+ * essa funcao como `settings.backoffStrategy` do BullMQ (a estrategia
+ * nomeada 'capado' em `opcoesJob()` abaixo delega a ela); esta funcao E o
+ * que a smoke (retry-durabilidade.smoke.mjs) importa e testa isolada, sem
+ * tocar worker.ts (que faz process.exit em modo inline).
+ */
+export function calcularBackoffCapado(attemptsMade: number): number {
+  return Math.min(FILA_BACKOFF_MS * 2 ** Math.max(0, attemptsMade - 1), FILA_BACKOFF_CAP_MS);
+}
+
+/**
+ * Opcoes de job aplicadas em todo `queue.add`. Fase 19.1 Plano 04
+ * (DUR-01, decisao travada do dono da operacao — "volta pra fila ate
+ * conseguir, nada se perde"): `attempts: FILA_MAX_TENTATIVAS` (~1_000_000)
+ * substitui o antigo FILA_ATTEMPTS=3 — um erro TRANSITORIO re-tenta pra
+ * SEMPRE na pratica; um erro PERMANENTE classificado (worker.ts,
+ * classificar-erro.ts) estaciona IMEDIATO via UnrecoverableError, sem
+ * depender de esgotar tentativas. `backoff: { type: 'capado' }` e a
+ * estrategia NOMEADA registrada no Worker (19.1-04) via
+ * `settings.backoffStrategy`, delegando a `calcularBackoffCapado` acima —
+ * BullMQ exige backoff customizado registrado no Worker, nao pode ser um
+ * objeto de funcao serializado no job. `removeOnFail: false` MANTEM os jobs
+ * verdadeiramente falhos (estacionados/legado esgotado) no set `failed` do
+ * BullMQ — essa DLQ continua inspecionavel (FILA-04), nunca descartada
+ * automaticamente. Jobs antigos da fila (criados antes deste deploy, com
+ * opts `attempts:3`/`backoff:exponential` ja gravados no job) continuam
+ * re-tentaveis com o valor que tinham no enqueue — migracao suave, sem
+ * quebrar NOME_FILA.
  */
 export function opcoesJob(): object {
   return {
-    attempts: FILA_ATTEMPTS,
-    backoff: { type: 'exponential', delay: FILA_BACKOFF_MS },
+    attempts: FILA_MAX_TENTATIVAS,
+    backoff: { type: 'capado' },
     removeOnComplete: { count: 1000 },
     removeOnFail: false,
   };
+}
+
+/**
+ * jobId versionado por conteudo do sync-clickup (C6, Fase 19.1 Plano 04,
+ * DUR-04) — helper PURO exportado (a smoke o testa isolado). Bug original:
+ * `sync:voto:{taskId}` fixo + `removeOnFail:false` faz o BullMQ IGNORAR um
+ * `add()` futuro do mesmo taskId enquanto o job antigo (failed/completed)
+ * ainda existir na fila — um re-voto do MESMO lead era engolido em
+ * silencio. Fix: versiona o jobId pelo CONTEUDO do voto
+ * (`sync:voto:{taskId}:{hashCurtoDoVoto}`) — um voto NOVO (conteudo
+ * diferente) gera jobId diferente, nao colide com o job morto do voto
+ * anterior. Um re-enqueue IDENTICO (mesmo taskId + mesmo voto, ex. reentrega
+ * do mesmo webhook) ainda gera o MESMO jobId — continua coalescendo
+ * (dedup de enqueue original preservado). Hash apenas para achatar o jobId
+ * (nao e segredo/PII — voto e so romero/andressa sim/nao/naoDeclarou).
+ */
+export function jobIdVoto(taskId: string, voto: DadosJobSyncClickup['voto']): string {
+  const hash = createHash('sha256')
+    .update(JSON.stringify({ romero: voto.romero ?? null, andressa: voto.andressa ?? null }))
+    .digest('hex')
+    .slice(0, 8);
+  return `sync:voto:${taskId}:${hash}`;
 }
 
 // ===== Queue BullMQ — instanciacao lazy singleton (so em modo bullmq) =====
@@ -191,11 +253,13 @@ export async function enfileirarFalhaTerminal(
  * Enfileira o job de sync ClickUp (CACHE-03, Fase 08 Plano 03) — espelha o
  * voto pos-ligacao no ClickUp fora do caminho da requisicao. Mesmo molde de
  * `enfileirarRecord`: fail-open p/ inline sem Redis ou em erro de enqueue em
- * runtime (o caller grava sincrono, D-07/SC5). jobId = `sync:voto:{taskId}`
- * (dedup idempotente — o ULTIMO voto enfileirado vence; um segundo enqueue
- * do mesmo taskId antes do primeiro ser consumido substitui o job pendente
- * em vez de empilhar). Reusa `opcoesJob()` (backoff exponencial + DLQ,
- * D-08) e a MESMA fila `NOME_FILA` (Discretion D-07 — sem fila propria).
+ * runtime (o caller grava sincrono, D-07/SC5). jobId = `jobIdVoto(taskId,
+ * voto)` (C6, Fase 19.1 Plano 04 — versionado por conteudo do voto, nao mais
+ * fixo por taskId): um re-voto de CONTEUDO diferente pro mesmo taskId gera
+ * jobId novo, nao e bloqueado pelo job morto (failed/completed) do voto
+ * anterior; um re-enqueue IDENTICO ainda coalesce no mesmo jobId. Reusa
+ * `opcoesJob()` (retry-infinito + backoff capado + DLQ, Fase 19.1 Plano 04)
+ * e a MESMA fila `NOME_FILA` (Discretion D-07 — sem fila propria).
  */
 export async function enfileirarSyncClickup(
   dados: DadosJobSyncClickup,
@@ -204,7 +268,7 @@ export async function enfileirarSyncClickup(
   try {
     await garantirFila().add('sync-clickup', dados, {
       ...opcoesJob(),
-      jobId: 'sync:voto:' + dados.taskId,
+      jobId: jobIdVoto(dados.taskId, dados.voto),
     });
     return { enfileirado: true };
   } catch (e) {
@@ -272,9 +336,11 @@ export async function enfileirarDrenoOutbox(
 
 /**
  * Alerta de DLQ (FILA-04) — chamado pelo worker (06-04) quando um job
- * esgota FILA_ATTEMPTS. SEMPRE loga uma linha estruturada `[ALERTA][DLQ]`
- * (nunca telefone/CPF/payload — so ids e a classe do erro). Se
- * ALERT_WEBHOOK_URL estiver setado, faz tambem um POST best-effort com o
+ * realmente cai no set `failed` do BullMQ (Fase 19.1 Plano 04: permanente
+ * estacionado via UnrecoverableError, ou job legado que esgotou o
+ * FILA_ATTEMPTS baked no enqueue antigo). SEMPRE loga uma linha estruturada
+ * `[ALERTA][DLQ]` (nunca telefone/CPF/payload — so ids e a classe do erro).
+ * Se ALERT_WEBHOOK_URL estiver setado, faz tambem um POST best-effort com o
  * mesmo payload sem PII — nunca relanca (alerta e observabilidade, nunca
  * derruba o worker).
  */

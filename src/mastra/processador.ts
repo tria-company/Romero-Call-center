@@ -74,11 +74,13 @@ import {
   type EscolhaVoto,
 } from './clickup.ts';
 
-import { transcreverCallUrl } from './deepgram.ts';
+import { transcreverGravacaoLocal, montarParamsListen } from './deepgram.ts';
+
+import { guardarGravacao, baixarGravacao } from './gravacao-store.ts';
 
 import { mascararTelefone } from './mascarar.ts';
 
-import { registrarErroEtapa, registrarSucessoEtapa } from './metricas.ts';
+import { registrarErroEtapa, registrarSucessoEtapa, registrarEstacionamentoCorrelacao } from './metricas.ts';
 
 import {
   derivarAtendeu,
@@ -595,6 +597,28 @@ export async function processarFalhaTerminalJob(dados: DadosJobFalhaTerminal): P
   await marcarCallFalhaProcessada(dados.whatsappCallId);
 }
 
+/**
+ * Fase 19.1 Plano 08 (DUR-02/06/07) — decide o taskId da Ligacao de um RECORD
+ * a partir dos 3 candidatos possiveis, na ordem de preferencia (mais duravel
+ * primeiro): `taskIdData` (resolvido no ENQUEUE, index.ts — imune ao TTL de
+ * 6h da correlacao Redis, mesmo racional do `telefone` ja capturado no job),
+ * `taskIdRedis` (map in-memory/estado-webhook.ts, TTL 6h), `taskIdClickup`
+ * (fallback persistido — Ligacao aberta com o mesmo TELEFONE). Nenhum dos 3
+ * resolvido -> `{ estacionar: true }`: o caller NAO cria mais uma Ligacao
+ * avulsa as cegas (troca a avulsa-as-cegas por park-para-humano, mais
+ * conservador — decisao travada do dono da operacao, "nada se perde sem
+ * decisao humana"). Funcao PURA (zero I/O) — testavel isolada pela smoke
+ * (correlacao-durabilidade.smoke.mjs) sem precisar de Redis/ClickUp reais.
+ */
+export function decidirTaskIdRecord(cands: {
+  taskIdData?: string | null;
+  taskIdRedis?: string | null;
+  taskIdClickup?: string | null;
+}): { taskId?: string; estacionar: boolean } {
+  const taskId = cands.taskIdData || cands.taskIdRedis || cands.taskIdClickup || undefined;
+  return taskId ? { taskId, estacionar: false } : { estacionar: true };
+}
+
 // ===== processarRecordJob — transcricao + Agente Analise + Agente Contexto =====
 // (OPER-01..05, D-P3-01..15, FILA-02/FILA-05)
 
@@ -623,51 +647,79 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // a reentrega do BullMQ/reprocesso re-transcreve e consolida do zero.
   if (await recordJaProcessado(callId)) return;
 
-  // D-06: instrumenta a etapa 'transcricao' — o try/catch preserva a
-  // propagacao pro BullMQ contar a tentativa (nao muda semantica de
-  // throw/retry); transcreverCallUrl hoje engole falhas internas e retorna
-  // null (nao lanca), entao o path "!transcricao" abaixo TAMBEM conta como
-  // erro real da etapa (o unico sinal de falha que este helper expoe).
-  let transcricao: Awaited<ReturnType<typeof transcreverCallUrl>>;
+  // Fase 19.1 Plano 03 (DUR-05/DUR-06, C4 do CONTEXT.md): grava a COPIA
+  // PROPRIA da gravacao (Supabase Storage, guardarGravacao) ANTES de
+  // transcrever, e transcreve a partir da NOSSA copia (baixarGravacao +
+  // transcreverGravacaoLocal) — nunca mais direto do storage.wavoip.com.
+  // guardarGravacao e IDEMPOTENTE (HEAD confere se o object ja existe): um
+  // retry (worker do plano 19.1-04) NAO re-baixa do Wavoip, so re-le a nossa
+  // copia (mata a classe inteira 411/degradacao/expiracao do storage
+  // terceiro). Em falha, RE-LANCAMOS o MESMO erro (preserva a causa
+  // especifica — host/status — em vez do "transcricao falhou" generico de
+  // antes, a causa das 18 gravacoes presas de 22/08 nunca ter sido isolada)
+  // para o worker classificar (classificarErro) e decidir re-tentar
+  // (transitorio) ou estacionar (permanente).
+  //
+  // ACOPLAMENTO com o plano 19.1-04 (comentado aqui, nao alterado — quem e
+  // dono do worker/finalizarRecordSemTranscricao e aquele plano): sob
+  // retry-infinito, o desfecho-por-esgotamento abaixo
+  // (finalizarRecordSemTranscricao) deixa de se aplicar a erro transitorio
+  // (nunca esgota) — so entra em jogo quando o worker classifica a causa como
+  // permanente e decide estacionar.
+  let transcricao: string;
+  // quick-260822-ubk: path da cópia canônica hoisted p/ fora do try — vira o
+  // storage_path da linha estruturada em transcricoes_ligacao (mais abaixo).
+  let storagePathGravacao: string | null = null;
   try {
-    transcricao = await transcreverCallUrl(recordUrl);
+    const path = await guardarGravacao(callId, recordUrl);
+    storagePathGravacao = path;
+    const fonte = await baixarGravacao(path);
+    transcricao = await transcreverGravacaoLocal(fonte, montarParamsListen());
   } catch (e) {
     registrarErroEtapa('transcricao');
+    // WR-01: so a mensagem classificavel (host/status), nunca telefone/URL crua.
+    console.warn(`[processador] transcricao falhou (call=${callId}):`, e instanceof Error ? e.message : String(e));
     throw e;
-  }
-  if (!transcricao) {
-    // Retentavel: nada foi marcado (a marca so vem no fim) — o retry futuro
-    // simplesmente re-roda e transcreve. WR-01: nunca telefone cru, so o call.
-    registrarErroEtapa('transcricao');
-    console.warn(`[processador] transcricao falhou (call=${callId})`);
-    throw new Error(`transcricao falhou call=${callId}`);
   }
   registrarSucessoEtapa('transcricao');
 
-  // D-P3-01: resolve a task da Ligacao — 1) map in-memory (task reportada em
-  // /api/discador/ligando), 2) fallback persistido no ClickUp (Ligacao
-  // aberta com o mesmo TELEFONE), 3) D-P3-03: nao casou nenhuma -> cria uma
-  // Ligacao avulsa (nenhuma ligacao real fica sem registro).
-  let taskId = await lerTaskAtiva(telefone, dados.deviceId);
-  if (!taskId) {
+  // Fase 19.1 Plano 08 (DUR-02/06/07): correlacao DURAVEL — prefere
+  // `dados.taskId` (resolvido NA HORA DO ENQUEUE, index.ts, imune ao TTL de
+  // 6h da correlacao Redis telefone->task: retries de qualquer idade, mesmo
+  // >6h, nao dependem mais do TTL). So cai pro fallback in-memory/ClickUp
+  // quando ausente (compat com job antigo, gravado antes deste deploy, sem o
+  // campo). D-P3-03 REVISADO: nao casou NENHUM dos 3 -> ja NAO cria mais
+  // Ligacao avulsa as cegas (podia chutar a ligacao errada) — ESTACIONA
+  // (throw classificado permanente) para decisao humana. O registro cru fica
+  // em webhook_eventos + o job parkeado (worker 19.1-04, [ALERTA][ESTACIONADO]);
+  // o resgate (scripts/resgatar-sem-correlacao.mjs, T2) reconstroi a
+  // correlacao via ClickUp (telefone+data) depois.
+  const taskIdRedis = dados.taskId ? null : await lerTaskAtiva(telefone, dados.deviceId);
+  let taskIdClickup: string | null = null;
+  if (!dados.taskId && !taskIdRedis) {
     try {
-      taskId = await buscarLigacaoAbertaPorTelefone(telefone);
+      taskIdClickup = await buscarLigacaoAbertaPorTelefone(telefone);
     } catch (e) {
       console.error('[processador] falha ao buscar Ligacao aberta por telefone:', e);
     }
   }
-  if (!taskId) {
-    try {
-      const avulsa = await criarLigacaoAvulsa(telefone);
-      taskId = avulsa.id;
-    } catch (e) {
-      // Criar a avulsa e o unico jeito de nao perder o registro desta
-      // gravacao (D-P3-03) — se ISSO falhar, lanca (retentavel, mesmo efeito
-      // do 502 de hoje). CR-02: nada foi marcado ainda, o retry re-roda limpo.
-      console.error('[processador] falha ao criar Ligacao avulsa:', e);
-      throw e instanceof Error ? e : new Error(String(e));
-    }
+  const decisaoTaskId = decidirTaskIdRecord({
+    taskIdData: dados.taskId ?? null,
+    taskIdRedis,
+    taskIdClickup,
+  });
+  if (decisaoTaskId.estacionar) {
+    // Fase 19.1 Plano 08 Task 3 (DUR-02/06): contador durável ANTES do log +
+    // throw — observabilidade do ramo (nunca lança, sem PII).
+    registrarEstacionamentoCorrelacao();
+    // WR-01: SO o callId (LGPD) — nunca telefone.
+    console.warn(`[processador] RECORD sem correlacao resolvivel (call=${callId}) — estacionando para decisao humana`);
+    // Mensagem ESTAVEL — classificarErro (classificar-erro.ts) mapeia
+    // 'sem correlacao call' para permanente; o worker (19.1-04) vira
+    // UnrecoverableError e estaciona com [ALERTA][ESTACIONADO].
+    throw new Error(`sem correlacao call→task (call=${callId})`);
   }
+  const taskId = decisaoTaskId.taskId as string;
 
   // D-P3-04: grava a transcricao (field TRANSCRICAO + comentario),
   // substituindo a nota no GHL. Loga-e-segue (nao trava a cadeia por uma
@@ -799,10 +851,9 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     call_id: callId,
     ligacao_task_id: taskId,
     lead_task_id: leadTaskIdTranscricao,
-    // Nota de topologia (ver plano): homolog não tem cópia canônica
-    // (guardarGravacao só existe na main, Fase 19.1) — storage_path fica
-    // null aqui; a main popula no cherry-pick.
-    storage_path: null,
+    // main (Fase 19.1): cópia canônica no Supabase Storage — path hoisted do
+    // try de transcrição acima (guardarGravacao).
+    storage_path: storagePathGravacao,
     url_gravacao_wavoip: recordUrl,
     transcricao,
     analise_ia: resultadoAnalise ?? null,
@@ -846,9 +897,13 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
 // (FILA-04, OPER-05; wired no worker.on('failed')/branch tentativasEsgotadas/job.name==='record')
 
 /**
- * Desfecho GRACIOSO de um RECORD cuja transcricao esgotou as 3 tentativas do
- * BullMQ (transcreverCallUrl devolveu null a cada retry -> processarRecordJob
- * lancou -> tentativas esgotadas -> DLQ). Em vez de deixar a Ligacao ZUMBI
+ * Desfecho GRACIOSO de um RECORD cuja transcricao esgotou as tentativas do
+ * BullMQ (guardarGravacao/transcreverGravacaoLocal lancou a cada retry ->
+ * processarRecordJob relancou -> tentativas esgotadas -> DLQ). Fase 19.1
+ * Plano 03: sob retry-infinito (plano 19.1-04) este desfecho deixa de valer
+ * para causa TRANSITORIA (nunca esgota) — permanece para quando o worker
+ * classifica a causa como PERMANENTE e decide estacionar. Em vez de deixar a
+ * Ligacao ZUMBI
  * presa em "em processamento" para sempre (observado em producao), FECHA a
  * Ligacao (status complete), sinaliza NECESSITA_REVISAO=true + MOTIVO_FALHA e
  * MANTEM a URL da gravacao gravada na Ligacao para reprocesso manual futuro.

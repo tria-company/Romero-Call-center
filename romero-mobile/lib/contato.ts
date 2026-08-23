@@ -93,16 +93,34 @@ export function vibrar(ms = 8) {
 }
 
 /**
- * Copia o telefone em E.164 (`+55…`) pra área de transferência — ação
- * "Copiar número" do fallback tel: (D-02). Tenta `navigator.clipboard`
- * primeiro; sem suporte (ou falha), cai pro fallback `execCommand('copy')`
- * via `<textarea>` temporário. Retorna `false` sem lançar quando o telefone
- * não normaliza ou nenhum dos dois caminhos funciona. NUNCA loga o telefone.
+ * Dígitos DDI+DDD completos, SEM o prefixo `+` (ex.: 81987654321 →
+ * "5581987654321") — formato pra "Copiar número" (quick-260822-rht,
+ * UX-DDD). `null` quando `paraE164` não deriva DDD (cadastro incompleto na
+ * FONTE); a UI decide o aviso, este helper não inventa DDD.
+ *
+ * DECISÃO de formato: dígitos DDI+DDD sem `+`, não `+55…`. A operação é
+ * WhatsApp-first — "Copiar número" existe pra colar e abrir conversa/novo
+ * contato no WhatsApp, que aceita o número internacional colado sem o `+`
+ * (e com ele também, mas sem é o que cola direto numa busca de contato). A
+ * discagem nativa (E.164 com `tel:`) já é servida pelo botão dedicado
+ * "Ligar pelo telefone" via `linkTelefone`, que não muda.
+ */
+export function telefoneParaCopia(bruto: string | undefined | null): string | null {
+  return paraE164(bruto);
+}
+
+/**
+ * Copia o telefone COMPLETO com DDD (dígitos DDI+DDD, sem `+`) pra área de
+ * transferência — ação "Copiar número" do fallback tel: (D-02, revisado em
+ * quick-260822-rht/UX-DDD: antes copiava `+E.164`, sub-ótimo pra colar no
+ * WhatsApp). Tenta `navigator.clipboard` primeiro; sem suporte (ou falha),
+ * cai pro fallback `execCommand('copy')` via `<textarea>` temporário.
+ * Retorna `false` sem lançar quando o telefone não normaliza (sem DDD
+ * derivável) ou nenhum dos dois caminhos funciona. NUNCA loga o telefone.
  */
 export async function copiarTelefone(bruto: string | undefined | null): Promise<boolean> {
-  const e164 = paraE164(bruto);
-  if (!e164) return false;
-  const texto = `+${e164}`;
+  const texto = telefoneParaCopia(bruto);
+  if (!texto) return false;
 
   try {
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {

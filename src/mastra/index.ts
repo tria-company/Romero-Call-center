@@ -149,6 +149,9 @@ import {
   // telefone (caminho ClickUp, sob FONTE_LIGACOES='clickup') — o par
   // Supabase (buscarLigacaoAbertaPorTelefoneSupabase, multi-candidato ±9º)
   // vem do import de './supabase' abaixo.
+  // Fase 19.1 Plano 08 (DUR-02/06): fallback persistido de correlação
+  // call->task, resolvido NA HORA DO ENQUEUE do RECORD (correlação durável,
+  // ver import de lerTaskAtiva abaixo).
   buscarLigacaoAbertaPorTelefone,
   // Canal de envio Evolution API + Lista de Áudios (Fase 12 Plano 03,
   // ENVIO-01/02/03/06): a rota GET usa a versão CACHEADA (quick 260818-perf:
@@ -196,6 +199,8 @@ import {
   baixarAudioMensagem,
   // Fase 13 (fatia 2): chat de texto.
   enviarTexto,
+  // Fase 5 (roadmap): envio nativo de mídia (imagem/vídeo/áudio) da biblioteca.
+  enviarMidia,
   // Alerta de queda do chip (2026-08-19): posta no grupo de operação via a
   // instância de ALERTA — caminho independente do chip principal.
   enviarAlertaGrupo,
@@ -693,7 +698,7 @@ async function buscarFilaResiliente(assignee: string): Promise<Awaited<ReturnTyp
 // /voto enfileira o job (worker espelha no ClickUp em <60s) com fallback
 // inline (processarSyncClickupJob) sem Redis (SC5).
 import { enfileirarSyncClickup, enfileirarDrenoOutbox } from './fila.ts';
-import { processarSyncClickupJob } from './sync-clickup.ts';
+import { processarSyncClickupJob, atribuirVotoDoLead } from './sync-clickup.ts';
 // Kick do dreno do outbox (ESCRITA-02, Fase B Plano 03/07): fallback INLINE
 // quando enfileirarDrenoOutbox devolve { enfileirado:false } (sem Redis) —
 // mesmo padrão de processarSyncClickupJob acima, nunca fire-and-forget
@@ -872,6 +877,7 @@ import {
   marcarEventoWebhook,
   listarLeadsEspelho,
   atualizarVotoEspelho,
+  marcarRomeroJaFalouEspelho,
   type RecorteEspelho,
   // Fase 13: conversa WhatsApp persistida (read-model + durabilidade do webhook Evolution)
   salvarMensagemWhatsapp,
@@ -939,6 +945,13 @@ import {
   // wrapper sobre comOutboxRpc(SUPABASE_RPC_CRIAR_LEAD); INSERT no espelho +
   // outbox 'lead'/'criar_task' na mesma tx (sql/escala/27_rpc_criar_lead.sql).
   criarLeadSupabase,
+  // Fase 2 (roadmap): biblioteca de conteúdos recorrentes (mensagens/links prontos).
+  listarConteudos,
+  buscarConteudo,
+  criarConteudo,
+  atualizarConteudo,
+  excluirConteudo,
+  type ConteudoInput,
 } from './supabase';
 import {
   cadastrosComCache,
@@ -971,6 +984,10 @@ import {
   guardarCorrelacaoDevice,
   lerCorrelacaoDevice,
   guardarTaskAtiva,
+  // Fase 19.1 Plano 08 (DUR-02/06): lê a task ativa NA HORA DO ENQUEUE do
+  // RECORD — mesma leitura que o processador já fazia inline, agora também
+  // no webhook, para tornar a correlação durável no próprio job.
+  lerTaskAtiva,
 } from './estado-webhook.ts';
 // Fila assincrona de processamento (Fase 06 Plano 01/03): os branches RECORD
 // e CALL-terminal enfileiram o trabalho pesado (transcricao/analise/
@@ -2052,7 +2069,7 @@ export const mastra = new Mastra({
           const cursor = c.req.query('cursor');
           const limit = Number(c.req.query('limit')) || 50;
           const recorteReq = c.req.query('recorte') || 'todos';
-          const recorte = (['romero', 'andressa', 'militante', 'sem-contato'].includes(recorteReq)
+          const recorte = (['romero', 'andressa', 'militante', 'sem-contato', 'romero-ja-falou'].includes(recorteReq)
             ? recorteReq
             : 'todos') as RecorteEspelho;
 
@@ -2355,6 +2372,19 @@ export const mastra = new Mastra({
             } catch (e) {
               console.error('[espelho] write-through do voto falhou (segue):', e instanceof Error ? e.message : String(e));
             }
+            // ATRIBUIÇÃO (votos_ligacao): É POR AQUI QUE O VOTO REALMENTE ENTRA.
+            //
+            // A instrumentação original foi para /api/discador/voto — a rota que recebe o
+            // taskId da Ligação. Só que o app mobile não usa aquela: a tela de perfil do
+            // lead chama `salvarVotoReal` -> /api/mobile/lead/:id/voto -> ESTA rota. Medido
+            // em 21/08: 27 apoiadores no ClickUp, 16 na tabela, e ZERO linhas com
+            // origem='ligacao' — a coluna "Votos" do ranking congelou no backfill enquanto
+            // o foguete subia, porque cada voto novo passava por aqui sem deixar rastro.
+            //
+            // Loga-e-segue, mesmo critério do espelho acima: o voto já está no ClickUp, que
+            // é a fonte da verdade, e uma falha na CONTABILIDADE não pode virar erro para
+            // quem acabou de marcar.
+            void atribuirVotoDoLead(leadTaskId, sess.usuario, { romero, andressa });
             // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
             derrubarLeadDetalheMem(leadTaskId);
             return c.json({ status: 'ok' });
@@ -2928,6 +2958,108 @@ export const mastra = new Mastra({
           }
         },
       },
+
+      // ============ API CONTEÚDOS (biblioteca de mensagens/links prontos) ============
+      // Fase 2 do roadmap. Mesmo gate romero-only das rotas de áudio (sessaoRomero).
+      // MVP: tipo in {texto,link} (imagem/vídeo/áudio ficam para fase posterior).
+      // Degrada gracioso quando o Supabase não está configurado (listar -> []).
+      {
+        path: '/api/discador/conteudos',
+        method: 'GET',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          try {
+            const categoria = c.req.query('categoria') || undefined;
+            const conteudos = await listarConteudos({ categoria });
+            return c.json({ conteudos });
+          } catch (e) {
+            console.error('[discador] erro ao listar conteudos:', e instanceof Error ? e.message : String(e));
+            // selo neutro: a UI de conversa nunca deve quebrar por causa da biblioteca.
+            return c.json({ conteudos: [] });
+          }
+        },
+      },
+      {
+        path: '/api/discador/conteudos',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const titulo = String(body.titulo || '').trim();
+          const tipo = body.tipo === 'link' ? 'link' : body.tipo === 'texto' ? 'texto' : '';
+          const texto = body.texto != null ? String(body.texto) : '';
+          const url = body.url != null ? String(body.url) : '';
+          if (!titulo) return c.json({ erro: 'titulo obrigatório' }, 400);
+          if (tipo !== 'texto' && tipo !== 'link') return c.json({ erro: "tipo deve ser 'texto' ou 'link'" }, 400);
+          if (tipo === 'link' && !url.trim()) return c.json({ erro: 'url obrigatória para tipo link' }, 400);
+          if (tipo === 'texto' && !texto.trim()) return c.json({ erro: 'texto obrigatório para tipo texto' }, 400);
+          try {
+            const conteudo = await criarConteudo({
+              categoria: body.categoria != null ? String(body.categoria) : null,
+              titulo,
+              tipo,
+              texto: texto || null,
+              url: url || null,
+              ordem: body.ordem != null ? Number(body.ordem) : 0,
+            });
+            if (!conteudo) return c.json({ erro: 'Biblioteca indisponível (Supabase não configurado)' }, 503);
+            return c.json({ conteudo });
+          } catch (e) {
+            console.error('[discador] erro ao criar conteudo:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao criar o conteúdo' }, 502);
+          }
+        },
+      },
+      {
+        path: '/api/discador/conteudos/:id',
+        method: 'PATCH',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          if (body.tipo !== undefined && body.tipo !== 'texto' && body.tipo !== 'link') {
+            return c.json({ erro: "tipo deve ser 'texto' ou 'link'" }, 400);
+          }
+          // aplica só os campos presentes no body (edição parcial).
+          const patch: Partial<ConteudoInput> = {};
+          if (body.categoria !== undefined) patch.categoria = body.categoria != null ? String(body.categoria) : null;
+          if (body.titulo !== undefined) patch.titulo = String(body.titulo);
+          if (body.tipo !== undefined) patch.tipo = body.tipo === 'link' ? 'link' : 'texto';
+          if (body.texto !== undefined) patch.texto = body.texto != null ? String(body.texto) : null;
+          if (body.url !== undefined) patch.url = body.url != null ? String(body.url) : null;
+          if (body.ordem !== undefined) patch.ordem = Number(body.ordem);
+          if (body.ativo !== undefined) patch.ativo = Boolean(body.ativo);
+          try {
+            const conteudo = await atualizarConteudo(id, patch);
+            if (!conteudo) return c.json({ erro: 'Conteúdo não encontrado' }, 404);
+            return c.json({ conteudo });
+          } catch (e) {
+            console.error('[discador] erro ao atualizar conteudo:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao atualizar o conteúdo' }, 502);
+          }
+        },
+      },
+      {
+        path: '/api/discador/conteudos/:id',
+        method: 'DELETE',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          try {
+            const ok = await excluirConteudo(id); // soft-delete (ativo=false)
+            if (!ok) return c.json({ erro: 'Biblioteca indisponível (Supabase não configurado)' }, 503);
+            return c.json({ ok: true });
+          } catch (e) {
+            console.error('[discador] erro ao excluir conteudo:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao excluir o conteúdo' }, 502);
+          }
+        },
+      },
+
       {
         // Estado real da instância dedicada Evolution — fonte do banner de
         // conexão (D-08): o banner NUNCA finge conectado. Uma falha na
@@ -3024,6 +3156,9 @@ export const mastra = new Mastra({
             // sessão fora, pra não instruir "reconecte o WhatsApp" à toa.
             return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
+          // Fase 3: "Romero já falou" — write-through no espelho (best-effort,
+          // fire-and-forget: o envio já aconteceu; a flag é conveniência de filtro).
+          void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
           // Fase C (20-05): sob FONTE_AUDIOS='supabase' o ENVIO PRIMÁRIO
           // (Evolution API, acima) já aconteceu IDÊNTICO — só o REGISTRO na
           // Lista 03 troca de registrarEnvioAudio (ClickUp direto) por
@@ -3193,6 +3328,8 @@ export const mastra = new Mastra({
             console.error('[discador] falha ao enviar texto via Evolution:', msg);
             return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
+          // Fase 3: "Romero já falou" — write-through no espelho (best-effort).
+          void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
           // Fase C (20-05): mesmo racional de /enviar acima — o ENVIO
           // PRIMÁRIO (Evolution, acima) já aconteceu IDÊNTICO; só o REGISTRO
           // troca de registrarMensagemTexto (ClickUp direto) por
@@ -3247,6 +3384,70 @@ export const mastra = new Mastra({
           }).catch((e) =>
             console.warn('[discador] persistência do texto falhou:', e instanceof Error ? e.message : String(e)),
           );
+          return c.json({ status: 'ok' });
+        },
+      },
+      {
+        // Envio NATIVO de um conteúdo da biblioteca (Fase 5) a um lead: texto via
+        // sendText; link via sendText (a URL); imagem/vídeo/áudio via sendMedia
+        // (URL). Mesmo gate romero + guard anti-IDOR das rotas de áudio/texto.
+        // Marca "Romero já falou" e persiste uma linha legível na conversa.
+        path: '/api/discador/conteudos/:id/enviar',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const leadId = String(body.leadId || '');
+          if (!leadId) return c.json({ erro: 'leadId obrigatório' }, 400);
+          let conteudo;
+          try {
+            conteudo = await buscarConteudo(id);
+          } catch (e) {
+            console.error('[discador] erro ao carregar conteudo pro envio:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar o conteúdo' }, 502);
+          }
+          if (!conteudo || !conteudo.ativo) return c.json({ erro: 'Conteúdo não encontrado' }, 404);
+          let telefoneE164: string;
+          try {
+            const task = await validarLeadDaLista01(leadId);
+            const telefoneRaw = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
+            const e164 = telefoneRaw ? normalizarTelefoneE164(telefoneRaw) : null;
+            if (!e164) return c.json({ erro: 'Lead sem telefone válido' }, 422);
+            telefoneE164 = e164;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado ? c.json({ erro: 'Lead não encontrado' }, 404) : c.json({ erro: 'Erro ao carregar o lead' }, 502);
+          }
+          const textoParaChat = conteudo.tipo === 'texto' ? (conteudo.texto ?? '') : (conteudo.url ?? '');
+          try {
+            if (conteudo.tipo === 'texto') {
+              if (!conteudo.texto) return c.json({ erro: 'Conteúdo de texto vazio' }, 422);
+              await enviarTexto(telefoneE164, conteudo.texto);
+            } else if (conteudo.tipo === 'link') {
+              if (!conteudo.url) return c.json({ erro: 'Conteúdo de link sem URL' }, 422);
+              await enviarTexto(telefoneE164, conteudo.url);
+            } else {
+              if (!conteudo.url) return c.json({ erro: 'Conteúdo de mídia sem URL' }, 422);
+              const mediatype = conteudo.tipo === 'imagem' ? 'image' : conteudo.tipo === 'video' ? 'video' : 'audio';
+              await enviarMidia(telefoneE164, { mediatype, media: conteudo.url, caption: conteudo.titulo || undefined });
+            }
+          } catch (e) {
+            console.error('[discador] falha ao enviar conteudo via Evolution:', e instanceof Error ? e.message : String(e));
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
+          }
+          void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
+          void salvarMensagemWhatsapp({
+            id: `conteudo-${id}-${leadId}-${Date.now()}`,
+            lead_task_id: leadId,
+            telefone_canonico: telefoneCanonico(telefoneE164),
+            de_nos: true,
+            ts: new Date().toISOString(),
+            tipo: 'texto',
+            texto: conteudo.tipo === 'texto' ? textoParaChat : `${conteudo.titulo}${textoParaChat ? ` — ${textoParaChat}` : ''}`,
+          }).catch((e) => console.warn('[discador] persistência do conteudo falhou:', e instanceof Error ? e.message : String(e)));
           return c.json({ status: 'ok' });
         },
       },
@@ -4163,7 +4364,23 @@ export const mastra = new Mastra({
               // RECORD (mesmo racional do telefone). null quando o device
               // nao foi derivavel (degrada telefone-so, DD-07-13).
               const deviceId = (await lerCorrelacaoDevice(whatsappCallId)) || undefined;
-              const dados: DadosJobRecord = { whatsappCallId, telefone, recordUrl, payload, eventoDuravelId, deviceId };
+              // Fase 19.1 Plano 08 (DUR-02/06): resolve a task ativa NA HORA
+              // DO ENQUEUE (mesmo ladder que o processador já fazia inline,
+              // lerTaskAtiva -> fallback ClickUp por telefone) e injeta no
+              // job — correlação DURÁVEL, imune ao TTL de 6h da correlação
+              // Redis telefone->task (mesmo racional do `telefone` acima).
+              // Best-effort: falha na resolução aqui não bloqueia o enqueue
+              // (processarRecordJob tem o MESMO fallback, compat com job sem
+              // taskId); undefined quando nenhuma das duas resolveu.
+              let taskId = (await lerTaskAtiva(telefone, deviceId)) || undefined;
+              if (!taskId) {
+                try {
+                  taskId = (await buscarLigacaoAbertaPorTelefone(telefone)) || undefined;
+                } catch (e) {
+                  console.error('[wavoip] falha ao resolver taskId no enqueue do RECORD (fallback no processador):', e);
+                }
+              }
+              const dados: DadosJobRecord = { whatsappCallId, telefone, recordUrl, payload, eventoDuravelId, deviceId, taskId };
               const { enfileirado } = await enfileirarRecord(dados);
               if (enfileirado) {
                 return c.json({ status: 'enfileirado' });

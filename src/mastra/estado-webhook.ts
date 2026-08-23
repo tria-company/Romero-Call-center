@@ -15,7 +15,21 @@
 // lanca para o chamador — Redis fora do ar em runtime degrada (read->miss,
 // write->no-op, marcar->fail-open), nunca derruba o webhook. Nunca loga
 // telefone/taskId cru nem a REDIS_URL — so o modo e, quando muito, o callId.
+//
+// F2 (Fase 19.1, LGPD): o NOME das chaves `wh:task:*` (task ativa, composta ou
+// telefone-so) carregava o telefone em CLARO — PII em repouso desnecessaria.
+// `chaveTelefone()` agora devolve um DIGEST sha256 truncado (nao mais os
+// digitos crus); os 6 call sites diretos (guardar/ler/limparTaskAtiva{Mem,
+// Redis}) e o composto `chaveTaskAtiva` herdam automaticamente por so
+// chamarem essa funcao. JANELA DE TRANSICAO do deploy: correlacoes vivas
+// gravadas por uma instancia anterior (chave = digitos crus) sobreviveriam
+// ate 6h (CORRELACAO_TTL_MS) sem essa mitigacao — as DUAS funcoes de LEITURA
+// (lerTaskAtivaMem/lerTaskAtivaRedis) tentam a chave digest primeiro e caem
+// na chave LEGADA (`chaveTelefoneLegado`, formato antigo) no miss. Escrita e
+// limpeza usam so o formato novo; as chaves legadas somem sozinhas pelo TTL —
+// o fallback de leitura vira dead-path depois de uma janela de 6h pos-deploy.
 
+import { createHash } from 'node:crypto';
 import Redis from 'ioredis';
 import { REDIS_URL } from './config.ts';
 
@@ -44,8 +58,38 @@ function semNonoDigito(digitos: string): string {
   return digitos;
 }
 
-/** Normaliza telefone para so-digitos, tolerante ao nono digito — mesma forma usada por telefoneDoEventoCall. */
-function chaveTelefone(telefone: string): string {
+/**
+ * sha256 truncado (16 hex chars = 64 bits) — determinístico, sem dependência
+ * nova (mesmo espírito do scrypt nativo de senha.ts, Fase 11). Exportado
+ * (função pura, sem I/O) só para o smoke F2 provar determinismo/formato —
+ * nenhum call site de produção precisa importar isto direto, todos passam
+ * por `chaveTelefone`.
+ */
+export function digestTelefone(digitos: string): string {
+  return createHash('sha256').update(digitos).digest('hex').slice(0, 16);
+}
+
+/**
+ * Chave de telefone p/ Redis/memoria — F2: devolve um DIGEST determinístico
+ * (nao mais os dígitos crus). Fronteira da mitigação de PII: TODOS os call
+ * sites que montam uma chave de telefone passam por aqui (guardar/ler/
+ * limparTaskAtiva{Mem,Redis} + o composto chaveTaskAtiva), então herdam o
+ * digest automaticamente. Determinístico sobre a MESMA normalização
+ * (semNonoDigito) — 12 e 13 dígitos do mesmo número BR caem no mesmo digest,
+ * então a correlação call->task é preservada. Exportada (pura, sem I/O) só
+ * para o smoke F2 provar ausência de dígitos crus no nome da chave.
+ */
+export function chaveTelefone(telefone: string): string {
+  return digestTelefone(semNonoDigito(telefone.replace(/[^\d]/g, '')));
+}
+
+/**
+ * F2 — formato ANTIGO da chave (dígitos crus, pré-digest). Usado SÓ pelo
+ * fallback de LEITURA durante a janela de transição do deploy (ver comentário
+ * do header do arquivo) — nunca usado por escrita/limpeza. Exportada (pura,
+ * sem I/O) só para o smoke F2 provar que ainda devolve os dígitos (fallback).
+ */
+export function chaveTelefoneLegado(telefone: string): string {
   return semNonoDigito(telefone.replace(/[^\d]/g, ''));
 }
 
@@ -62,9 +106,10 @@ const falhasMem = new Set<string>();
 /**
  * Chave de task ativa (DD-07-12): composta (deviceId+telefone) quando o
  * device e conhecido, telefone-so quando nao — degrada pro comportamento
- * pre-DEVICE-03 sem `deviceId` (DD-07-13).
+ * pre-DEVICE-03 sem `deviceId` (DD-07-13). Exportada (pura, sem I/O) só para
+ * o smoke F2 provar ausência de dígitos crus no nome da chave composta.
  */
-function chaveTaskAtiva(telefone: string, deviceId?: string): string {
+export function chaveTaskAtiva(telefone: string, deviceId?: string): string {
   const t = chaveTelefone(telefone);
   return deviceId ? `${deviceId}|${t}` : t;
 }
@@ -113,13 +158,22 @@ function guardarTaskAtivaMem(telefone: string, taskId: string, deviceId?: string
   }
 }
 
-/** DD-07-12: com deviceId tenta a chave composta primeiro, cai na telefone-so se faltar. */
+/**
+ * DD-07-12: com deviceId tenta a chave composta primeiro, cai na telefone-so
+ * se faltar. F2: dentro de cada nível (composta/telefone-só) tenta primeiro o
+ * formato novo (digest) e cai no formato LEGADO (chaveTelefoneLegado) no miss
+ * — janela de transição do deploy, ver comentário do header do arquivo.
+ */
 function lerTaskAtivaMem(telefone: string, deviceId?: string): string | null {
   if (deviceId) {
     const composta = taskAtivaMem.get(chaveTaskAtiva(telefone, deviceId))?.taskId ?? null;
     if (composta) return composta;
+    const compostaLegado = taskAtivaMem.get(`${deviceId}|${chaveTelefoneLegado(telefone)}`)?.taskId ?? null;
+    if (compostaLegado) return compostaLegado;
   }
-  return taskAtivaMem.get(chaveTelefone(telefone))?.taskId ?? null;
+  const direto = taskAtivaMem.get(chaveTelefone(telefone))?.taskId ?? null;
+  if (direto) return direto;
+  return taskAtivaMem.get(chaveTelefoneLegado(telefone))?.taskId ?? null;
 }
 
 /**
@@ -256,14 +310,25 @@ async function guardarTaskAtivaRedis(telefone: string, taskId: string, deviceId?
   }
 }
 
-/** DD-07-12: com deviceId tenta a chave composta primeiro, cai na telefone-so se faltar. */
+/**
+ * DD-07-12: com deviceId tenta a chave composta primeiro, cai na telefone-so
+ * se faltar. F2: dentro de cada nível (composta/telefone-só) tenta primeiro o
+ * formato novo (digest) e cai no formato LEGADO (chaveTelefoneLegado) no miss
+ * — janela de transição do deploy, ver comentário do header do arquivo.
+ */
 async function lerTaskAtivaRedis(telefone: string, deviceId?: string): Promise<string | null> {
   try {
     if (deviceId) {
       const composta = await garantirCliente().get(PREFIXO_TASK + chaveTaskAtiva(telefone, deviceId));
       if (composta) return composta;
+      const compostaLegado = await garantirCliente().get(
+        PREFIXO_TASK + `${deviceId}|${chaveTelefoneLegado(telefone)}`,
+      );
+      if (compostaLegado) return compostaLegado;
     }
-    return await garantirCliente().get(PREFIXO_TASK + chaveTelefone(telefone));
+    const direto = await garantirCliente().get(PREFIXO_TASK + chaveTelefone(telefone));
+    if (direto) return direto;
+    return await garantirCliente().get(PREFIXO_TASK + chaveTelefoneLegado(telefone));
   } catch (e) {
     console.error('[estado-webhook] falha ao ler task ativa (degradando p/ miss):', e instanceof Error ? e.message : String(e));
     return null;

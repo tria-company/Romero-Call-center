@@ -296,6 +296,48 @@ export async function enviarTexto(telefoneE164: string, texto: string): Promise<
   }
 }
 
+/**
+ * Envia uma MÍDIA (imagem/vídeo/áudio, por URL ou base64) via /message/sendMedia
+ * da instância dedicada (Fase 5 — biblioteca de conteúdos). `mediatype` é o do
+ * WhatsApp/Evolution. Mesmo choke-point/throttle/semântica de erro do
+ * enviarAudio/enviarTexto: LANÇA em falha de rede/HTTP, preserva
+ * EvolutionThrottleError (IN-03). LGPD: nunca loga telefone nem a mídia.
+ */
+export async function enviarMidia(
+  telefoneE164: string,
+  opts: {
+    mediatype: 'image' | 'video' | 'audio' | 'document';
+    media: string; // URL http(s) OU base64
+    mimetype?: string;
+    fileName?: string;
+    caption?: string;
+  },
+): Promise<void> {
+  if (!EVOLUTION_INSTANCE) {
+    throw new Error('[evolution] EVOLUTION_INSTANCE ausente — sem instância dedicada configurada');
+  }
+  let res: Response;
+  try {
+    res = await fetchEvolution(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        number: telefoneE164,
+        mediatype: opts.mediatype,
+        media: opts.media,
+        ...(opts.mimetype ? { mimetype: opts.mimetype } : {}),
+        ...(opts.fileName ? { fileName: opts.fileName } : {}),
+        ...(opts.caption ? { caption: opts.caption } : {}),
+      }),
+    });
+  } catch (e) {
+    if (e instanceof EvolutionThrottleError) throw e;
+    throw new Error(`[evolution] falha de rede ao enviar mídia: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[evolution] envio de mídia falhou (${res.status})`);
+  }
+}
+
 // ===== Status da instância =====
 
 /** Estado normalizado da instância Evolution — { conectado: boolean } (D-08). */

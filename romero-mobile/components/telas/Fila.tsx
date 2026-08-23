@@ -17,7 +17,7 @@ import {
 import { iniciais } from "@/lib/leads-util";
 import type { ItemFilaReal, VotoReal } from "@/lib/discador-servidor";
 import { pularLigacao, useFilaReal } from "@/lib/fila-real";
-import { copiarTelefone, fmtTelefone, linkTelefone, urlCallCenter, vibrar } from "@/lib/contato";
+import { copiarTelefone, fmtTelefone, linkTelefone, telefoneParaCopia, urlCallCenter, vibrar } from "@/lib/contato";
 import {
   carregarContextoLead,
   carregarLigacaoDetalhe,
@@ -97,12 +97,23 @@ export function Fila({
     };
   }, []);
 
+  // UX-LENTIDAO (quick-260822-rht): `ligar()` já era navegação instantânea e
+  // não-bloqueante — o "congelamento" percebido é do DESTINO (boot do PWA
+  // `/discador` + fetch `GET /api/discador/ligacao/:taskId` no backend/
+  // ClickUp), fora deste app e fora de mudança de contrato de backend. A
+  // alavanca em escopo é feedback otimista: `abrindoDiscador` liga um overlay
+  // full-screen NO MESMO GESTO do toque, antes de atribuir `location.href`
+  // (sem `await` no meio — invalidaria o gesto, mesmo cuidado do token acima).
+  const [abrindoDiscador, setAbrindoDiscador] = React.useState<{ nome: string } | null>(null);
+
   // Chamado no gesto do toque. MESMO ENDERECO (u7): navega na MESMA aba pro
   // discador (mesma origem) — sem abrir aba nova órfã. A fila já tem a Ligação
   // (item.taskId), então passa &task pro discador abrir a chamada exata (auto-
   // loga por #token). Ao VOLTAR, o discador devolve o gestor pra ESTA fila (/fila).
   function ligar(item: ItemFilaReal) {
+    if (abrindoDiscador) return; // guarda contra re-toques durante a transição
     vibrar();
+    setAbrindoDiscador({ nome: item.nome });
     window.location.href = urlCallCenter(tokenCC, item.taskId);
   }
 
@@ -164,10 +175,10 @@ export function Fila({
         />
         {pularErro && <div className="fp-perro">Não deu para pular — tente de novo.</div>}
         <div className="fp-pacts">
-          <button type="button" className="seg fp-btn48" onClick={() => setPularAlvo(null)} disabled={pulando}>
+          <button type="button" className="seg fp-btn52" onClick={() => setPularAlvo(null)} disabled={pulando}>
             Cancelar
           </button>
-          <button type="button" className="fp-pgo" onClick={() => void confirmarPular()} disabled={pulando || !pularMotivo.trim()}>
+          <button type="button" className="fp-pgo fp-btn52" onClick={() => void confirmarPular()} disabled={pulando || !pularMotivo.trim()}>
             {pulando ? <span className="fp-spin" /> : <SkipForward size={15} />} Pular contato
           </button>
         </div>
@@ -202,6 +213,10 @@ export function Fila({
   const [erroTel, setErroTel] = React.useState(false);
   const [copiadoId, setCopiadoId] = React.useState<string | null>(null);
   const [avisoTelId, setAvisoTelId] = React.useState<string | null>(null);
+  // UX-DDD (quick-260822-rht): quando o cadastro do lead não tem DDD
+  // derivável, `copiar()` não falha em silêncio — sinaliza este id pro card
+  // mostrar um aviso curto em vez de copiar string vazia/formatada.
+  const [copiaSemDddId, setCopiaSemDddId] = React.useState<string | null>(null);
 
   // Abre a tela de retorno tel: pra uma Ligação — reseta TODO o formulário
   // (compartilhado pelo card, "Ligar pelo telefone", E a chegada por telapos).
@@ -266,7 +281,16 @@ export function Fila({
 
   async function copiar(item: ItemFilaReal) {
     const ok = await copiarTelefone(item.telefone);
-    if (!ok) return;
+    if (!ok) {
+      // UX-DDD: distingue "sem DDD" (cadastro incompleto) de "clipboard
+      // indisponível" — só o primeiro caso tem aviso dedicado; ambos não
+      // copiam nada (nunca string vazia/formatada).
+      if (telefoneParaCopia(item.telefone) == null) {
+        setCopiaSemDddId(item.taskId);
+        window.setTimeout(() => setCopiaSemDddId((atual) => (atual === item.taskId ? null : atual)), 2500);
+      }
+      return;
+    }
     setCopiadoId(item.taskId);
     window.setTimeout(() => setCopiadoId((atual) => (atual === item.taskId ? null : atual)), 1500);
   }
@@ -389,7 +413,7 @@ export function Fila({
                discador nativo do aparelho. */}
             <button
               type="button"
-              className="fp-telchoice fp-telchoice--tel fp-btn48"
+              className="fp-telchoice fp-telchoice--tel fp-btn52"
               onClick={() => {
                 const link = linkTelefone(alvoTel.telefone);
                 if (link) window.location.href = link;
@@ -397,13 +421,13 @@ export function Fila({
             >
               <Phone size={17} /> Ligar pelo telefone
             </button>
-            <button type="button" className="fp-telchoice fp-telchoice--ok fp-btn48" onClick={() => setFaseTel("voto")}>
+            <button type="button" className="fp-telchoice fp-telchoice--ok fp-btn52" onClick={() => setFaseTel("voto")}>
               <CheckCircle2 size={17} /> Atendeu
             </button>
-            <button type="button" className="fp-telchoice fp-btn48" onClick={() => setFaseTel("motivo")}>
+            <button type="button" className="fp-telchoice fp-btn52" onClick={() => setFaseTel("motivo")}>
               <XCircle size={17} /> Não atendeu
             </button>
-            <button type="button" className="seg fp-btn48" onClick={naoConsegui}>
+            <button type="button" className="seg fp-btn52" onClick={naoConsegui}>
               <Ban size={15} /> Não consegui ligar
             </button>
           </div>
@@ -413,12 +437,12 @@ export function Fila({
           <div className="fp-telform">
             <div className="fp-telq">
               <div className="fp-tellbl">Romero</div>
-              <div className="fp-telseg">
+              <div className="fp-telseg fp-telseg--col">
                 {(["sim", "nao", "naoDeclarou"] as const).map((v) => (
                   <button
                     key={v}
                     type="button"
-                    className={`fp-telsegbtn fp-btn48${votoRomero === v ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn52${votoRomero === v ? " active" : ""}`}
                     onClick={() => setVotoRomero(votoRomero === v ? undefined : v)}
                     disabled={enviandoTel}
                   >
@@ -429,12 +453,12 @@ export function Fila({
             </div>
             <div className="fp-telq">
               <div className="fp-tellbl">Andressa</div>
-              <div className="fp-telseg">
+              <div className="fp-telseg fp-telseg--col">
                 {(["sim", "nao", "naoDeclarou"] as const).map((v) => (
                   <button
                     key={v}
                     type="button"
-                    className={`fp-telsegbtn fp-btn48${votoAndressa === v ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn52${votoAndressa === v ? " active" : ""}`}
                     onClick={() => setVotoAndressa(votoAndressa === v ? undefined : v)}
                     disabled={enviandoTel}
                   >
@@ -445,12 +469,12 @@ export function Fila({
             </div>
             <div className="fp-telq">
               <div className="fp-tellbl">Classificação (obrigatória)</div>
-              <div className="fp-telseg">
+              <div className="fp-telseg fp-telseg--col">
                 {CLASSIFICACOES.map((c) => (
                   <button
                     key={c}
                     type="button"
-                    className={`fp-telsegbtn fp-btn48${classificacaoTel === c ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn52${classificacaoTel === c ? " active" : ""}`}
                     onClick={() => setClassificacaoTel(c)}
                     disabled={enviandoTel}
                   >
@@ -485,7 +509,7 @@ export function Fila({
             </div>
             <button
               type="button"
-              className={`fp-superfa fp-btn48${superFaTel ? " active" : ""}`}
+              className={`fp-superfa fp-btn52${superFaTel ? " active" : ""}`}
               onClick={() => setSuperFaTel((v) => !v)}
               disabled={enviandoTel}
               aria-pressed={superFaTel}
@@ -494,12 +518,12 @@ export function Fila({
             </button>
             {erroTel && <div className="fp-perro">Não deu para registrar — tente de novo.</div>}
             <div className="fp-pacts">
-              <button type="button" className="seg fp-btn48" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
+              <button type="button" className="seg fp-btn52" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
                 Voltar
               </button>
               <button
                 type="button"
-                className="fp-pgo fp-btn48"
+                className="fp-pgo fp-btn52"
                 onClick={() => void concluirVoto()}
                 disabled={enviandoTel || !classificacaoTel}
               >
@@ -513,12 +537,12 @@ export function Fila({
           <div className="fp-telform">
             <div className="fp-telq">
               <div className="fp-tellbl">Motivo</div>
-              <div className="fp-telseg fp-telseg--wrap">
+              <div className="fp-telseg fp-telseg--grid2">
                 {CATEGORIAS_NAO_ATENDIDA.map((c) => (
                   <button
                     key={c}
                     type="button"
-                    className={`fp-telsegbtn fp-btn48${categoriaTel === c ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn52${categoriaTel === c ? " active" : ""}`}
                     onClick={() => setCategoriaTel(c)}
                     disabled={enviandoTel}
                   >
@@ -529,12 +553,12 @@ export function Fila({
             </div>
             <div className="fp-telq">
               <div className="fp-tellbl">Classificação (opcional)</div>
-              <div className="fp-telseg">
+              <div className="fp-telseg fp-telseg--col">
                 {CLASSIFICACOES.map((c) => (
                   <button
                     key={c}
                     type="button"
-                    className={`fp-telsegbtn fp-btn48${classificacaoTel === c ? " active" : ""}`}
+                    className={`fp-telsegbtn fp-btn52${classificacaoTel === c ? " active" : ""}`}
                     onClick={() => setClassificacaoTel(classificacaoTel === c ? "" : c)}
                     disabled={enviandoTel}
                   >
@@ -566,7 +590,7 @@ export function Fila({
             />
             <button
               type="button"
-              className={`fp-superfa fp-btn48${superFaTel ? " active" : ""}`}
+              className={`fp-superfa fp-btn52${superFaTel ? " active" : ""}`}
               onClick={() => setSuperFaTel((v) => !v)}
               disabled={enviandoTel}
               aria-pressed={superFaTel}
@@ -575,12 +599,12 @@ export function Fila({
             </button>
             {erroTel && <div className="fp-perro">Não deu para registrar — tente de novo.</div>}
             <div className="fp-pacts">
-              <button type="button" className="seg fp-btn48" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
+              <button type="button" className="seg fp-btn52" onClick={() => setFaseTel("escolha")} disabled={enviandoTel}>
                 Voltar
               </button>
               <button
                 type="button"
-                className="fp-pgo fp-btn48"
+                className="fp-pgo fp-btn52"
                 onClick={() => void concluirMotivo()}
                 disabled={enviandoTel || !categoriaTel}
               >
@@ -684,6 +708,7 @@ export function Fila({
           onCopiar={copiar}
           copiado={copiadoId === itens[0].taskId}
           avisoTelInvalido={avisoTelId === itens[0].taskId}
+          avisoCopiaSemDdd={copiaSemDddId === itens[0].taskId}
           scriptTexto={scriptTexto}
           scriptCarregando={scriptCarregando}
           dossieTexto={dossieTexto}
@@ -702,6 +727,17 @@ export function Fila({
         {secaoLigar}
         {modalPular}
         {retornoTel}
+        {abrindoDiscador && (
+          <div className="fp-abrindo" role="status" aria-live="polite">
+            <div className="fp-abrindo-card">
+              <span className="fp-spin" />
+              <div className="fp-abrindo-txt">
+                <b>Abrindo o discador…</b>
+                {abrindoDiscador.nome && <span>{abrindoDiscador.nome}</span>}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -765,6 +801,7 @@ function CardFila({
   onCopiar,
   copiado,
   avisoTelInvalido,
+  avisoCopiaSemDdd,
   scriptTexto,
   scriptCarregando,
   dossieTexto,
@@ -778,6 +815,7 @@ function CardFila({
   onCopiar: (item: ItemFilaReal) => void;
   copiado: boolean;
   avisoTelInvalido: boolean;
+  avisoCopiaSemDdd: boolean;
   scriptTexto: string | null;
   scriptCarregando: boolean;
   dossieTexto: string | null;
@@ -849,6 +887,9 @@ function CardFila({
             <SkipForward size={16} /> Pular
           </button>
         </div>
+        {avisoCopiaSemDdd && (
+          <div className="fp-teleravi">Número sem DDD — confira o cadastro do lead.</div>
+        )}
       </div>
     </div>
   );
@@ -858,7 +899,7 @@ function CardFila({
    não monta nesta vista, então os estilos vivem aqui com prefixo fp-.
    quick-260822-pzh: classes fp-telmodal / fp-telcard / fp-telseg (fallback de
    ligação tel:) somadas ao bloco abaixo. quick-260822-rr6: card vertical
-   (fp-card/fp-card-head/fp-secoes/fp-acoes), botões ≥48px (fp-btn48/fp-ligar/
+   (fp-card/fp-card-head/fp-secoes/fp-acoes), botões ≥52px (fp-btn52/fp-ligar/
    fp-ligar-tel/fp-acao-sec) e indicador de refetch (fp-atualizando). */
 const FP_CSS = `
 .fp-pmodal{ position:fixed; inset:0; z-index:300; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; justify-content:center; padding:0 12px calc(24px + var(--safe-b)); }
@@ -872,23 +913,35 @@ const FP_CSS = `
 .fp-ptxt:focus{ border-color:var(--alert); }
 .fp-perro{ font-size:12.5px; color:var(--alert); font-weight:700; }
 .fp-pacts{ display:flex; gap:8px; justify-content:flex-end; align-items:center; flex-wrap:wrap; }
-.fp-pgo{ display:inline-flex; align-items:center; justify-content:center; gap:6px; border:none; border-radius:12px; padding:10px 16px; background:var(--alert); color:#fff; font-weight:800; font-size:13.5px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-pgo{ display:inline-flex; align-items:center; justify-content:center; gap:6px; border:none; border-radius:12px; padding:10px 16px; background:var(--alert); color:#fff; font-weight:800; font-size:14px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-pgo:active{ transform:scale(0.98); }
 .fp-pgo:disabled{ opacity:.55; cursor:default; }
 .fp-spin{ width:16px; height:16px; border-radius:50%; flex:none; border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:fpSpin .7s linear infinite; }
 .fp-spin--dim{ border:2px solid color-mix(in srgb, var(--dim) 45%, transparent); border-top-color:var(--dim); }
 @keyframes fpSpin{ to{ transform:rotate(360deg); } }
-@media (prefers-reduced-motion:reduce){ .fp-spin,.fp-pcard{ animation:none!important; } }
+@media (prefers-reduced-motion:reduce){ .fp-spin,.fp-pcard,.fp-abrindo-card{ animation:none!important; } }
 
-/* Alvo de toque mínimo ≥48px (R2/D-02) — modificador aplicado junto de
-   classes já existentes (.seg/.fp-telchoice/.fp-telsegbtn/.fp-pgo) sem mexer
-   no estilo global dessas classes fora deste arquivo. */
-.fp-btn48{ min-height:48px; display:inline-flex; align-items:center; justify-content:center; gap:8px; }
+/* Alvo de toque mínimo ≥52px (R2/D-02, elevado de 48px em UX-BOTOES
+   quick-260822-rht) — modificador aplicado junto de classes já existentes
+   (.seg/.fp-telchoice/.fp-telsegbtn/.fp-pgo/.fp-superfa) sem mexer no estilo
+   global dessas classes fora deste arquivo. */
+.fp-btn52{ min-height:52px; display:inline-flex; align-items:center; justify-content:center; gap:8px; }
 
 /* Indicador discreto de refetch (R1/D-01) — o card do lead NUNCA some; só
    este texto aparece/some na barra de progresso. */
 .fp-atualizando{ display:flex; align-items:center; gap:6px; margin-top:8px; font-size:11.5px; font-weight:700; color:var(--dim); }
 
 .fp-teleravi{ font-size:11px; color:var(--alert); font-weight:700; margin-top:6px; }
+
+/* UX-LENTIDAO (quick-260822-rht): overlay otimista "Abrindo o discador…" —
+   mesmo molde de z-index/backdrop dos modais acima, sem botão de fechar (a
+   navegação para /discador substitui a página; existe só pro intervalo de
+   transição). Reusa .fp-spin (já coberto por prefers-reduced-motion). */
+.fp-abrindo{ position:fixed; inset:0; z-index:320; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:0 16px; }
+.fp-abrindo-card{ width:min(360px, 100%); background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:22px; display:flex; align-items:center; gap:14px; animation:fpUp .18s ease both; }
+.fp-abrindo-txt{ display:flex; flex-direction:column; gap:2px; font-size:14px; color:var(--ink); }
+.fp-abrindo-txt b{ font-weight:800; }
+.fp-abrindo-txt span{ font-size:12.5px; color:var(--dim); }
 
 /* Card vertical (R2/R7, rr6): avatar+nome no topo, seções recolhíveis no
    meio, ações grandes embaixo — substitui o layout horizontal antigo
@@ -908,14 +961,14 @@ const FP_CSS = `
 
 /* Ações do card (R2/D-02): "Ligar" primário grande full-width; "Ligar pelo
    telefone" secundário grande full-width; "Copiar número"/"Pular" numa
-   grade de 2 colunas, todos ≥48px com ícone e texto legível. */
+   grade de 2 colunas, todos ≥52px com ícone e texto legível. */
 .fp-acoes{ display:flex; flex-direction:column; gap:10px; margin-top:14px; }
 .fp-ligar{ min-height:52px; width:100%; display:flex; align-items:center; justify-content:center; gap:9px; border:none; border-radius:14px; background:var(--romero, #3d8bff); color:#04122a; font-weight:800; font-size:15px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-ligar:active{ transform:scale(0.98); }
-.fp-ligar-tel{ min-height:48px; width:100%; display:flex; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:14px; background:var(--bg-2); color:var(--ink); font-weight:700; font-size:14px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-ligar-tel{ min-height:52px; width:100%; display:flex; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:14px; background:var(--bg-2); color:var(--ink); font-weight:700; font-size:14px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-ligar-tel:active{ background:rgba(255,255,255,.06); }
 .fp-acoes-row{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-.fp-acao-sec{ min-height:48px; display:flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line); border-radius:12px; background:transparent; color:var(--dim); font-weight:700; font-size:12.5px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-acao-sec{ min-height:52px; display:flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line); border-radius:12px; background:transparent; color:var(--dim); font-weight:700; font-size:13px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-acao-sec:active{ background:rgba(255,255,255,.06); }
 .fp-acao-sec--alerta{ border-color:color-mix(in srgb, var(--alert) 45%, transparent); color:var(--alert); }
 
@@ -923,19 +976,34 @@ const FP_CSS = `
 .fp-telmodal{ position:fixed; inset:0; z-index:310; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; justify-content:center; padding:0 12px calc(24px + var(--safe-b)); }
 .fp-telcard{ width:min(520px, 100%); max-height:min(720px, 88vh); overflow-y:auto; background:var(--bg-1); border:1px solid var(--line); border-radius:18px; padding:16px; display:flex; flex-direction:column; gap:12px; animation:fpUp .18s ease both; }
 .fp-telesc{ display:flex; flex-direction:column; gap:8px; }
-.fp-telchoice{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:12px; padding:12px; font-size:14px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
-.fp-telchoice--ok{ border-color:color-mix(in srgb, var(--ok, #2ecc71) 45%, var(--line)); }
+.fp-telchoice{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:12px; padding:12px; font-size:14.5px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-telchoice:active{ transform:scale(0.98); }
+.fp-telchoice:disabled{ opacity:.55; cursor:default; }
+/* UX-BOTOES: "Atendeu" é a ação PRIMÁRIA da escolha — preenchimento sólido
+   (não só borda) pra ficar visualmente dominante sobre "Não atendeu"/"Ligar
+   pelo telefone"/"Não consegui ligar", mesmo padrão de destaque do .fp-ligar. */
+.fp-telchoice--ok{ background:var(--ok, #2ecc71); border-color:var(--ok, #2ecc71); color:#04122a; font-weight:800; }
 .fp-telchoice--tel{ border-color:color-mix(in srgb, var(--romero, #3d8bff) 45%, var(--line)); color:var(--romero, #3d8bff); }
 .fp-telform{ display:flex; flex-direction:column; gap:10px; }
 .fp-telq{ display:flex; flex-direction:column; gap:6px; }
 .fp-tellbl{ font-size:12px; font-weight:800; color:var(--dim); text-transform:uppercase; letter-spacing:.03em; }
-.fp-telseg{ display:flex; gap:6px; flex-wrap:wrap; }
-.fp-telsegbtn{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:999px; padding:6px 14px; font-size:12.5px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fp-telseg{ display:flex; gap:8px; flex-wrap:wrap; }
+/* UX-BOTOES (quick-260822-rht): pills de voto/classificação/motivo eram
+   pequenas (6×14, 12.5px) e apertadas num wrap — viram ≥52px (via
+   .fp-btn52, já aplicado no markup) com fonte ≥14px. Layout por tamanho de
+   grupo: grupos de 3 opções (Romero/Andressa/Classificação) empilham em 1
+   coluna de largura total (.fp-telseg--col) — mais legível que uma grade
+   2×2 desbalanceada com 1 item sobrando; o grupo de 4 opções (Motivo) usa
+   grade de 2 colunas (.fp-telseg--grid2), que fecha certinho 2×2. */
+.fp-telseg--col{ flex-direction:column; }
+.fp-telseg--col .fp-telsegbtn{ width:100%; }
+.fp-telseg--grid2{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.fp-telsegbtn{ border:1px solid var(--line); background:var(--bg-2); color:var(--ink); border-radius:12px; padding:10px 16px; font-size:14px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-telsegbtn.active{ background:var(--accent); border-color:var(--accent); color:#fff; }
 .fp-telsegbtn:disabled{ opacity:.55; cursor:default; }
 
 /* R9 (quick-260822-rr6): toggle grande "⭐ Super fã" — mesmo padrão visual dos
-   botões novos (≥48px, ícone, texto legível), disponível nos dois caminhos
+   botões novos (≥52px, ícone, texto legível), disponível nos dois caminhos
    do retorno tel:. */
 .fp-superfa{ width:100%; display:flex; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); background:var(--bg-2); color:var(--dim); border-radius:12px; font-size:14px; font-weight:700; cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fp-superfa.active{ border-color:color-mix(in srgb, #f5c43d 55%, var(--line)); background:color-mix(in srgb, #f5c43d 16%, transparent); color:#f5c43d; }

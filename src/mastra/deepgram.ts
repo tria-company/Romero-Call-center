@@ -334,6 +334,88 @@ export async function transcreverBuffer(bytes: Uint8Array, mimetype?: string): P
 }
 
 /**
+ * Transcreve a NOSSA copia da gravacao (Fase 19.1 Plano 03, DUR-05/DUR-06,
+ * C4 do CONTEXT.md) — `fonte` e o retorno de `gravacao-store.baixarGravacao`
+ * (stream + content-type/content-length da nossa copia no Supabase Storage,
+ * NUNCA storage.wavoip.com). Faz POST /v1/listen por STREAMING quando
+ * `contentLength` esta presente (pipe do `fonte.stream` direto pro body,
+ * `duplex:'half'`, Content-Length repassado — MESMO padrao de
+ * transcreverBytes/Fase 09/RESIL-05, sem materializar 60-90min de audio em
+ * RAM); sem `contentLength` (raro — chunked), cai pro buffer completo via
+ * `new Response(fonte.stream).arrayBuffer()`.
+ *
+ * DIFERENCA-CHAVE vs. transcreverBytes/transcreverCallUrl/transcreverBuffer
+ * (que ficam INTOCADAS — outros callers dependem do contrato fail-open):
+ * esta funcao NAO e fail-open. POST nao-ok ou transcript vazio -> LANCA
+ * Error cuja mensagem carrega host/status/corpo-truncado (a causa
+ * especifica pedida no CONTEXT — hoje o erro generico "transcricao falhou"
+ * escondia a causa das 18 gravacoes presas de 22/08). O worker (plano
+ * 19.1-04) classifica esse throw via classificarErro e decide re-tentar
+ * (transitorio) ou estacionar (permanente). LGPD: a mensagem nunca carrega a
+ * URL assinada/telefone — so o host fixo da Deepgram e o corpo truncado.
+ */
+export async function transcreverGravacaoLocal(
+  fonte: { stream: ReadableStream; contentType: string; contentLength: string | null },
+  params: URLSearchParams,
+): Promise<string> {
+  const host = hostSeguro(DEEPGRAM_URL);
+  const { stream, contentType, contentLength } = fonte;
+
+  let res: Response;
+  if (contentLength) {
+    // Streaming: pipe direto da nossa copia pro upload — Content-Length
+    // repassado da nossa copia (sempre determinístico, ao contrario do
+    // storage.wavoip.com que pode devolver 200 sem content-length).
+    res = await fetchTimeout(
+      `${DEEPGRAM_URL}?${params.toString()}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+          'Content-Type': contentType,
+          'Accept': 'application/json',
+          'Content-Length': contentLength,
+        },
+        body: stream,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' },
+      TIMEOUT_TRANSCRICAO_MS,
+    );
+  } else {
+    // Fallback: sem Content-Length conhecido, materializa o buffer completo
+    // (mesmo fallback D-07 de transcreverBytes).
+    const bytes = await new Response(stream).arrayBuffer();
+    res = await fetchTimeout(
+      `${DEEPGRAM_URL}?${params.toString()}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+          'Content-Type': contentType,
+          'Accept': 'application/json',
+        },
+        body: bytes,
+      },
+      TIMEOUT_TRANSCRICAO_MS,
+    );
+  }
+
+  if (!res.ok) {
+    const corpo = truncarCorpo(await res.text());
+    throw new Error(
+      `[deepgram] transcreverGravacaoLocal POST /v1/listen falhou (${res.status}) host=${host} body=${corpo}`,
+    );
+  }
+  const data = await res.json();
+  console.log('[deepgram] transcrito via caminho=copia-local');
+  const t = parseTranscript(data);
+  if (!t) {
+    throw new Error(`[deepgram] transcreverGravacaoLocal transcript vazio host=${host}`);
+  }
+  return rotularPapeis(t);
+}
+
+/**
  * Transcreve a gravacao da call a partir da record_url (Deepgram pre-recorded,
  * url-mode). Em falha 4xx do POST url-mode (ex: 411), cai pro fallback
  * binario (download + re-POST de bytes). Retorna o transcript (rotulado por

@@ -175,6 +175,59 @@ export async function alertarThreshold(titulo: string, detalhe: string): Promise
 }
 
 /**
+ * Alerta best-effort de job PERMANENTE estacionado (Fase 19.1 Plano 04,
+ * DUR-02) — MESMO MOLDE de `alertarThreshold`/`alertarDLQ`: console.error
+ * estruturado SEMPRE (mesmo sem ALERT_WEBHOOK_URL) primeiro, depois POST
+ * best-effort dentro de try/catch que só loga em falha e NUNCA relança —
+ * observabilidade nunca pode derrubar o worker. Disparado pelo wrapper de
+ * classificação em worker.ts quando `classificarErro(err).tipo ===
+ * 'permanente'`, ANTES de lançar `UnrecoverableError` (que move o job pro
+ * set `failed` do BullMQ imediatamente, sem consumir tentativas do
+ * retry-infinito).
+ *
+ * "Estacionado" = decisão travada do dono da operação: nada é
+ * auto-descartado/auto-fechado sem humano. O job fica retido na DLQ
+ * (`removeOnFail: false`, opcoesJob()) e a Ligação/RECORD associado
+ * permanece "em processamento" até um humano agir — o `[ESTACIONADO]` é o
+ * SINAL, não um fechamento automático.
+ *
+ * LGPD/WR-01: payload só job/jobId/origem/status/motivo — motivo já vem
+ * LGPD-safe de `classificarErro` (rótulo curto, nunca a mensagem crua).
+ * NUNCA telefone/CPF/payload do job aqui.
+ */
+export async function alertarEstacionado(info: {
+  job: string;
+  jobId?: string;
+  origem: string;
+  status?: number;
+  motivo: string;
+}): Promise<void> {
+  console.error(
+    `[ALERTA][ESTACIONADO] job=${info.job} jobId=${info.jobId ?? 'n/a'} origem=${info.origem} ` +
+      `status=${info.status ?? 'n/a'} motivo=${info.motivo}`,
+  );
+
+  if (!ALERT_WEBHOOK_URL) return;
+
+  try {
+    await fetch(ALERT_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text:
+          `🛑 Job estacionado (erro permanente) — job=${info.job} jobId=${info.jobId ?? 'n/a'} ` +
+          `origem=${info.origem} status=${info.status ?? 'n/a'} motivo=${info.motivo}`,
+      }),
+    });
+  } catch (e) {
+    console.error(
+      '[alertas] falha ao enviar alerta de estacionado via webhook (degradando p/ so-log):',
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
+/**
  * Cooldown (ms) por operador do alerta de degradação de device (A2, Pacote A
  * / incidente 2026-08-22, T-mfp-05) — molde fixo de MIN_TOTAL_ETAPA_ALERTA
  * acima (não é env, D-07 não pediu configuração fina aqui). Evita flood: sem

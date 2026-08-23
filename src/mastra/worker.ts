@@ -1,14 +1,20 @@
 // Entrypoint do worker BullMQ em processo separado (Fase 6 Plano 04,
-// escala-150-atendentes).
+// escala-150-atendentes; retry/DLQ endurecidos na Fase 19.1 Plano 04,
+// DUR-01/DUR-02; varredura periodica de re-drive da DLQ na Fase 19.1 Plano
+// 05, DUR-03, redrive-dlq.ts).
 //
 // Consome a fila `processamento-ligacao` (fila.ts) fora do caminho da
 // requisicao do webhook Wavoip: despacha cada job por `job.name` para
-// `processador.ts` (processarRecordJob/processarFalhaTerminalJob, 06-02),
-// deixa o throw do processador PROPAGAR pro BullMQ contar a tentativa e
-// reagendar com backoff exponencial (FILA-03, opcoesJob() gravado no job
-// pelo enqueue em 06-03), encaminha jobs com tentativas esgotadas pra DLQ +
-// alerta (FILA-04) e DRENA o job em andamento no SIGTERM/SIGINT antes de
-// encerrar (INFRA-05, graceful shutdown do swarm).
+// `processador.ts` (processarRecordJob/processarFalhaTerminalJob, 06-02) sob
+// um wrapper que CLASSIFICA cada falha (classificar-erro.ts) — TRANSITORIO
+// relanca o erro original pro BullMQ reagendar com o backoff CAPADO
+// (settings.backoffStrategy delega a calcularBackoffCapado, fila.ts) e
+// retenta PARA SEMPRE na pratica (FILA_MAX_TENTATIVAS); PERMANENTE alerta
+// (alertarEstacionado) e lanca UnrecoverableError, estacionando o job na DLQ
+// IMEDIATO. worker.on('failed') so registra (marcarEventoWebhook('erro') +
+// alertarDLQ) o que REALMENTE parou — nada e auto-fechado sem humano (decisao
+// travada do dono da operacao). DRENA o job em andamento no SIGTERM/SIGINT
+// antes de encerrar (INFRA-05, graceful shutdown do swarm).
 //
 // Reusa a MESMA imagem `discador-wavoip:latest` — o Dockerfile bundla este
 // arquivo em `worker.mjs` (esbuild) e o servico do swarm sobrescreve o CMD
@@ -17,7 +23,7 @@
 // LGPD/WR-01: nenhum telefone/CPF/payload em log — so ids (whatsappCallId,
 // eventoDuravelId, job.id) e a classe/mensagem do erro.
 
-import { Worker } from 'bullmq';
+import { Worker, UnrecoverableError } from 'bullmq';
 
 import { FILA_CONCURRENCY } from './config.ts';
 
@@ -26,6 +32,7 @@ import {
   conexaoFila,
   modoFila,
   alertarDLQ,
+  calcularBackoffCapado,
   fecharFila,
   type DadosJobRecord,
   type DadosJobFalhaTerminal,
@@ -34,13 +41,20 @@ import {
   type NomeJob,
 } from './fila.ts';
 
-import { processarRecordJob, processarFalhaTerminalJob, finalizarRecordSemTranscricao } from './processador.ts';
+import { classificarErro } from './classificar-erro.ts';
+// finalizarRecordSemTranscricao NAO e mais importado/chamado aqui — Fase
+// 19.1 Plano 04 removeu a auto-finalizacao por esgotamento (ver comentario
+// no worker.on('failed') abaixo). A funcao continua exportada em
+// processador.ts (dead code documentado, nao removida — pode voltar a ser
+// util se uma fase futura decidir reintroduzir fechamento assistido).
+import { processarRecordJob, processarFalhaTerminalJob } from './processador.ts';
 import { processarSyncClickupJob } from './sync-clickup.ts';
 import { processarDrenoOutboxJob } from './drenar-outbox.ts';
 import { marcarEventoWebhook } from './supabase.ts';
 import { fecharEstadoWebhook } from './estado-webhook.ts';
 import { fecharRateLimiter } from './rate-limiter-clickup.ts';
-import { iniciarChecagemAlertas, fecharAlertas } from './alertas.ts';
+import { iniciarChecagemAlertas, fecharAlertas, alertarEstacionado } from './alertas.ts';
+import { iniciarRedriveDLQ, fecharRedriveDLQ } from './redrive-dlq.ts';
 
 // Degradacao graciosa: sem REDIS_URL, fila.ts roda em modo inline (o
 // webhook processa a request sincrona, 06-03) — nao ha fila para este
@@ -56,33 +70,90 @@ if (modoFila() !== 'bullmq') {
 const worker = new Worker(
   NOME_FILA,
   async (job) => {
-    switch (job.name) {
-      case 'record':
-        await processarRecordJob(job.data as DadosJobRecord);
-        return;
-      case 'falha-terminal':
-        await processarFalhaTerminalJob(job.data as DadosJobFalhaTerminal);
-        return;
-      case 'sync-clickup':
-        await processarSyncClickupJob(job.data as DadosJobSyncClickup);
-        return;
-      case 'drenar-outbox':
-        // ESCRITA-02/LGPD-03 (Fase B, Phase 19 Plano 03): drena o
-        // clickup_outbox do aggregate — reusa a MESMA fila/conexão (sem fila
-        // própria), mesmo padrão de sync-clickup acima.
-        await processarDrenoOutboxJob((job.data as DadosJobDrenoOutbox).aggregateId);
-        return;
-      default:
-        // Nome de job desconhecido (schema futuro/engano de enqueue) — loga
-        // e ignora; nao ha handler pra reprocessar isto num retry.
-        console.warn(`[worker] job com nome desconhecido ignorado: ${job.name} (id=${job.id})`);
-        return;
+    // Fase 19.1 Plano 04 (DUR-01/DUR-02): wrapper de classificacao em volta
+    // do dispatch por job.name — decide o destino de CADA falha, nao so
+    // loga-e-propaga como antes. TRANSITORIO (rede/5xx/429/degradacao
+    // conhecida): re-lanca o erro ORIGINAL (preserva a causa especifica, ex.
+    // host/status do storage) para o BullMQ reagendar com o backoff capado
+    // (settings.backoffStrategy acima) — com FILA_MAX_TENTATIVAS o job
+    // re-tenta PARA SEMPRE na pratica. PERMANENTE (task apagada, payload
+    // invalido, 404 definitivo): alerta ANTES de estacionar
+    // (alertarEstacionado) e lanca UnrecoverableError — o BullMQ move o job
+    // pro set `failed` (DLQ) IMEDIATAMENTE, sem consumir tentativas do
+    // retry-infinito. Decisao travada do dono da operacao: nada e
+    // auto-descartado sem humano.
+    try {
+      switch (job.name) {
+        case 'record':
+          await processarRecordJob(job.data as DadosJobRecord);
+          return;
+        case 'falha-terminal':
+          await processarFalhaTerminalJob(job.data as DadosJobFalhaTerminal);
+          return;
+        case 'sync-clickup':
+          await processarSyncClickupJob(job.data as DadosJobSyncClickup);
+          return;
+        case 'drenar-outbox':
+          // ESCRITA-02/LGPD-03 (Fase B, Phase 19 Plano 03): drena o
+          // clickup_outbox do aggregate — reusa a MESMA fila/conexão (sem fila
+          // própria), mesmo padrão de sync-clickup acima.
+          await processarDrenoOutboxJob((job.data as DadosJobDrenoOutbox).aggregateId);
+          return;
+        default:
+          // Nome de job desconhecido (schema futuro/engano de enqueue) — loga
+          // e ignora; nao ha handler pra reprocessar isto num retry.
+          console.warn(`[worker] job com nome desconhecido ignorado: ${job.name} (id=${job.id})`);
+          return;
+      }
+    } catch (err) {
+      const classificado = classificarErro(err);
+      if (classificado.tipo === 'permanente') {
+        await alertarEstacionado({
+          job: job.name,
+          jobId: job.id,
+          origem: classificado.origem,
+          status: classificado.status,
+          motivo: classificado.motivo,
+        });
+        throw new UnrecoverableError(classificado.motivo);
+      }
+      // transitorio: relanca o erro ORIGINAL (preserva a causa especifica p/
+      // log/DLQ) — o BullMQ reagenda com o backoff capado.
+      throw err;
     }
   },
-  { connection: conexaoFila() as object, concurrency: FILA_CONCURRENCY },
+  {
+    connection: conexaoFila() as object,
+    concurrency: FILA_CONCURRENCY,
+    // Fase 19.1 Plano 04 (DUR-01): registra a estrategia de backoff NOMEADA
+    // 'capado' usada por opcoesJob() (fila.ts) — BullMQ exige que backoff
+    // customizado seja uma funcao registrada no Worker (nao serializavel no
+    // job), entao delega ao PURO calcularBackoffCapado (a mesma curva
+    // testada isolada em retry-durabilidade.smoke.mjs).
+    settings: { backoffStrategy: (attemptsMade: number) => calcularBackoffCapado(attemptsMade) },
+  },
 );
 
-// ===== Handler de falha — retry (FILA-03) ou DLQ + alerta (FILA-04) =====
+// ===== Handler de falha — registro (DLQ + alerta) do que REALMENTE falhou =====
+//
+// Fase 19.1 Plano 04 (DUR-01/DUR-02): o BullMQ emite 'failed' a CADA
+// tentativa que lanca, mesmo quando o job ainda vai retentar (nao so na
+// falha final) — por isso o guard abaixo continua necessario. A diferenca
+// pro comportamento pre-Fase 19.1: com FILA_MAX_TENTATIVAS (~1_000_000), um
+// erro TRANSITORIO efetivamente NUNCA esgota `job.attemptsMade >=
+// job.opts.attempts` na pratica — ele so cai neste handler retentando (log
+// curto, sem DLQ/alerta) ate o terceiro conseguir de novo. O UNICO jeito de
+// um job chegar aqui "de verdade" (retido no set `failed` do BullMQ) e:
+//   1) PERMANENTE — o wrapper de classificacao (acima) ja disparou
+//      `alertarEstacionado` e lancou UnrecoverableError ANTES deste handler
+//      rodar; `err` chega aqui como UnrecoverableError, identificavel por
+//      `err.name` (BullMQ marca o job como failed IMEDIATO, sem esgotar
+//      tentativas — entao NAO da pra usar o mesmo check de
+//      attemptsMade>=attempts pra detectar este caso).
+//   2) LEGADO — um job enfileirado ANTES deste deploy, com
+//      `attempts:3`/`backoff:exponential` ja gravados no proprio job
+//      (opcoesJob() no momento do enqueue antigo) — esgota do jeito de
+//      sempre (migracao suave, NOME_FILA intacta).
 worker.on('failed', async (job, err) => {
   if (!job) {
     // BullMQ documenta: job pode vir undefined quando um job "stalled"
@@ -92,10 +163,13 @@ worker.on('failed', async (job, err) => {
     return;
   }
 
-  const tentativasEsgotadas = job.attemptsMade >= (job.opts.attempts ?? 1);
-  if (!tentativasEsgotadas) {
-    // Ainda vai retentar (backoff exponencial de opcoesJob(), FILA-03) — log
-    // curto, sem tocar em DLQ/alerta.
+  const ehPermanenteEstacionado = err instanceof UnrecoverableError || (err as { name?: string })?.name === 'UnrecoverableError';
+  const tentativasEsgotadasLegado = !ehPermanenteEstacionado && job.attemptsMade >= (job.opts.attempts ?? 1);
+
+  if (!ehPermanenteEstacionado && !tentativasEsgotadasLegado) {
+    // Transitorio, ainda vai retentar (backoff capado, settings.backoffStrategy
+    // acima) — log curto, sem tocar em DLQ/alerta (o [ALERTA][ESTACIONADO], se
+    // for o caso, ja disparou no wrapper de classificacao antes deste evento).
     console.warn(
       `[worker] job=${job.name} id=${job.id} falhou (tentativa ${job.attemptsMade}/${job.opts.attempts ?? 1}), retentando: ` +
         (err instanceof Error ? err.message : String(err)),
@@ -103,10 +177,13 @@ worker.on('failed', async (job, err) => {
     return;
   }
 
-  // FILA-04: tentativas esgotadas -> o job ja fica retido no set `failed`
-  // do BullMQ (DLQ inspecionavel, removeOnFail:false de opcoesJob()). Marca
-  // o desfecho durvel do evento cru como 'erro' (log-e-segue) e dispara o
-  // alerta. NUNCA telefone/CPF/payload — so ids e a classe do erro.
+  // Aqui: permanente-estacionado (UnrecoverableError) OU legado esgotado. O
+  // job ja fica retido no set `failed` do BullMQ (DLQ inspecionavel,
+  // removeOnFail:false de opcoesJob()). Marca o desfecho durvel do evento
+  // cru como 'erro' (log-e-segue) e dispara o alerta de DLQ como REGISTRO
+  // (alertarEstacionado ja alertou o permanente antes; alertarDLQ aqui cobre
+  // ambos os casos, inclusive o legado que nao passa pelo wrapper). NUNCA
+  // telefone/CPF/payload — so ids e a classe do erro.
   //
   // job.data e tratado como Record<string,any> aqui (nao um union dos 3
   // tipos de payload) porque o job de sync-clickup (CACHE-03) NAO tem
@@ -135,24 +212,15 @@ worker.on('failed', async (job, err) => {
     erro: err?.name || 'erro',
   });
 
-  // Desfecho gracioso do RECORD (FILA-04/OPER-05): sem esta finalizacao a
-  // Ligacao fica presa em "em processamento" para SEMPRE quando a transcricao
-  // nunca sucede (zumbi observado em prod). ADITIVA — fecha a Ligacao ALEM do
-  // registro na DLQ/alerta/marcarEventoWebhook('erro') acima, nao os substitui.
-  // So para 'record' (falha-terminal ja fecha; sync-clickup nao tem Ligacao a
-  // fechar). try/catch loga-e-segue: uma falha ao finalizar NAO pode quebrar o
-  // handler de falha nem invalidar o registro na DLQ que ja rodou acima (WR-01:
-  // so ids/classe do erro em log, nunca payload).
-  if (job.name === 'record') {
-    try {
-      await finalizarRecordSemTranscricao(job.data as DadosJobRecord);
-    } catch (e) {
-      console.error(
-        `[worker] falha ao finalizar record sem transcricao (id=${job.id}):`,
-        e instanceof Error ? e.name : String(e),
-      );
-    }
-  }
+  // Fase 19.1 Plano 04 (DUR-02, decisao travada do dono da operacao): "nada
+  // e auto-descartado/auto-fechado sem humano" — REMOVIDA a auto-finalizacao
+  // por esgotamento (finalizarRecordSemTranscricao) que existia aqui antes.
+  // Um RECORD estacionado (permanente) OU legado esgotado permanece "em
+  // processamento" ATE um humano agir — o [ALERTA][ESTACIONADO]/[ALERTA][DLQ]
+  // acima E o sinal, nao um fechamento automatico da Ligacao. Tradeoff
+  // explicito: preferimos uma Ligacao presa "em processamento" (visivel,
+  // alarmada) a fecha-la sozinha e potencialmente descartar trabalho que um
+  // humano ainda poderia recuperar.
 });
 
 console.log(`[worker] consumindo a fila ${NOME_FILA} (concurrency=${FILA_CONCURRENCY})`);
@@ -161,6 +229,12 @@ console.log(`[worker] consumindo a fila ${NOME_FILA} (concurrency=${FILA_CONCURR
 // no caminho modo bullmq — o early return `process.exit(0)` do modo inline
 // (linhas 46-51 acima) já impede que rode sem fila/Redis para monitorar.
 iniciarChecagemAlertas();
+
+// Fase 19.1 Plano 05 (DUR-03): varredura periódica da DLQ — re-driva failed
+// TRANSITÓRIOS sozinha (rate-spaced, DLQ_REDRIVE_ESPACO_MS entre re-adds) e
+// alarma jobs presos além de DLQ_AGE_ALERTA_MS. Mesmo gate do modo bullmq
+// (redrive-dlq.ts também no-op em modo inline).
+iniciarRedriveDLQ();
 
 // ===== Graceful shutdown (INFRA-05) =====
 //
@@ -181,6 +255,7 @@ async function encerrar(sinal: NodeJS.Signals): Promise<void> {
     console.error('[worker] falha ao drenar/fechar o worker:', e instanceof Error ? e.message : String(e));
   }
   fecharAlertas();
+  await fecharRedriveDLQ();
   await fecharFila();
   await fecharEstadoWebhook();
   // INFRA-05: o worker abre o cliente Redis do rate limiter ao escrever no
