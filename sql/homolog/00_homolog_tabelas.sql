@@ -40,6 +40,14 @@ create table if not exists hml_notas                 (like notas                
 -- ============================================================================
 create table if not exists hml_anotacoes_ligacao (like anotacoes_ligacao including all);
 
+-- ============================================================================
+-- Quick 260822-ubk — linha estruturada de transcrição/análise-IA (escala/21).
+-- REQUER que sql/escala/21_transcricoes_ligacao.sql já tenha sido aplicado em
+-- PROD (o LIKE abaixo exige `transcricoes_ligacao` já existir): aplicar a
+-- migração 21 ANTES de re-aplicar este arquivo.
+-- ============================================================================
+create table if not exists hml_transcricoes_ligacao (like transcricoes_ligacao including all);
+
 -- Mesmo débito de LIKE-snapshot único já tratado abaixo para as colunas do
 -- 08 — repetir aqui, explicitamente, o ADD COLUMN de escala/20.
 alter table hml_discador_leads_espelho add column if not exists super_fa boolean not null default false;
@@ -75,6 +83,7 @@ grant all on table
   hml_clickup_outbox,
   hml_clickup_campo_mapa,
   hml_notas,
-  hml_anotacoes_ligacao
+  hml_anotacoes_ligacao,
+  hml_transcricoes_ligacao
   to service_role;
 notify pgrst, 'reload schema';
