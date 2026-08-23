@@ -157,18 +157,38 @@ export async function registrarDesfechoTel(
   }
 }
 
+/** Quick-260822-tdj: campos estruturados do retorno de ligação, repassados
+ *  (além de `texto`) pra rota-ponte `/api/mobile/ligacao/:taskId/anotacao` —
+ *  o backend grava uma escrita DUPLA best-effort em `anotacoes_ligacao`
+ *  (Supabase), ao lado do comentário/marcadores ClickUp. Todos opcionais. */
+export type AnotacaoEstruturada = {
+  classificacao?: string;
+  demanda?: string;
+  observacao?: string;
+  canal?: "whatsapp" | "telefone";
+  aposWhatsapp?: boolean;
+  resultado?: string;
+  superFa?: boolean;
+};
+
 /**
  * Anota a Ligação (caminho "atendeu" do retorno tel:, R6/D-06) pela rota-ponte
  * `/api/mobile/ligacao/:taskId/anotacao` — persiste classificação/demanda/
  * observação num comentário (a rota do desfecho 'atendida' ignora
- * observação). Nunca lança; retorna `r.ok`.
+ * observação). `estruturado` (quick-260822-tdj, opcional) repassa os mesmos
+ * campos, além de `texto`, pra escrita dupla best-effort no Supabase — nunca
+ * substitui o comentário ClickUp. Nunca lança; retorna `r.ok`.
  */
-export async function registrarAnotacaoLigacao(taskId: string, texto: string): Promise<boolean> {
+export async function registrarAnotacaoLigacao(
+  taskId: string,
+  texto: string,
+  estruturado?: AnotacaoEstruturada,
+): Promise<boolean> {
   try {
     const r = await fetch(`/api/mobile/ligacao/${encodeURIComponent(taskId)}/anotacao`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ texto }),
+      body: JSON.stringify({ texto, ...estruturado }),
     });
     return r.ok;
   } catch {
