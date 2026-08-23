@@ -2,9 +2,9 @@
 -- prontos) que o Romero envia aos leads na conversa (Fase 2 do roadmap; o Felipe
 -- deixa pronto a pedido do Romero).
 --
--- (a) MVP: só `tipo` in ('texto','link'). Imagem/vídeo/áudio ficam para uma fase
---     posterior (exigem wrapper de mídia na Evolution + storage) — o CHECK abaixo
---     será estendido nessa fase.
+-- (a) `tipo` in ('texto','link','imagem','video','audio'). Texto/link são o MVP
+--     (Fatia 2); imagem/vídeo/áudio (Fase 5) são enviados NATIVAMENTE via Evolution
+--     /sendMedia, com `url` apontando para a mídia (http[s]).
 -- (b) Chave = `id` uuid (gen_random_uuid): a gestão (criar/editar/excluir) é feita
 --     via PostgREST DIRETO como `service_role` — uuid evita depender de grant de
 --     sequence a service_role (o insert de bigserial falharia sem `usage` na
@@ -25,7 +25,7 @@ create table if not exists conteudos (
   id            uuid primary key default gen_random_uuid(),
   categoria     text,
   titulo        text not null,
-  tipo          text not null check (tipo in ('texto', 'link')),
+  tipo          text not null check (tipo in ('texto', 'link', 'imagem', 'video', 'audio')),
   texto         text,
   url           text,
   ordem         int not null default 0,

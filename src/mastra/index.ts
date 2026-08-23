@@ -150,6 +150,8 @@ import {
   baixarAudioMensagem,
   // Fase 13 (fatia 2): chat de texto.
   enviarTexto,
+  // Fase 5 (roadmap): envio nativo de mídia (imagem/vídeo/áudio) da biblioteca.
+  enviarMidia,
   // Alerta de queda do chip (2026-08-19): posta no grupo de operação via a
   // instância de ALERTA — caminho independente do chip principal.
   enviarAlertaGrupo,
@@ -703,6 +705,7 @@ import {
   marcarSuperFaEspelho,
   // Fase 2 (roadmap): biblioteca de conteúdos recorrentes (mensagens/links prontos).
   listarConteudos,
+  buscarConteudo,
   criarConteudo,
   atualizarConteudo,
   excluirConteudo,
@@ -2555,6 +2558,70 @@ export const mastra = new Mastra({
           }).catch((e) =>
             console.warn('[discador] persistência do texto falhou:', e instanceof Error ? e.message : String(e)),
           );
+          return c.json({ status: 'ok' });
+        },
+      },
+      {
+        // Envio NATIVO de um conteúdo da biblioteca (Fase 5) a um lead: texto via
+        // sendText; link via sendText (a URL); imagem/vídeo/áudio via sendMedia
+        // (URL). Mesmo gate romero + guard anti-IDOR das rotas de áudio/texto.
+        // Marca "Romero já falou" e persiste uma linha legível na conversa.
+        path: '/api/discador/conteudos/:id/enviar',
+        method: 'POST',
+        handler: async (c) => {
+          const gate = await sessaoRomero(c);
+          if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
+          const id = c.req.param('id');
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const leadId = String(body.leadId || '');
+          if (!leadId) return c.json({ erro: 'leadId obrigatório' }, 400);
+          let conteudo;
+          try {
+            conteudo = await buscarConteudo(id);
+          } catch (e) {
+            console.error('[discador] erro ao carregar conteudo pro envio:', e instanceof Error ? e.message : String(e));
+            return c.json({ erro: 'Erro ao carregar o conteúdo' }, 502);
+          }
+          if (!conteudo || !conteudo.ativo) return c.json({ erro: 'Conteúdo não encontrado' }, 404);
+          let telefoneE164: string;
+          try {
+            const task = await validarLeadDaLista01(leadId);
+            const telefoneRaw = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
+            const e164 = telefoneRaw ? normalizarTelefoneE164(telefoneRaw) : null;
+            if (!e164) return c.json({ erro: 'Lead sem telefone válido' }, 422);
+            telefoneE164 = e164;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            return naoEncontrado ? c.json({ erro: 'Lead não encontrado' }, 404) : c.json({ erro: 'Erro ao carregar o lead' }, 502);
+          }
+          const textoParaChat = conteudo.tipo === 'texto' ? (conteudo.texto ?? '') : (conteudo.url ?? '');
+          try {
+            if (conteudo.tipo === 'texto') {
+              if (!conteudo.texto) return c.json({ erro: 'Conteúdo de texto vazio' }, 422);
+              await enviarTexto(telefoneE164, conteudo.texto);
+            } else if (conteudo.tipo === 'link') {
+              if (!conteudo.url) return c.json({ erro: 'Conteúdo de link sem URL' }, 422);
+              await enviarTexto(telefoneE164, conteudo.url);
+            } else {
+              if (!conteudo.url) return c.json({ erro: 'Conteúdo de mídia sem URL' }, 422);
+              const mediatype = conteudo.tipo === 'imagem' ? 'image' : conteudo.tipo === 'video' ? 'video' : 'audio';
+              await enviarMidia(telefoneE164, { mediatype, media: conteudo.url, caption: conteudo.titulo || undefined });
+            }
+          } catch (e) {
+            console.error('[discador] falha ao enviar conteudo via Evolution:', e instanceof Error ? e.message : String(e));
+            return c.json(await classificarFalhaEnvioAudio(e), 502);
+          }
+          void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
+          void salvarMensagemWhatsapp({
+            id: `conteudo-${id}-${leadId}-${Date.now()}`,
+            lead_task_id: leadId,
+            telefone_canonico: telefoneCanonico(telefoneE164),
+            de_nos: true,
+            ts: new Date().toISOString(),
+            tipo: 'texto',
+            texto: conteudo.tipo === 'texto' ? textoParaChat : `${conteudo.titulo}${textoParaChat ? ` — ${textoParaChat}` : ''}`,
+          }).catch((e) => console.warn('[discador] persistência do conteudo falhou:', e instanceof Error ? e.message : String(e)));
           return c.json({ status: 'ok' });
         },
       },

@@ -1313,7 +1313,7 @@ export async function inserirTranscricaoLigacao(row: TranscricaoLigacaoRow): Pro
 // a UI degrada em vez de quebrar. Erro de rede/HTTP com Supabase configurado
 // LANÇA (WR-03); o caller (rota) loga-e-degrada. LGPD: nenhum dado pessoal aqui.
 
-export type ConteudoTipo = 'texto' | 'link';
+export type ConteudoTipo = 'texto' | 'link' | 'imagem' | 'video' | 'audio';
 
 export interface ConteudoRow {
   id: string;
@@ -1344,7 +1344,7 @@ function mapConteudo(r: Record<string, unknown>): ConteudoRow {
     id: String(r.id ?? ''),
     categoria: (r.categoria as string) ?? null,
     titulo: String(r.titulo ?? ''),
-    tipo: r.tipo === 'link' ? 'link' : 'texto',
+    tipo: ['texto', 'link', 'imagem', 'video', 'audio'].includes(String(r.tipo)) ? (r.tipo as ConteudoTipo) : 'texto',
     texto: (r.texto as string) ?? null,
     url: (r.url as string) ?? null,
     ordem: Number(r.ordem ?? 0),
@@ -1386,6 +1386,29 @@ export async function listarConteudos(
   const data = await res.json();
   const linhas: Record<string, unknown>[] = Array.isArray(data) ? data : [];
   return linhas.map(mapConteudo);
+}
+
+/** Busca 1 conteúdo por id (para o envio nativo). Sem Supabase/404 -> null. */
+export async function buscarConteudo(id: string): Promise<ConteudoRow | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !id) return null;
+  const params = new URLSearchParams();
+  params.set('select', 'id,categoria,titulo,tipo,texto,url,ordem,ativo,criado_em,atualizado_em');
+  params.set('id', `eq.${id}`);
+  params.set('limit', '1');
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_CONTEUDOS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(`[supabase] falha de rede ao buscar conteudo: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar conteudo (${SUPABASE_TABLE_CONTEUDOS})`);
+  }
+  const data = (await res.json()) as Record<string, unknown>[];
+  return Array.isArray(data) && data[0] ? mapConteudo(data[0]) : null;
 }
 
 /**

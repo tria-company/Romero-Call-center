@@ -7,7 +7,7 @@ import { fmtTelefone, urlCallCenter, vibrar } from "@/lib/contato";
 import { iniciarLigacaoReal, preaquecerDossieLead, useLeadReal } from "@/lib/leads-real";
 import { buscarConversaLead, buscarMidiaMensagem, buscarNovidades, enviarAudioParaLead, enviarTextoParaLead, pularContato, useAudiosReais } from "@/lib/audios-real";
 import type { LeadAudioReal, MensagemConversa } from "@/lib/audios-real";
-import { listarConteudos } from "@/lib/conteudos-real";
+import { listarConteudos, enviarConteudoParaLead } from "@/lib/conteudos-real";
 import type { ConteudoReal } from "@/lib/conteudos-real";
 import { BibliotecaConteudos } from "./BibliotecaConteudos";
 import { Autobox, Vhead } from "./blocos";
@@ -193,10 +193,21 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
     setConteudosCarregou(true);
   }
 
-  /* Escolher = INSERIR no campo de texto (não envia sozinho): o operador revisa
-     e toca enviar (reusa o fluxo de texto existente). Texto → o próprio texto;
-     link → a URL. Anexa ao que já estiver digitado. */
-  function escolherConteudo(cnt: ConteudoReal) {
+  /* Escolher um conteúdo:
+     - TEXTO/LINK → INSERE no campo (o operador revisa e toca enviar; reusa o
+       fluxo de texto existente). Anexa ao que já estiver digitado.
+     - IMAGEM/VÍDEO/ÁUDIO → envio NATIVO one-tap (não dá pra "inserir" mídia no
+       campo de texto): manda direto via /conteudos/:id/enviar e recarrega a
+       conversa. */
+  async function escolherConteudo(cnt: ConteudoReal) {
+    if (cnt.tipo === "imagem" || cnt.tipo === "video" || cnt.tipo === "audio") {
+      setConteudosAberto(false);
+      if (!leadAberto) return;
+      const alvo = leadAberto.leadTaskId;
+      const ok = await enviarConteudoParaLead(cnt.id, alvo);
+      if (ok) window.setTimeout(() => void atualizarConversa(alvo, true), 1200);
+      return;
+    }
     const trecho = cnt.tipo === "link" ? (cnt.url ?? "") : (cnt.texto ?? "");
     if (trecho) setTextoDigitado((t) => (t.trim() ? t + "\n" : "") + trecho);
     setConteudosAberto(false);
@@ -1642,7 +1653,7 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                   <div key={cat} className="au-libgrupo">
                     <div className="au-libcat">{cat}</div>
                     {itens.map((cnt) => (
-                      <button key={cnt.id} type="button" className="au-libitem" onClick={() => escolherConteudo(cnt)}>
+                      <button key={cnt.id} type="button" className="au-libitem" onClick={() => void escolherConteudo(cnt)}>
                         <span className="au-libtag">{cnt.tipo === "link" ? "link" : "texto"}</span>
                         <span className="au-libtxt">
                           <span className="au-libnome">{cnt.titulo}</span>

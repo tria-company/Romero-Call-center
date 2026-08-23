@@ -6,7 +6,7 @@
    o backend do discador. LGPD: sem dado pessoal (só título/categoria/texto/url).
    ══════════════════════════════════════════════════════════════════════════ */
 
-export type ConteudoTipo = "texto" | "link";
+export type ConteudoTipo = "texto" | "link" | "imagem" | "video" | "audio";
 
 export type ConteudoReal = {
   id: string;
@@ -84,6 +84,25 @@ export async function excluirConteudo(id: string): Promise<boolean> {
     const r = await fetch(`/api/mobile/conteudos/${encodeURIComponent(id)}`, {
       method: "DELETE",
       cache: "no-store",
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Envia um conteúdo (por id) NATIVAMENTE ao lead (Fase 5): texto/link viram
+ * sendText; imagem/vídeo/áudio viram sendMedia (o backend decide pelo tipo).
+ * true se o envio foi aceito.
+ */
+export async function enviarConteudoParaLead(id: string, leadId: string): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/mobile/conteudos/${encodeURIComponent(id)}/enviar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({ leadId }),
     });
     return r.ok;
   } catch {

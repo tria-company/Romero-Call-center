@@ -63,12 +63,12 @@ export function BibliotecaConteudos({ aoFechar }: { aoFechar: () => void }) {
       setErro("Título é obrigatório.");
       return;
     }
-    if (tipo === "link" && !url.trim()) {
-      setErro("URL é obrigatória para tipo link.");
+    if (tipo === "texto" && !texto.trim()) {
+      setErro("Texto é obrigatório.");
       return;
     }
-    if (tipo === "texto" && !texto.trim()) {
-      setErro("Texto é obrigatório para tipo texto.");
+    if (tipo !== "texto" && !url.trim()) {
+      setErro(tipo === "link" ? "URL é obrigatória." : "URL da mídia é obrigatória.");
       return;
     }
     setSalvando(true);
@@ -78,7 +78,7 @@ export function BibliotecaConteudos({ aoFechar }: { aoFechar: () => void }) {
       titulo: t,
       tipo,
       texto: tipo === "texto" ? texto : null,
-      url: tipo === "link" ? url.trim() : null,
+      url: tipo === "texto" ? null : url.trim(),
     };
     const r = editando ? await atualizarConteudo(editando.id, dados) : await criarConteudo(dados);
     setSalvando(false);
@@ -117,20 +117,31 @@ export function BibliotecaConteudos({ aoFechar }: { aoFechar: () => void }) {
           <div className="bc-formtit">{editando ? "Editar conteúdo" : "Novo conteúdo"}</div>
           <div className="bc-row">
             <input className="bc-in" placeholder="Categoria (ex.: Resgates)" value={categoria} onChange={(e) => setCategoria(e.target.value)} maxLength={60} />
-            <div className="bc-seg">
-              <button type="button" className={"bc-segb" + (tipo === "link" ? " on" : "")} onClick={() => setTipo("link")}>
-                Link
-              </button>
-              <button type="button" className={"bc-segb" + (tipo === "texto" ? " on" : "")} onClick={() => setTipo("texto")}>
-                Texto
-              </button>
-            </div>
+            <select
+              className="bc-in bc-sel"
+              value={tipo}
+              onChange={(e) => setTipo(e.target.value as ConteudoTipo)}
+              aria-label="Tipo do conteúdo"
+            >
+              <option value="link">Link</option>
+              <option value="texto">Texto</option>
+              <option value="imagem">Imagem</option>
+              <option value="video">Vídeo</option>
+              <option value="audio">Áudio</option>
+            </select>
           </div>
           <input className="bc-in" placeholder="Título (ex.: Instagram do Romero)" value={titulo} onChange={(e) => setTitulo(e.target.value)} maxLength={120} />
-          {tipo === "link" ? (
-            <input className="bc-in" placeholder="URL (https://…)" value={url} onChange={(e) => setUrl(e.target.value)} inputMode="url" maxLength={2000} />
-          ) : (
+          {tipo === "texto" ? (
             <textarea className="bc-ta" placeholder="Texto da mensagem" value={texto} onChange={(e) => setTexto(e.target.value)} rows={3} maxLength={4096} />
+          ) : (
+            <input
+              className="bc-in"
+              placeholder={tipo === "link" ? "URL (https://…)" : "URL da mídia (https://…)"}
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              inputMode="url"
+              maxLength={2000}
+            />
           )}
           {erro && <div className="bc-erro">{erro}</div>}
           <div className="bc-acts">
@@ -197,6 +208,7 @@ const BC_CSS = `
 .bc-in{ flex:1; min-width:0; height:42px; padding:0 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg-0, #0b0f0d); color:var(--ink); font-size:14px; outline:none; }
 .bc-ta{ width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg-0, #0b0f0d); color:var(--ink); font-size:14px; outline:none; resize:vertical; font-family:inherit; }
 .bc-in::placeholder,.bc-ta::placeholder{ color:var(--dim); }
+.bc-sel{ flex:none; min-width:130px; cursor:pointer; }
 .bc-seg{ flex:none; display:flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
 .bc-segb{ padding:0 14px; height:42px; border:none; background:var(--bg-0, #0b0f0d); color:var(--dim); font-size:13px; font-weight:700; cursor:pointer; }
 .bc-segb.on{ background:var(--go); color:#062015; }
