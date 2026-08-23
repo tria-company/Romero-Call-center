@@ -88,7 +88,10 @@ import { chamarLLM } from './llm.ts';
 
 import { regenerarDossieDoLead } from './gerar-dossie.ts';
 
-import { marcarEventoWebhook } from './supabase.ts';
+// inserirTranscricaoLigacao (quick-260822-ubk): linha estruturada de
+// transcrição/análise-IA — RETRY-BACKED (não best-effort), chamada FORA de
+// try/catch em processarRecordJob (ver comentário no call site).
+import { marcarEventoWebhook, inserirTranscricaoLigacao } from './supabase.ts';
 
 import {
   lerTaskAtiva,
@@ -509,8 +512,12 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // (nunca esgota) — so entra em jogo quando o worker classifica a causa como
   // permanente e decide estacionar.
   let transcricao: string;
+  // quick-260822-ubk: path da cópia canônica hoisted p/ fora do try — vira o
+  // storage_path da linha estruturada em transcricoes_ligacao (mais abaixo).
+  let storagePathGravacao: string | null = null;
   try {
     const path = await guardarGravacao(callId, recordUrl);
+    storagePathGravacao = path;
     const fonte = await baixarGravacao(path);
     transcricao = await transcreverGravacaoLocal(fonte, montarParamsListen());
   } catch (e) {
@@ -650,6 +657,40 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     voto: resultadoAnalise?.voto,
     votoEvidencia: resultadoAnalise?.votoEvidencia,
     analiseIaBase: resultadoAnalise?.resumoAnalise,
+  });
+
+  // DEVIATION APROVADA PELO USUÁRIO (quick-260822-ubk, 2026-08-22): grava a
+  // linha estruturada da transcrição/análise-IA em transcricoes_ligacao.
+  // NÃO é best-effort — "o clickup pode até dar erro mas no banco não".
+  // Roda AQUI (APÓS a consolidação ClickUp bem-sucedida acima, ANTES da marca
+  // durável de processado — marcarEventoWebhook logo abaixo e
+  // marcarRecordProcessado no fim) e FORA de try/catch: falha do Supabase
+  // LANÇA (mesmo espírito retentável dos outros passos deste job) e o
+  // worker/BullMQ retenta o JOB INTEIRO até gravar. Crash-safe por design:
+  // dedup CR-02 (recordJaProcessado só pula depois de marcarRecordProcessado)
+  // + upsert on_conflict=call_id (inserirTranscricaoLigacao) garantem que o
+  // retry nunca duplica nem refaz efeito no banco. Exceção no-op: sem env do
+  // Supabase (dev local) a função não lança — log 1x, nunca vira loop de retry.
+  let leadTaskIdTranscricao: string | null = null;
+  try {
+    // Best-effort SÓ para este metadado auxiliar — nunca bloqueia a escrita
+    // da linha principal por causa da correlação lead<->ligação.
+    leadTaskIdTranscricao = await resolverLeadDaLigacao(taskId);
+  } catch (e) {
+    console.error('[processador] falha ao resolver lead da ligacao (transcricoes_ligacao):', e);
+    leadTaskIdTranscricao = null;
+  }
+  await inserirTranscricaoLigacao({
+    call_id: callId,
+    ligacao_task_id: taskId,
+    lead_task_id: leadTaskIdTranscricao,
+    // main (Fase 19.1): cópia canônica no Supabase Storage — path hoisted do
+    // try de transcrição acima (guardarGravacao).
+    storage_path: storagePathGravacao,
+    url_gravacao_wavoip: recordUrl,
+    transcricao,
+    analise_ia: resultadoAnalise ?? null,
+    duracao_seg: derivarDuracao(payload),
   });
 
   // Reconciliação (2026-08-20, "se ligou, sai da lista"): a chamada desta
