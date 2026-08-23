@@ -130,6 +130,18 @@ if (!DEEPGRAM_API_KEY) {
 // direto continua selecionável com LLM_PROVIDER=openai explícito.
 export const LLM_PROVIDER = process.env.LLM_PROVIDER || 'azure';
 
+// Temperatura de sampling dos agentes (Fase 4 do roadmap). OPT-IN: só é enviada
+// ao provider quando LLM_TEMPERATURE está definida no env — assim o comportamento
+// atual (sem parâmetro; usa o default do modelo) NÃO muda por acidente, e
+// deployments Azure que rejeitam `temperature` não quebram. Recomendado
+// LLM_TEMPERATURE=0.2 para reduzir alucinação/invenção de dados (ex.: nome de
+// animal ausente no contexto) — ative após confirmar que o deployment aceita o
+// parâmetro. undefined = não envia.
+export const LLM_TEMPERATURE: number | undefined =
+  process.env.LLM_TEMPERATURE !== undefined && Number.isFinite(Number(process.env.LLM_TEMPERATURE))
+    ? Number(process.env.LLM_TEMPERATURE)
+    : undefined;
+
 // OpenAI direto (D-08a) — usado enquanto LLM_PROVIDER=openai (default).
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
@@ -456,6 +468,15 @@ export const SUPABASE_TABLE_ANOTACOES_LIGACAO =
 // console.warn.
 export const SUPABASE_TABLE_TRANSCRICOES_LIGACAO =
   process.env.SUPABASE_TABLE_TRANSCRICOES_LIGACAO || 'transcricoes_ligacao';
+
+// ===== Fase 2 (roadmap) — biblioteca de conteúdos recorrentes (sql/escala/27) =====
+//
+// Tabela nova para os conteúdos/links prontos que o Romero envia na conversa (o
+// Felipe deixa pronto a pedido do Romero). Mesmo padrão de isolamento das
+// SUPABASE_TABLE_* acima: default SEM prefixo (produção); homolog sobrescreve para
+// 'hml_conteudos' via deploy/homolog.env. Default sensato -> sem console.warn.
+export const SUPABASE_TABLE_CONTEUDOS =
+  process.env.SUPABASE_TABLE_CONTEUDOS || 'conteudos';
 // ===== Escala — estado compartilhado do webhook (Fase 5, escala-150-atendentes) =====
 //
 // URL do Redis usado para compartilhar entre processos/réplicas o estado do webhook

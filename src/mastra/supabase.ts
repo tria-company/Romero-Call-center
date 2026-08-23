@@ -30,6 +30,7 @@ import {
   SUPABASE_TABLE_VOTOS_LIGACAO,
   SUPABASE_TABLE_ANOTACOES_LIGACAO,
   SUPABASE_TABLE_TRANSCRICOES_LIGACAO,
+  SUPABASE_TABLE_CONTEUDOS,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
@@ -537,7 +538,7 @@ export async function upsertLeadsEspelho(rows: LeadEspelhoRow[]): Promise<number
   return rows.length;
 }
 
-export type RecorteEspelho = 'todos' | 'romero' | 'andressa' | 'militante' | 'sem-contato';
+export type RecorteEspelho = 'todos' | 'romero' | 'andressa' | 'militante' | 'sem-contato' | 'romero-ja-falou';
 
 /** Resumo de lead servido da Base (mesma forma do LeadResumo do ClickUp). */
 export interface LeadEspelhoResumo {
@@ -551,6 +552,8 @@ export interface LeadEspelhoResumo {
   confirmouAndressa: string | null;
   militante: boolean;
   semContato: boolean;
+  /** Fase 3: o Romero já iniciou conversa com este lead (write-through no envio). */
+  romeroJaFalou: boolean;
 }
 
 /**
@@ -571,7 +574,7 @@ export async function listarLeadsEspelho(opts: {
   const params = new URLSearchParams();
   params.set(
     'select',
-    'clickup_task_id,nome,telefone,cpf,bairro,cidade,confirmou_romero,confirmou_andressa,militante,sem_contato',
+    'clickup_task_id,nome,telefone,cpf,bairro,cidade,confirmou_romero,confirmou_andressa,militante,sem_contato,romero_ja_falou',
   );
   params.set('order', 'nome_lower.asc');
   params.set('limit', String(limit));
@@ -583,6 +586,7 @@ export async function listarLeadsEspelho(opts: {
     case 'andressa': params.set('confirmou_andressa', 'eq.sim'); break;
     case 'militante': params.set('militante', 'is.true'); break;
     case 'sem-contato': params.set('sem_contato', 'is.true'); break;
+    case 'romero-ja-falou': params.set('romero_ja_falou', 'is.true'); break;
     default: break;
   }
   let res: Response;
@@ -615,8 +619,32 @@ export async function listarLeadsEspelho(opts: {
     confirmouAndressa: (r.confirmou_andressa as string) ?? null,
     militante: Boolean(r.militante),
     semContato: Boolean(r.sem_contato),
+    romeroJaFalou: Boolean(r.romero_ja_falou),
   }));
   return { leads, total };
+}
+
+/**
+ * Write-through da flag "Romero já falou" no ESPELHO (Fase 3). PATCH por
+ * clickup_task_id. Sem Supabase -> false (no-op). Erro de rede/HTTP NÃO lança
+ * (best-effort, mesmo espírito do write-through de voto): o envio já aconteceu; a
+ * flag é conveniência de filtro. Retorna true se o PATCH foi aceito.
+ */
+export async function marcarRomeroJaFalouEspelho(leadTaskId: string): Promise<boolean> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !leadTaskId) return false;
+  try {
+    const res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?clickup_task_id=eq.${encodeURIComponent(leadTaskId)}`,
+      {
+        method: 'PATCH',
+        headers: { ...headers(), 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ romero_ja_falou: true }),
+      },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1275,4 +1303,207 @@ export async function inserirTranscricaoLigacao(row: TranscricaoLigacaoRow): Pro
       `[supabase] HTTP ${res.status} ao inserir transcricao em ${SUPABASE_TABLE_TRANSCRICOES_LIGACAO}`,
     );
   }
+}
+
+// ===== Fase 2 (roadmap) — biblioteca de conteúdos recorrentes (sql/escala/27) =====
+//
+// Conteúdos/links prontos que o Romero envia na conversa. CRUD via PostgREST
+// DIRETO como service_role. DEGRADAÇÃO GRACIOSA (mesmo espírito da durabilidade
+// do webhook): sem Supabase configurado, listar -> [] e mutações -> null/false —
+// a UI degrada em vez de quebrar. Erro de rede/HTTP com Supabase configurado
+// LANÇA (WR-03); o caller (rota) loga-e-degrada. LGPD: nenhum dado pessoal aqui.
+
+export type ConteudoTipo = 'texto' | 'link' | 'imagem' | 'video' | 'audio';
+
+export interface ConteudoRow {
+  id: string;
+  categoria: string | null;
+  titulo: string;
+  tipo: ConteudoTipo;
+  texto: string | null;
+  url: string | null;
+  ordem: number;
+  ativo: boolean;
+  criado_em: string;
+  atualizado_em: string;
+}
+
+/** Campos aceitos na criação/edição de um conteúdo. */
+export interface ConteudoInput {
+  categoria?: string | null;
+  titulo: string;
+  tipo: ConteudoTipo;
+  texto?: string | null;
+  url?: string | null;
+  ordem?: number;
+  ativo?: boolean;
+}
+
+function mapConteudo(r: Record<string, unknown>): ConteudoRow {
+  return {
+    id: String(r.id ?? ''),
+    categoria: (r.categoria as string) ?? null,
+    titulo: String(r.titulo ?? ''),
+    tipo: ['texto', 'link', 'imagem', 'video', 'audio'].includes(String(r.tipo)) ? (r.tipo as ConteudoTipo) : 'texto',
+    texto: (r.texto as string) ?? null,
+    url: (r.url as string) ?? null,
+    ordem: Number(r.ordem ?? 0),
+    ativo: Boolean(r.ativo),
+    criado_em: String(r.criado_em ?? ''),
+    atualizado_em: String(r.atualizado_em ?? ''),
+  };
+}
+
+/**
+ * Lista os conteúdos da biblioteca (ordenados por categoria, depois ordem). Sem
+ * Supabase configurado OU tabela ainda não aplicada (404) -> [] (a UI degrada).
+ * Erro de rede/HTTP real LANÇA (WR-03).
+ */
+export async function listarConteudos(
+  opts?: { categoria?: string; incluirInativos?: boolean },
+): Promise<ConteudoRow[]> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return [];
+  const params = new URLSearchParams();
+  params.set('select', 'id,categoria,titulo,tipo,texto,url,ordem,ativo,criado_em,atualizado_em');
+  params.set('order', 'categoria.asc,ordem.asc,criado_em.asc');
+  if (!opts?.incluirInativos) params.set('ativo', 'is.true');
+  const categoria = (opts?.categoria ?? '').trim();
+  if (categoria) params.set('categoria', `eq.${categoria}`);
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_CONTEUDOS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar conteudos: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    if (res.status === 404) return []; // tabela ainda não aplicada -> degrada
+    throw new Error(`[supabase] HTTP ${res.status} ao listar conteudos (${SUPABASE_TABLE_CONTEUDOS})`);
+  }
+  const data = await res.json();
+  const linhas: Record<string, unknown>[] = Array.isArray(data) ? data : [];
+  return linhas.map(mapConteudo);
+}
+
+/** Busca 1 conteúdo por id (para o envio nativo). Sem Supabase/404 -> null. */
+export async function buscarConteudo(id: string): Promise<ConteudoRow | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !id) return null;
+  const params = new URLSearchParams();
+  params.set('select', 'id,categoria,titulo,tipo,texto,url,ordem,ativo,criado_em,atualizado_em');
+  params.set('id', `eq.${id}`);
+  params.set('limit', '1');
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_CONTEUDOS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(`[supabase] falha de rede ao buscar conteudo: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar conteudo (${SUPABASE_TABLE_CONTEUDOS})`);
+  }
+  const data = (await res.json()) as Record<string, unknown>[];
+  return Array.isArray(data) && data[0] ? mapConteudo(data[0]) : null;
+}
+
+/**
+ * Cria um conteúdo. Sem Supabase -> null (no-op). Erro de rede/HTTP LANÇA.
+ * Retorna a linha criada (return=representation) ou null.
+ */
+export async function criarConteudo(dados: ConteudoInput): Promise<ConteudoRow | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const corpo = [{
+    categoria: dados.categoria ?? null,
+    titulo: dados.titulo,
+    tipo: dados.tipo,
+    texto: dados.texto ?? null,
+    url: dados.url ?? null,
+    ordem: dados.ordem ?? 0,
+    ativo: dados.ativo ?? true,
+  }];
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_CONTEUDOS}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'return=representation' },
+      body: JSON.stringify(corpo),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao criar conteudo: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao criar conteudo (${SUPABASE_TABLE_CONTEUDOS})`);
+  }
+  const data = (await res.json()) as Record<string, unknown>[];
+  return Array.isArray(data) && data[0] ? mapConteudo(data[0]) : null;
+}
+
+/**
+ * Atualiza um conteúdo por id (PATCH). Sem Supabase -> null. Erro de rede/HTTP
+ * LANÇA. Retorna a linha atualizada, ou null se o id não existe (PATCH sem match
+ * volta []).
+ */
+export async function atualizarConteudo(
+  id: string,
+  dados: Partial<ConteudoInput>,
+): Promise<ConteudoRow | null> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const patch: Record<string, unknown> = { atualizado_em: new Date().toISOString() };
+  for (const k of ['categoria', 'titulo', 'tipo', 'texto', 'url', 'ordem', 'ativo'] as const) {
+    if (dados[k] !== undefined) patch[k] = dados[k];
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CONTEUDOS}?id=eq.${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: { ...headers(), 'Prefer': 'return=representation' },
+        body: JSON.stringify(patch),
+      },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao atualizar conteudo: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao atualizar conteudo (${SUPABASE_TABLE_CONTEUDOS})`);
+  }
+  const data = (await res.json()) as Record<string, unknown>[];
+  return Array.isArray(data) && data[0] ? mapConteudo(data[0]) : null;
+}
+
+/**
+ * SOFT-DELETE de um conteúdo (ativo=false) por id. Sem Supabase -> false. Erro
+ * de rede/HTTP LANÇA. Retorna true se o PATCH foi aceito.
+ */
+export async function excluirConteudo(id: string): Promise<boolean> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return false;
+  let res: Response;
+  try {
+    res = await fetchTimeout(
+      `${SUPABASE_REST_URL}/${SUPABASE_TABLE_CONTEUDOS}?id=eq.${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: { ...headers(), 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ ativo: false, atualizado_em: new Date().toISOString() }),
+      },
+    );
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao excluir conteudo: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao excluir conteudo (${SUPABASE_TABLE_CONTEUDOS})`);
+  }
+  return true;
 }

@@ -21,6 +21,7 @@ const RECORTES = [
   { id: "andressa", label: "Confirmou 4020" },
   { id: "militante", label: "Militante" },
   { id: "sem-contato", label: "Sem contato" },
+  { id: "romero-ja-falou", label: "Romero já falou" },
 ] as const;
 
 type RecorteId = (typeof RECORTES)[number]["id"];
@@ -49,6 +50,8 @@ export function Base() {
         return leads.filter((l) => l.militante);
       case "sem-contato":
         return leads.filter((l) => l.semContato);
+      case "romero-ja-falou":
+        return leads.filter((l) => l.romeroJaFalou);
       default:
         return leads;
     }

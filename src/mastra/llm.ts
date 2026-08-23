@@ -9,6 +9,7 @@ import { createAzure } from '@ai-sdk/azure';
 import { generateText, type LanguageModel } from 'ai';
 import {
   LLM_PROVIDER,
+  LLM_TEMPERATURE,
   OPENAI_API_KEY,
   OPENAI_MODEL,
   AZURE_OPENAI_API_KEY,
@@ -126,6 +127,9 @@ export async function chamarLLM(prompt: string, system?: string): Promise<string
     model: modeloLLM(),
     system,
     prompt,
+    // Fase 4: temperatura só é enviada quando LLM_TEMPERATURE está no env (opt-in),
+    // pra não alterar o comportamento atual nem quebrar deployments que a rejeitam.
+    ...(LLM_TEMPERATURE !== undefined ? { temperature: LLM_TEMPERATURE } : {}),
   });
   return text;
 }
