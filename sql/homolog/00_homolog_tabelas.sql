@@ -32,6 +32,18 @@ create table if not exists hml_clickup_outbox        (like clickup_outbox       
 create table if not exists hml_clickup_campo_mapa    (like clickup_campo_mapa    including all);
 create table if not exists hml_notas                 (like notas                 including all);
 
+-- ============================================================================
+-- Quick 260822-tdj — persistência da classificação/demanda/super-fã (escala/20).
+-- REQUER que sql/escala/20_anotacoes_ligacao.sql já tenha sido aplicado em
+-- PROD (o LIKE abaixo exige `anotacoes_ligacao` já existir): aplicar a
+-- migração 20 ANTES de re-aplicar este arquivo.
+-- ============================================================================
+create table if not exists hml_anotacoes_ligacao (like anotacoes_ligacao including all);
+
+-- Mesmo débito de LIKE-snapshot único já tratado abaixo para as colunas do
+-- 08 — repetir aqui, explicitamente, o ADD COLUMN de escala/20.
+alter table hml_discador_leads_espelho add column if not exists super_fa boolean not null default false;
+
 -- ATENÇÃO (débito de LIKE ser snapshot único): hml_discador_leads_espelho foi
 -- criada ANTES do ALTER aditivo de sql/escala/08_leads_full.sql — o LIKE
 -- acima não herda ALTERs feitos depois. Repetir aqui, explicitamente, o MESMO
@@ -62,6 +74,7 @@ grant all on table
   hml_audios_envios,
   hml_clickup_outbox,
   hml_clickup_campo_mapa,
-  hml_notas
+  hml_notas,
+  hml_anotacoes_ligacao
   to service_role;
 notify pgrst, 'reload schema';

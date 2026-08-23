@@ -461,6 +461,16 @@ export const SUPABASE_TABLE_CLICKUP_CAMPO_MAPA =
   process.env.SUPABASE_TABLE_CLICKUP_CAMPO_MAPA || 'clickup_campo_mapa';
 export const SUPABASE_TABLE_NOTAS = process.env.SUPABASE_TABLE_NOTAS || 'notas';
 
+// ===== Quick 260822-tdj — persistência de classificação/demanda/super-fã =====
+//
+// Tabela nova (sql/escala/20_anotacoes_ligacao.sql) para a escrita dupla
+// best-effort dos campos estruturados do retorno de ligação. Mesmo padrão de
+// isolamento das SUPABASE_TABLE_* acima: default SEM prefixo (produção);
+// homolog sobrescreve para 'hml_anotacoes_ligacao' via deploy/homolog.env.
+// Default sensato -> sem console.warn.
+export const SUPABASE_TABLE_ANOTACOES_LIGACAO =
+  process.env.SUPABASE_TABLE_ANOTACOES_LIGACAO || 'anotacoes_ligacao';
+
 // ===== Fase 18 — Portão 1 (substrato transacional, Caminho B) — nome da RPC =====
 //
 // Nome da RPC plpgsql que src/mastra/outbox-rpc.ts::comOutboxRpc chama
