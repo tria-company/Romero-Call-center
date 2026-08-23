@@ -906,6 +906,10 @@ import {
   // supabase — paridade com o ramo ClickUp (lerTask), sem o qual a fila
   // Supabase mostraria o telefone cru como nome.
   lerNomeLeadEspelho,
+  // Quick 260823: dossiê 360° do lead a partir do Supabase (coluna `dossie`
+  // do espelho) sob FONTE_LIGACOES=supabase — espelho de clickup.ts::
+  // lerContextoLead, resolve o lead pela Ligação local (id numérico).
+  lerContextoLeadSupabase,
   // Quick 260822-tdj: escrita dupla best-effort dos campos estruturados do
   // retorno de ligação (rotas /anotacao e /super-fa) — inserirAnotacaoLigacao
   // grava em anotacoes_ligacao, marcarSuperFaEspelho seta
@@ -1998,6 +2002,14 @@ export const mastra = new Mastra({
           if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
           const taskId = c.req.param('taskId');
           try {
+            // Fase B/C: sob FONTE_LIGACOES='supabase' o `taskId` é o id LOCAL
+            // numérico da Ligação e o dossiê vem da coluna `dossie` do espelho
+            // (não da descrição da task ClickUp, que pode nem existir para leads
+            // criados direto no banco). Mesmo shape {temLead,contexto}.
+            if (FONTE_LIGACOES === 'supabase') {
+              const contexto = await lerContextoLeadSupabase(Number(taskId), sess.usuario);
+              return c.json(contexto);
+            }
             const contexto = await lerContextoLead(taskId, assignee);
             return c.json(contexto);
           } catch (e) {

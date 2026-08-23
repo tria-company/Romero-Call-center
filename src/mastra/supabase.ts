@@ -992,6 +992,48 @@ export async function lerLigacaoSupabase(id: number, operadorEsperado: string): 
   return { ...linhaParaItemFila(row), script: row.script ?? '' };
 }
 
+/**
+ * Contexto (dossiê 360°) do lead ligado à Ligação `ligacaoId` do operador —
+ * espelho Supabase de `clickup.ts::lerContextoLead`. Sob FONTE_LIGACOES=
+ * 'supabase' o taskId da rota é o id LOCAL numérico da Ligação; valida a posse
+ * (mesmos guards CR-01 de `lerLigacaoSupabase`: não encontrada / não pertence
+ * ao operador / concluída) e devolve a coluna `dossie` do lead no espelho
+ * (`SUPABASE_TABLE_LEADS_ESPELHO`, casado por `clickup_task_id =
+ * lead_clickup_task_id`). Mesmo contrato `{ temLead, contexto }` — o caller
+ * (index.ts) não muda o mapeamento de erro (as strings casam os catches
+ * 404/502). Read-only. Erros de infra/autorização LANÇAM (WR-03).
+ */
+export async function lerContextoLeadSupabase(
+  ligacaoId: number,
+  operador: string,
+): Promise<{ temLead: boolean; contexto: string }> {
+  checarConfig();
+  const lig = await lerLigacaoSupabase(ligacaoId, operador);
+  const leadTaskId = lig.leadTaskId ?? '';
+  if (!leadTaskId) return { temLead: false, contexto: '' };
+  const params = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select: 'dossie',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler o dossiê do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler o dossiê do lead em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<{ dossie?: string | null }>;
+  const dossie = data?.[0]?.dossie ?? '';
+  return { temLead: true, contexto: dossie ?? '' };
+}
+
 /** Formata `inicio` (timestamptz ISO) em "DD/MM/AAAA HH:MM" Brasília — mesmo
  *  resultado visual de clickup.ts::formatarDataLigacao (fonte diferente: ISO
  *  aqui, epoch-ms lá). Entrada vazia/inválida devolve '' (nunca lança). */
