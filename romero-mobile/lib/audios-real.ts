@@ -321,6 +321,10 @@ export type MensagemConversa = {
   texto: string | null;
   /** transcrição (Deepgram) quando a mensagem é de áudio; null se indisponível. */
   transcricao: string | null;
+  /** URL pública da mídia (imagem/vídeo/áudio da biblioteca) que ENVIAMOS — pro
+   *  balão renderizar a imagem, não o rótulo "📎 título". null nas demais. */
+  midiaUrl?: string | null;
+  midiaTipo?: "imagem" | "video" | "audio" | string | null;
 };
 
 /**

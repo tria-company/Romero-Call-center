@@ -3461,6 +3461,11 @@ export const mastra = new Mastra({
             return c.json(await classificarFalhaEnvioAudio(e), 502);
           }
           void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
+          // Mídia (imagem/vídeo/áudio da biblioteca): guarda a URL pública em
+          // `bruto` pra conversa renderizar o balão como imagem — assim o Romero
+          // VÊ o que mandou, não só o rótulo "📎 título" (texto/link não têm URL
+          // de mídia, seguem sem `bruto`).
+          const ehMidiaConteudo = conteudo.tipo === 'imagem' || conteudo.tipo === 'video' || conteudo.tipo === 'audio';
           void salvarMensagemWhatsapp({
             id: `conteudo-${id}-${leadId}-${Date.now()}`,
             lead_task_id: leadId,
@@ -3469,6 +3474,7 @@ export const mastra = new Mastra({
             ts: new Date().toISOString(),
             tipo: 'texto',
             texto: textoParaChat,
+            ...(ehMidiaConteudo && conteudo.url ? { bruto: { midiaUrl: conteudo.url, midiaTipo: conteudo.tipo } } : {}),
           }).catch((e) => console.warn('[discador] persistência do conteudo falhou:', e instanceof Error ? e.message : String(e)));
           return c.json({ status: 'ok' });
         },
@@ -3546,6 +3552,11 @@ export const mastra = new Mastra({
               tipo: string;
               texto: string | null;
               transcricao: string | null;
+              /** conteúdo de mídia enviado (imagem/vídeo/áudio da biblioteca):
+               *  a URL pública pra renderizar o balão como imagem, não como
+               *  texto "📎 título". null nas demais mensagens. */
+              midiaUrl?: string | null;
+              midiaTipo?: string | null;
             }> = [];
             // CAMINHO RÁPIDO (sql/escala/03): a conversa persistida no Supabase —
             // envios nossos + mensagens do webhook — abre em ms e sobrevive a
@@ -3559,6 +3570,10 @@ export const mastra = new Mastra({
             }
             if (rowsDb) {
               for (const r of rowsDb) {
+                // `bruto` carrega a URL da mídia de um conteúdo da biblioteca
+                // (imagem/vídeo/áudio) enviado por nós — pro balão renderizar a
+                // imagem, não o rótulo "📎 título". Ausente nas demais mensagens.
+                const brutoMidia = (r.bruto ?? null) as { midiaUrl?: string; midiaTipo?: string } | null;
                 saida.push({
                   id: r.id,
                   deNos: r.de_nos,
@@ -3566,6 +3581,8 @@ export const mastra = new Mastra({
                   tipo: r.tipo,
                   texto: r.texto ?? null,
                   transcricao: limparRotuloFalante(r.transcricao ?? null),
+                  midiaUrl: brutoMidia?.midiaUrl ?? null,
+                  midiaTipo: brutoMidia?.midiaTipo ?? null,
                 });
               }
               // Envios PRÉ-DB (o histórico antigo vive só na Lista 03): enquanto

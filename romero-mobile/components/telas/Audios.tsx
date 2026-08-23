@@ -54,8 +54,9 @@ type Bolha = {
   durMs?: number;
   status: "enviando" | "ok";
   src?: string | null;
-  /** 'texto' = mensagem digitada (Fase 13 fatia 2); default áudio. */
-  tipo?: "audio" | "texto";
+  /** 'texto' = mensagem digitada (Fase 13 fatia 2); 'imagem' = conteúdo de mídia
+   *  da biblioteca (a URL vem em `src`); default áudio. */
+  tipo?: "audio" | "texto" | "imagem";
   texto?: string;
 };
 
@@ -221,13 +222,35 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
   async function confirmarEnvioConteudo() {
     if (!previewConteudo || !leadAberto || enviandoConteudo) return;
     const alvo = leadAberto.leadTaskId;
-    const id = previewConteudo.id;
+    const cnt = previewConteudo;
+    const id = cnt.id;
     setEnviandoConteudo(true);
+    // Otimista (imagem): já mostra a imagem no balão (WhatsApp-like), com relógio
+    // até confirmar — o refresh da conversa real substitui a bolha em seguida.
+    const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    const otimista = cnt.tipo === "imagem" && !!cnt.url;
+    if (otimista) {
+      setBolhasPorLead((p) => ({
+        ...p,
+        [alvo]: [...(p[alvo] ?? []), { hora, status: "enviando", tipo: "imagem", src: cnt.url, texto: cnt.titulo }],
+      }));
+    }
     const ok = await enviarConteudoParaLead(id, alvo);
     setEnviandoConteudo(false);
     setPreviewConteudo(null);
     setConteudosAberto(false);
-    if (ok) window.setTimeout(() => void atualizarConversa(alvo, true), 1200);
+    if (ok) {
+      if (otimista) {
+        setBolhasPorLead((p) => ({
+          ...p,
+          [alvo]: (p[alvo] ?? []).map((b, i, arr) => (i === arr.length - 1 && b.status === "enviando" ? { ...b, status: "ok" } : b)),
+        }));
+      }
+      window.setTimeout(() => void atualizarConversa(alvo, true), 1200);
+    } else if (otimista) {
+      // falhou: remove a bolha otimista (o envio não foi)
+      setBolhasPorLead((p) => ({ ...p, [alvo]: (p[alvo] ?? []).filter((b) => b.status !== "enviando") }));
+    }
   }
 
   // agrupa por categoria pra render (categoria vazia vira "Geral").
@@ -1219,6 +1242,18 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
                     </div>
                     {m.transcricao && <div className="au-trans">“{m.transcricao.replace(/Falante \d+:\s*/g, "").trim()}”</div>}
                   </>
+                ) : m.midiaUrl ? (
+                  // conteúdo de mídia da biblioteca que ENVIAMOS: mostra a imagem
+                  // (ou vídeo/áudio) no balão, pra confirmar visualmente o envio.
+                  m.midiaTipo === "video" ? (
+                    <video className="au-bimg" src={m.midiaUrl} controls preload="metadata" />
+                  ) : m.midiaTipo === "audio" ? (
+                    <audio src={m.midiaUrl} controls preload="metadata" />
+                  ) : (
+                    <a href={m.midiaUrl} target="_blank" rel="noreferrer" className="au-bimglink">
+                      <img className="au-bimg" src={m.midiaUrl} alt={m.texto ?? "Imagem enviada"} loading="lazy" />
+                    </a>
+                  )
                 ) : (
                   <div className="au-btxt">{m.texto}</div>
                 )}
@@ -1235,6 +1270,9 @@ export function Audios({ embutido = false }: { embutido?: boolean } = {}) {
             <div key={`s${i}`} className="au-bubble">
               {b.tipo === "texto" ? (
                 <div className="au-btxt">{b.texto}</div>
+              ) : b.tipo === "imagem" ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img className="au-bimg" src={b.src ?? ""} alt={b.texto ?? "Imagem enviada"} />
               ) : (
                 <div className="au-voice">
                   {b.src ? (
@@ -1922,6 +1960,8 @@ const AU_CSS = `
 .au-bubble{ align-self:flex-end; max-width:80%; background:color-mix(in srgb, var(--go) 24%, var(--bg-1)); border-radius:12px 12px 4px 12px; padding:8px 10px 6px; animation:auB .2s ease both; }
 .au-bubble.in{ align-self:flex-start; background:var(--card-2); border-radius:12px 12px 12px 4px; }
 .au-btxt{ font-size:14px; color:var(--ink); line-height:1.45; word-break:break-word; white-space:pre-wrap; }
+.au-bimglink{ display:block; }
+.au-bimg{ display:block; width:100%; max-width:230px; max-height:280px; object-fit:cover; border-radius:9px; background:var(--bg-1); }
 .au-trans{ margin-top:6px; padding-top:5px; border-top:1px solid color-mix(in srgb, var(--ink) 12%, transparent); font-size:12px; font-style:italic; color:var(--dim); line-height:1.5; }
 @keyframes auB{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:none; } }
 .au-voice{ display:flex; align-items:center; gap:9px; min-width:196px; }

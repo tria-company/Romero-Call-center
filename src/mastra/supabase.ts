@@ -1894,7 +1894,7 @@ export async function listarMensagensWhatsapp(opts: {
   if (opts.telefoneCanonico) condicoes.push(`telefone_canonico.eq.${opts.telefoneCanonico}`);
   if (condicoes.length === 0) return [];
   const params = new URLSearchParams({
-    select: 'id,lead_task_id,telefone_canonico,de_nos,ts,tipo,texto,transcricao,midia_mime',
+    select: 'id,lead_task_id,telefone_canonico,de_nos,ts,tipo,texto,transcricao,midia_mime,bruto',
     order: 'ts.asc',
     limit: String(opts.limite ?? 500),
   });
