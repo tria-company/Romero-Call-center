@@ -130,6 +130,18 @@ if (!DEEPGRAM_API_KEY) {
 // direto continua selecionável com LLM_PROVIDER=openai explícito.
 export const LLM_PROVIDER = process.env.LLM_PROVIDER || 'azure';
 
+// Temperatura de sampling dos agentes (Fase 4 do roadmap). OPT-IN: só é enviada
+// ao provider quando LLM_TEMPERATURE está definida no env — assim o comportamento
+// atual (sem parâmetro; usa o default do modelo) NÃO muda por acidente, e
+// deployments Azure que rejeitam `temperature` não quebram. Recomendado
+// LLM_TEMPERATURE=0.2 para reduzir alucinação/invenção de dados (ex.: nome de
+// animal ausente no contexto) — ative após confirmar que o deployment aceita o
+// parâmetro. undefined = não envia.
+export const LLM_TEMPERATURE: number | undefined =
+  process.env.LLM_TEMPERATURE !== undefined && Number.isFinite(Number(process.env.LLM_TEMPERATURE))
+    ? Number(process.env.LLM_TEMPERATURE)
+    : undefined;
+
 // OpenAI direto (D-08a) — usado enquanto LLM_PROVIDER=openai (default).
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';

@@ -57,6 +57,7 @@ export function montarPromptContexto({
     'Você é o Agente Contexto da campanha RomeroCall.',
     'Sua tarefa é manter um RESUMO VIVO e consolidado de cada lead, sempre atualizado com o resultado da ligação mais recente.',
     'Responda sempre em português do Brasil, num tom objetivo e conciso — o resumo é lido rapidamente pelo vendedor antes da próxima ligação.',
+    'REGRA CRÍTICA (nunca invente): use SOMENTE informações presentes na observação atual e no resultado da ligação abaixo. Se um dado — nome de pessoa, nome de animal, endereço, situação específica — não aparecer nessas fontes, NÃO o crie, deduza ou complete: simplesmente omita. Este resumo vira base do roteiro do áudio; um nome ou fato inventado aqui faz o operador falar algo falso ao lead e destrói a confiança.',
     'Devolva APENAS o texto do novo resumo consolidado, sem comentários fora dele, sem JSON, sem cercas de código.',
   ].join(' ');
 
