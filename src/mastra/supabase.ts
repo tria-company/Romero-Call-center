@@ -33,8 +33,15 @@ import {
   SUPABASE_TABLE_ANOTACOES_LIGACAO,
   SUPABASE_TABLE_TRANSCRICOES_LIGACAO,
   SUPABASE_TABLE_NOTAS,
+  SUPABASE_RPC_CRIAR_LEAD,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
+// outbox-rpc.ts é módulo PRÓPRIO (importa só config.ts + http.ts) — importá-lo
+// aqui não cria ciclo. criarLeadSupabase (quick 260823-h1s) é o único writer
+// deste módulo que passa pelo Caminho B (comOutboxRpc), em vez de PostgREST
+// direto — a RPC faz a escrita do agregado + o INSERT no outbox na MESMA
+// transação (both-or-neither, design §3.0/§3.1).
+import { comOutboxRpc } from './outbox-rpc.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
 // sentido de outros consumidores (gerar-lote.mjs/montar-dossies.mjs).
 import { variantesTelefoneBr } from './dossie.ts';
@@ -2227,4 +2234,55 @@ export async function inserirTranscricaoLigacao(row: TranscricaoLigacaoRow): Pro
       `[supabase] HTTP ${res.status} ao inserir transcricao em ${SUPABASE_TABLE_TRANSCRICOES_LIGACAO}`,
     );
   }
+}
+
+// ===== Criação de lead nativo (quick 260823-h1s, Fase C — Caminho B) =====
+//
+// Thin wrapper sobre `comOutboxRpc(SUPABASE_RPC_CRIAR_LEAD)` — sql/escala/
+// 27_rpc_criar_lead.sql faz o INSERT em discador_leads_espelho + o INSERT no
+// clickup_outbox (aggregate='lead', op='criar_task') na MESMA transação.
+// NUNCA faz uma segunda chamada pra compor a mutação (comOutboxRpc é o ponto
+// único — invariante "uma chamada = uma tx", design §3.0/§3.1). NUNCA loga
+// telefone/CPF (LGPD) — este writer só repassa; o tratamento de erro fica na
+// rota (index.ts).
+
+export interface CriarLeadInput {
+  nome: string;
+  telefone: string;
+  cpf?: string;
+  bairro?: string;
+  cidade?: string;
+  dossie?: string;
+  tags?: string[];
+  militante?: boolean;
+  superFa?: boolean;
+  elegivel?: boolean;
+  score?: number;
+  idSupabase?: string;
+  origem?: string;
+}
+
+export interface CriarLeadResultado {
+  lead_id: number;
+  id_supabase: string | null;
+  clickup_task_id_local: string;
+  outbox_inseridos: number;
+}
+
+export async function criarLeadSupabase(input: CriarLeadInput): Promise<CriarLeadResultado> {
+  return comOutboxRpc<CriarLeadResultado>(SUPABASE_RPC_CRIAR_LEAD, {
+    p_nome: input.nome,
+    p_telefone: input.telefone,
+    p_cpf: input.cpf ?? null,
+    p_bairro: input.bairro ?? null,
+    p_cidade: input.cidade ?? null,
+    p_dossie: input.dossie ?? null,
+    p_tags: input.tags ?? null,
+    p_militante: input.militante ?? false,
+    p_super_fa: input.superFa ?? false,
+    p_elegivel: input.elegivel ?? null,
+    p_score: input.score ?? null,
+    p_id_supabase: input.idSupabase ?? null,
+    p_origem: input.origem ?? null,
+  });
 }

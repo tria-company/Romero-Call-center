@@ -540,6 +540,14 @@ export const SUPABASE_RPC_REGISTRAR_ANOTACAO =
   process.env.SUPABASE_RPC_REGISTRAR_ANOTACAO || 'registrar_anotacao';
 export const SUPABASE_RPC_GERAR_LOTE = process.env.SUPABASE_RPC_GERAR_LOTE || 'gerar_lote';
 
+// Nome da RPC de criação de lead nativo (quick 260823-h1s,
+// sql/escala/27_rpc_criar_lead.sql). Mesmo padrão de isolamento das
+// SUPABASE_RPC_* acima: default SEM prefixo (produção); homolog sobrescreve
+// pra 'hml_criar_lead' via deploy/homolog.env — sem isso, chamar do homolog
+// escreveria na RPC/tabelas de PRODUÇÃO (lição do 17-02). Default sensato ->
+// sem console.warn.
+export const SUPABASE_RPC_CRIAR_LEAD = process.env.SUPABASE_RPC_CRIAR_LEAD || 'criar_lead';
+
 // ===== Fase 19 (Fase B) — teto/threshold do worker de dreno do outbox =====
 //
 // Consumidos por src/mastra/drenar-outbox.ts (19-03) — o dreno generaliza
