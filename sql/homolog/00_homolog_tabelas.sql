@@ -22,6 +22,19 @@ create table if not exists hml_mensagens_whatsapp      (like mensagens_whatsapp 
 create table if not exists hml_webhook_eventos         (like webhook_eventos         including all);
 create table if not exists hml_discador_usuarios       (like discador_usuarios       including all);
 
+-- ============================================================================
+-- Quick 260822-tdj — persistência da classificação/demanda/super-fã (escala/20).
+-- REQUER que sql/escala/20_anotacoes_ligacao.sql já tenha sido aplicado em
+-- PROD (o LIKE abaixo exige `anotacoes_ligacao` já existir): aplicar a
+-- migração 20 ANTES de re-aplicar este arquivo.
+-- ============================================================================
+create table if not exists hml_anotacoes_ligacao (like anotacoes_ligacao including all);
+
+-- Débito de LIKE ser snapshot único: hml_discador_leads_espelho pode ter sido
+-- criada ANTES do ALTER aditivo de sql/escala/20 — repetir aqui, explicitamente,
+-- o MESMO ADD COLUMN IF NOT EXISTS (idempotente).
+alter table hml_discador_leads_espelho add column if not exists super_fa boolean not null default false;
+
 -- Escrita via PostgREST é feita como `service_role` (o backend). NUNCA conceder
 -- a anon/authenticated: estas tabelas contêm telefone/CPF (mesma disciplina de
 -- LGPD do espelho de produção).
@@ -30,5 +43,6 @@ grant all on table
   hml_votos_ligacao,
   hml_mensagens_whatsapp,
   hml_webhook_eventos,
-  hml_discador_usuarios
+  hml_discador_usuarios,
+  hml_anotacoes_ligacao
   to service_role;
