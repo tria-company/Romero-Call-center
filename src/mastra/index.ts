@@ -491,6 +491,10 @@ async function avaliarConversaComDebounce(
     }
     avaliacaoPorLead.set(leadId, { paraContagem: doLead.length, status, motivo });
     try {
+      // Fase C (20-05): NÃO ramificar por FONTE_AUDIOS — grava ANALISE_IA no
+      // ClickUp por `ultimo.taskId`; sob supabase o id local de
+      // `audios_envios` não é o clickup_task_id (mesmo débito documentado
+      // abaixo, na persistência de resposta de /conversa).
       const envios = await listarEnviosAudioDoLead(leadId);
       const ultimo = envios[envios.length - 1];
       if (ultimo?.taskId) {
@@ -2895,7 +2899,11 @@ export const mastra = new Mastra({
           if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
           const leadId = c.req.param('leadId');
           try {
-            const envios = await listarEnviosAudioDoLead(leadId);
+            // Fase C (20-05): sob FONTE_AUDIOS='supabase' o histórico vem de
+            // `audios_envios` (LEITURA-04, 20-04) — mesmo shape
+            // EnvioAudioHistorico. Caminho 'clickup' (default) intacto.
+            const envios =
+              FONTE_AUDIOS === 'supabase' ? await listarEnviosAudioDoLeadSupabase(leadId) : await listarEnviosAudioDoLead(leadId);
             return c.json({ envios });
           } catch (e) {
             console.error('[discador] erro no histórico de áudios:', e instanceof Error ? e.message : String(e));
@@ -2981,7 +2989,11 @@ export const mastra = new Mastra({
               // mensagens do webhook — busca os registros uma vez e backfilla;
               // desta abertura em diante a conversa inteira vem do DB (ms).
               if (!rowsDb.some((r) => r.de_nos)) {
-                const envios = await listarEnviosAudioDoLead(leadId);
+                // Fase C (20-05): a conversa mistura audios_envios (histórico
+                // de envios) com mensagens_whatsapp (já Supabase) — só a
+                // fonte do histórico de envios inverte por FONTE_AUDIOS.
+                const envios =
+                  FONTE_AUDIOS === 'supabase' ? await listarEnviosAudioDoLeadSupabase(leadId) : await listarEnviosAudioDoLead(leadId);
                 const vistosDb = new Set(saida.map((m) => m.id));
                 for (const e2 of envios) {
                   const idReg = `registro-${e2.taskId}`;
@@ -3036,7 +3048,9 @@ export const mastra = new Mastra({
                 // guarda as conversas diretas (store só com grupos) — os NOSSOS
                 // envios entram direto da Lista 03 (registro + transcrição; a
                 // mídia sai do anexo via /mensagem/registro-<taskId>/midia).
-                const envios = await listarEnviosAudioDoLead(leadId);
+                // Fase C (20-05): mesma inversão do backfill acima.
+                const envios =
+                  FONTE_AUDIOS === 'supabase' ? await listarEnviosAudioDoLeadSupabase(leadId) : await listarEnviosAudioDoLead(leadId);
                 for (const e2 of envios) {
                   saida.push({
                     id: `registro-${e2.taskId}`,
@@ -3068,6 +3082,16 @@ export const mastra = new Mastra({
               respostaPersistidaPorLead.set(leadId, doLead.length);
               void (async () => {
                 try {
+                  // NÃO ramificar por FONTE_AUDIOS aqui: setCustomField grava
+                  // no ClickUp por `ultimo.taskId` — sob supabase,
+                  // listarEnviosAudioDoLeadSupabase().taskId é o id LOCAL de
+                  // `audios_envios` (não o clickup_task_id), então usar essa
+                  // leitura aqui gravaria no id errado. Sem RPC de UPDATE
+                  // pra DATA_DA_RESPOSTA/MENSAGENS_NA_RESPOSTA/
+                  // TRANSCRICAO_RESPOSTA em audios_envios ainda (débito, fora
+                  // do escopo de 20-03/20-05) — este write-side-effect segue
+                  // ClickUp-only nos dois caminhos (mesmo racional da
+                  // persistência de ANALISE_IA em avaliarConversaComDebounce).
                   const envios = await listarEnviosAudioDoLead(leadId);
                   const ultimo = envios[envios.length - 1];
                   if (!ultimo?.taskId) return;
