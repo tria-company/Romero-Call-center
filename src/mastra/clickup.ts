@@ -529,6 +529,57 @@ export async function listarStatusLista(listId: string): Promise<string[]> {
   return statuses.map((s) => String(s?.status || '')).filter(Boolean);
 }
 
+/** Definicao de um custom field devolvida por `GET /list/:id/field` — shape util
+ *  pra validacao (17-03/MODELO-06): id+name+type + as opcoes de dropdown com
+ *  id+name (necessarias pra detectar UUID de opcao desconhecido, R8). */
+export interface CampoClickUpDefinicao {
+  id: string;
+  name: string;
+  type: string;
+  type_config?: { options?: Array<{ id?: string; name?: string }> };
+}
+
+/**
+ * Lista as DEFINICOES de custom field de uma lista (`GET /list/:id/field`) —
+ * usada pelo boot pra VALIDAR os mapas hardcoded CAMPOS_ e OPCOES_ (clickup.ts)
+ * contra o ClickUp real: uma unica autoridade validada (MODELO-06/D-07), nao
+ * duas copias que podem divergir. Mesmo molde EXATO de `listarStatusLista`
+ * (thin wrapper GET por lista via `fetchClickUp`): token ausente/HTTP falho
+ * LANÇAM (WR-03), nunca mascara com array vazio. NUNCA loga token/valor de
+ * campo — so estrutura (id/name/type/opcoes), que nao e PII.
+ */
+export async function getCustomFields(listId: string): Promise<CampoClickUpDefinicao[]> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para listar custom fields da lista');
+  }
+  let res: Response;
+  try {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/list/${listId}/field`, { headers: headers() });
+  } catch (e) {
+    throw new Error(
+      `[clickup] falha de rede ao listar custom fields da lista ${listId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] GET /list/${listId}/field falhou (${res.status})`);
+  }
+  const data = await res.json();
+  const fields: Array<{
+    id?: string;
+    name?: string;
+    type?: string;
+    type_config?: { options?: Array<{ id?: string; name?: string }> };
+  }> = data?.fields || [];
+  return fields
+    .filter((f) => f && f.id)
+    .map((f) => ({
+      id: String(f.id),
+      name: String(f.name || ''),
+      type: String(f.type || ''),
+      type_config: f.type_config,
+    }));
+}
+
 /** Membro da workspace ClickUp (D-03) — id sempre String (a API devolve numero). */
 export interface MembroClickUp {
   id: string;
@@ -1521,6 +1572,46 @@ export async function buscarLeadsNuncaLigadosCacheado(): Promise<{ leads: LeadNu
 }
 
 /**
+ * Anexa um binário (buffer) a uma task JÁ EXISTENTE (`POST /task/:id/attachment`,
+ * multipart) — a MESMA primitiva usada por `registrarEnvioAudio` abaixo,
+ * extraída aqui (Fase C, Phase 20 Plano 02) pra reuso pelo dreno multi-agregado
+ * (`drenar-outbox.ts`, `op='anexar'` de 'audio': lê o binário do store canônico
+ * Supabase Storage e chama esta função). Passa pelo MESMO choke point
+ * `fetchClickUp` (rate limiter/trava de escrita, D-05) — NUNCA bypassa. SEM
+ * Content-Type manual no header (o fetch põe o boundary do multipart sozinho).
+ * Token ausente e falha de infra/HTTP LANÇAM (WR-03) — quem quiser best-effort
+ * (como `registrarEnvioAudio`) envolve com try/catch no call site. NUNCA loga
+ * o binário/nome de arquivo.
+ */
+export async function anexarArquivoNaTask(
+  taskId: string,
+  buffer: Buffer,
+  filename: string,
+  mimetype?: string,
+): Promise<void> {
+  if (!CLICKUP_API_TOKEN) {
+    throw new Error('[clickup] CLICKUP_API_TOKEN ausente — nao da para anexar arquivo na task');
+  }
+  const form = new FormData();
+  form.append('attachment', new Blob([buffer], { type: mimetype || 'application/octet-stream' }), filename);
+  let res: Response;
+  try {
+    res = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${taskId}/attachment`, {
+      method: 'POST',
+      headers: { Authorization: CLICKUP_API_TOKEN },
+      body: form,
+    });
+  } catch (e) {
+    throw new Error(
+      `[clickup] falha de rede ao anexar arquivo na task ${taskId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[clickup] POST /task/${taskId}/attachment falhou (${res.status})`);
+  }
+}
+
+/**
  * Grava a task de registro de um envio de áudio na Lista 03 AUDIOS após o
  * envio já ter sido CONFIRMADO pelo `evolution.ts` (ENVIO-06) — escrita
  * SECUNDÁRIA best-effort (WR-03, molde `criarLigacaoAvulsa` linhas 993-1009):
@@ -1583,20 +1674,12 @@ export async function registrarEnvioAudio(args: {
     if (args.audioBase64) {
       // Anexa o ÁUDIO REAL na task (campo "Áudio" da Lista 03 é attachment;
       // o anexo fica no corpo da task e vira insumo da transcrição na Fase 13).
-      // Best-effort: falha aqui não derruba o registro já criado. Multipart:
-      // SEM Content-Type manual (o fetch põe o boundary sozinho).
+      // Best-effort: falha aqui não derruba o registro já criado. Reusa a
+      // mesma primitiva de anexo do dreno multi-agregado (anexarArquivoNaTask,
+      // Fase C Phase 20 Plano 02) — comportamento idêntico ao anterior.
       try {
         const buf = Buffer.from(args.audioBase64, 'base64');
-        const form = new FormData();
-        form.append('attachment', new Blob([buf], { type: args.mimetype || 'audio/webm' }), args.audioRef);
-        const resAnexo = await fetchClickUp(`${CLICKUP_BASE_URL}/task/${novaTask.id}/attachment`, {
-          method: 'POST',
-          headers: { Authorization: CLICKUP_API_TOKEN },
-          body: form,
-        });
-        if (!resAnexo.ok) {
-          console.warn(`[clickup] registrarEnvioAudio (${novaTask.id}): anexo do áudio falhou (${resAnexo.status})`);
-        }
+        await anexarArquivoNaTask(novaTask.id, buf, args.audioRef, args.mimetype || 'audio/webm');
       } catch (e) {
         console.warn(
           `[clickup] registrarEnvioAudio (${novaTask.id}): anexo do áudio falhou: ${e instanceof Error ? e.message : String(e)}`,

@@ -28,14 +28,29 @@
 // vez (a chave sai do Set quando cai abaixo, entra quando sobe acima). Mais
 // simples que cooldown por tempo e garante zero alerta duplicado enquanto a
 // condição persiste.
+//
+// Fase B, Phase 19 Plano 06 (ESCRITA-03, design §3.2/Riscos R6): o outbox do
+// ClickUp entra na MESMA checagem periódica, com DOIS sinais NOVOS —
+// `avaliarThresholdsOutbox` (função pura, mesmo molde de `avaliarThresholds`,
+// mas sobre `CabecaOutbox[]`/profundidade em vez de `MetricasSnapshot`, para
+// não acoplar `metricas.ts` ao `outbox-repo.ts`): (1) IDADE DA CABEÇA — uma
+// cabeça de aggregate presa (`pendente`/`erro`) há mais que
+// `DRENO_HEAD_AGE_ALERTA_MS` é o SINAL que indica ao operador quando rodar
+// `scripts/outbox-orphan.mjs`; (2) PROFUNDIDADE — reusa o mesmo limite de
+// `METRICAS_FILA_ALERTA` (não se redefine um env próprio aqui, `config.ts`
+// não faz parte deste plano). O `tick()` chama a leitura do outbox
+// isoladamente (try/catch próprio) para que uma falha ali NUNCA impeça os
+// alertas de métricas de disparar — best-effort dos dois lados (T-10-04-D2).
 
 import { lerMetricas, type MetricasSnapshot, type EtapaMetrica } from './metricas.ts';
+import { cabecaMaisAntiga, profundidadeOutbox, type CabecaOutbox } from './outbox-repo.ts';
 import {
   ALERT_WEBHOOK_URL,
   METRICAS_FILA_ALERTA,
   METRICAS_ERRO_TAXA_ALERTA,
   METRICAS_429_ALERTA,
   METRICAS_ALERTA_INTERVALO_MS,
+  DRENO_HEAD_AGE_ALERTA_MS,
 } from './config.ts';
 
 /**
@@ -86,6 +101,48 @@ export function avaliarThresholds(snapshot: MetricasSnapshot): AlertaThreshold[]
       chave: '429',
       titulo: '⚠️ 429s do ClickUp acima do limite',
       detalhe: `atual ${snapshot.contagem429} vs. limite ${METRICAS_429_ALERTA}`,
+    });
+  }
+
+  return alertas;
+}
+
+/**
+ * Compara a idade da cabeça de cada aggregate do outbox + a profundidade
+ * total contra os thresholds configurados (função PURA, mesmo molde de
+ * `avaliarThresholds` — testável sem rede/timer, usada pelo smoke). Não faz
+ * I/O nem lida com dedup/estado (responsabilidade do `tick()`).
+ *
+ * (1) IDADE DA CABEÇA (R6): uma cabeça `pendente`/`erro` há mais que
+ * `DRENO_HEAD_AGE_ALERTA_MS` é sintoma de algo preso (ClickUp fora, payload
+ * inválido, task deletada) — o alarme é o SINAL para o operador rodar
+ * `scripts/outbox-orphan.mjs --aggregate=<a> --id=<id>` e descartar as ops
+ * presas (marcarOrphan). Detalhe sem PII — só aggregate/id/idade.
+ * (2) PROFUNDIDADE: acima de `METRICAS_FILA_ALERTA` (reusado — sem env
+ * próprio) indica acúmulo geral no outbox (dreno lento, ClickUp degradado).
+ */
+export function avaliarThresholdsOutbox(cabecas: CabecaOutbox[], profundidade: number): AlertaThreshold[] {
+  const alertas: AlertaThreshold[] = [];
+
+  for (const cabeca of cabecas) {
+    if (cabeca.idade_ms > DRENO_HEAD_AGE_ALERTA_MS) {
+      const minutosPresa = Math.round(cabeca.idade_ms / 60000);
+      const limiteMin = Math.round(DRENO_HEAD_AGE_ALERTA_MS / 60000);
+      alertas.push({
+        chave: `outbox:head:${cabeca.aggregate}:${cabeca.aggregate_id}`,
+        titulo: '⚠️ Cabeça do outbox travada',
+        detalhe:
+          `aggregate=${cabeca.aggregate} id=${cabeca.aggregate_id} presa ha ${minutosPresa} min ` +
+          `(limite ${limiteMin} min) — considere scripts/outbox-orphan.mjs --aggregate=${cabeca.aggregate} --id=${cabeca.aggregate_id}`,
+      });
+    }
+  }
+
+  if (profundidade > METRICAS_FILA_ALERTA) {
+    alertas.push({
+      chave: 'outbox:profundidade',
+      titulo: '⚠️ Profundidade do outbox acima do limite',
+      detalhe: `atual ${profundidade} vs. limite ${METRICAS_FILA_ALERTA}`,
     });
   }
 
@@ -235,7 +292,23 @@ const chavesAlertadas = new Set<string>();
 async function tick(): Promise<void> {
   try {
     const snapshot = await lerMetricas();
-    const alertasAtivos = avaliarThresholds(snapshot);
+    const alertasMetricas = avaliarThresholds(snapshot);
+
+    // Leitura do outbox ISOLADA (try/catch próprio): uma falha aqui (ex.
+    // SUPABASE_URL ausente, HTTP fora) NUNCA deve impedir os alertas de
+    // métricas de disparar — best-effort dos dois lados (T-10-04-D2).
+    let alertasOutbox: AlertaThreshold[] = [];
+    try {
+      const [cabecas, profundidade] = await Promise.all([cabecaMaisAntiga(), profundidadeOutbox()]);
+      alertasOutbox = avaliarThresholdsOutbox(cabecas, profundidade);
+    } catch (e) {
+      console.error(
+        '[alertas] falha ao ler thresholds do outbox (pulando esta rodada, tentando de novo no próximo tick):',
+        e instanceof Error ? e.message : String(e),
+      );
+    }
+
+    const alertasAtivos = [...alertasMetricas, ...alertasOutbox];
     const chavesAtivasAgora = new Set(alertasAtivos.map((a) => a.chave));
 
     for (const alerta of alertasAtivos) {

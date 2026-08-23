@@ -28,14 +28,32 @@ import {
   SUPABASE_TABLE_LEADS_ESPELHO,
   SUPABASE_TABLE_MENSAGENS_WHATSAPP,
   SUPABASE_TABLE_VOTOS_LIGACAO,
+  SUPABASE_TABLE_LIGACOES,
+  SUPABASE_TABLE_AUDIOS_ENVIOS,
   SUPABASE_TABLE_ANOTACOES_LIGACAO,
   SUPABASE_TABLE_TRANSCRICOES_LIGACAO,
+  SUPABASE_TABLE_NOTAS,
   SUPABASE_TABLE_CONTEUDOS,
+  SUPABASE_RPC_CRIAR_LEAD,
 } from './config.ts';
 import { fetchTimeout } from './http.ts';
+// outbox-rpc.ts é módulo PRÓPRIO (importa só config.ts + http.ts) — importá-lo
+// aqui não cria ciclo. criarLeadSupabase (quick 260823-h1s) é o único writer
+// deste módulo que passa pelo Caminho B (comOutboxRpc), em vez de PostgREST
+// direto — a RPC faz a escrita do agregado + o INSERT no outbox na MESMA
+// transação (both-or-neither, design §3.0/§3.1).
+import { comOutboxRpc } from './outbox-rpc.ts';
 // dossie.ts é módulo PURO (zero-import) — importá-lo aqui não cria ciclo, mesmo
 // sentido de outros consumidores (gerar-lote.mjs/montar-dossies.mjs).
 import { variantesTelefoneBr } from './dossie.ts';
+// telefone-canonico.ts é módulo PURO/self-contained (19-01) — a MESMA
+// normalização usada pela escrita (espelho.ts) e pelas RPCs do Caminho B,
+// pra 12/13 dígitos do mesmo número casarem a mesma ligação (R4/§5.3).
+import { canonizarTelefone, variantesTelefone } from './telefone-canonico.ts';
+// ItemFila é tipo PURO (lote.ts, zero-import) — reusar aqui não cria ciclo
+// nem acopla este módulo ao client ClickUp (clickup.ts nunca é importado
+// por supabase.ts, ver header do arquivo).
+import type { ItemFila } from './lote.ts';
 
 // Endpoint REST montado do env — instancia self-hosted, nunca hardcoded (D-P4-11).
 export const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
@@ -538,6 +556,146 @@ export async function upsertLeadsEspelho(rows: LeadEspelhoRow[]): Promise<number
   return rows.length;
 }
 
+// ===== Fase 17-A — espelho de ligacoes/audios_envios/leads-full (só POPULA — u17) =====
+//
+// Mesmo molde EXATO de `upsertLeadsEspelho` acima: POST em lote com
+// `Prefer: resolution=merge-duplicates,return=minimal` (upsert por
+// `clickup_task_id`), no-op sem Supabase configurado, LANÇA em erro de
+// rede/HTTP (WR-03) com o NOME da tabela no erro. `sincronizarEspelho*`
+// (espelho.ts) é quem chama estas funções — nenhuma rota lê estas tabelas
+// ainda (17-CONTEXT.md decisão 3). NUNCA loga telefone/CPF/transcrição.
+
+/** Linha de `ligacoes` (materializa a Lista 02 LIGACOES — design §2.1). `lead_id`
+ *  (FK numérica) fica `null` nesta fase — resolvido só quando a ESCRITA inverter
+ *  (Phase 19); a junção por enquanto é via `lead_clickup_task_id`. */
+export interface LigacaoEspelhoRow {
+  clickup_task_id: string;
+  lead_id: number | null;
+  lead_clickup_task_id: string | null;
+  operador: string | null;
+  assignee_clickup_id: number | null;
+  telefone_canonico: string | null;
+  telefone_variantes: string[];
+  script: string | null;
+  status: 'aberta' | 'em_processamento' | 'fechada';
+  resultado: string | null;
+  inicio: string | null; // ISO
+  fim: string | null; // ISO
+  duracao_seg: number | null;
+  atendeu: boolean | null;
+  motivo_falha: string | null;
+  url_gravacao: string | null;
+  transcricao: string | null;
+  analise_ia: Record<string, unknown> | null;
+  necessita_revisao: boolean | null;
+  lote_data: string | null; // date (YYYY-MM-DD)
+  origem: string | null;
+  atualizado_em: string; // ISO
+}
+
+/** Upsert (merge por `clickup_task_id`) de um LOTE de ligações no espelho. */
+export async function upsertLigacoesEspelho(rows: LigacaoEspelhoRow[]): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  if (rows.length === 0) return 0;
+  let res: Response;
+  try {
+    // on_conflict=clickup_task_id: a PK desta tabela é `id` (identity); o merge
+    // precisa resolver pela UNIQUE de clickup_task_id, senão re-runs INSEREM e
+    // violam a unique (HTTP 409). (discador_leads_espelho não precisa: lá a PK
+    // já É clickup_task_id.)
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?on_conflict=clickup_task_id`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao upsertar ${rows.length} ligacoes no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao upsertar ligacoes no espelho (${SUPABASE_TABLE_LIGACOES})`);
+  }
+  return rows.length;
+}
+
+/** Linha de `audios_envios` (materializa a Lista 03 AUDIOS — design §2.2). `midia_ref`
+ *  fica `null` nesta fase — a migração do binário pro Supabase Storage é o 17-05. */
+export interface AudioEnvioRow {
+  clickup_task_id: string;
+  lead_id: number | null;
+  lead_clickup_task_id: string | null;
+  tipo: 'audio' | 'texto';
+  corpo: string | null;
+  transcricao_audio: string | null;
+  midia_ref: string | null;
+  selo_conversa: string | null;
+  enviado_em: string | null; // ISO
+}
+
+/** Upsert (merge por `clickup_task_id`) de um LOTE de envios de áudio/texto no espelho. */
+export async function upsertAudiosEnvios(rows: AudioEnvioRow[]): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  if (rows.length === 0) return 0;
+  let res: Response;
+  try {
+    // on_conflict=clickup_task_id: PK é `id` (identity); merge resolve pela
+    // UNIQUE de clickup_task_id (senão re-run vira 409). Ver upsertLigacoesEspelho.
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}?on_conflict=clickup_task_id`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao upsertar ${rows.length} audios no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao upsertar audios no espelho (${SUPABASE_TABLE_AUDIOS_ENVIOS})`);
+  }
+  return rows.length;
+}
+
+/** Linha COMPLETA da Lista 01 LEADS (`LeadEspelhoRow` + as colunas novas de §2.3 —
+ *  score/tentativas/priorização, que faltavam pro espelho servir a geração do lote). */
+export interface LeadFullEspelhoRow extends LeadEspelhoRow {
+  score: number | null;
+  tentativas: number | null;
+  proximo_contato: string | null; // date (YYYY-MM-DD)
+  retorno_necessario: boolean | null;
+  observacao_consolidada: string | null;
+  dossie: string | null;
+  ultimo_contato: string | null; // ISO
+  qtd_contatos: number | null;
+  id_lead: string | null;
+  tags: string[];
+  elegivel: boolean | null;
+}
+
+/** Upsert (merge por `clickup_task_id`) de um LOTE de leads COMPLETOS no espelho —
+ *  mesma tabela de `upsertLeadsEspelho` (discador_leads_espelho), colunas estendidas. */
+export async function upsertLeadFullEspelho(rows: LeadFullEspelhoRow[]): Promise<number> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return 0;
+  if (rows.length === 0) return 0;
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}`, {
+      method: 'POST',
+      headers: { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao upsertar ${rows.length} leads (full) no espelho: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao upsertar leads (full) no espelho (${SUPABASE_TABLE_LEADS_ESPELHO})`);
+  }
+  return rows.length;
+}
+
 export type RecorteEspelho = 'todos' | 'romero' | 'andressa' | 'militante' | 'sem-contato' | 'romero-ja-falou';
 
 /** Resumo de lead servido da Base (mesma forma do LeadResumo do ClickUp). */
@@ -692,6 +850,963 @@ export async function contarVotosEspelho(): Promise<{
     andressa: andressa ?? 0,
     apoiadores: apoiadores ?? 0,
   };
+}
+
+// ===== Fase B (19-05) — LEITURAS de `ligacoes` do Supabase (design §4) =====
+//
+// Fila, detalhe, timeline e correlação do webhook servidas do Postgres em vez
+// da listagem geral da Lista 02 (que caiu no incidente que motivou a
+// inversão) — `buscarFilaSupabase`/`lerLigacaoSupabase`/
+// `buscarLigacaoAbertaPorTelefoneSupabase`/`resolverLeadDaLigacaoSupabase`/
+// `buscarLigacoesDoLeadSupabase`. NENHUMA rota chama estas funções ainda — o
+// wiring atrás da flag `FONTE_LIGACOES` é 19-07/19-09.
+//
+// CONTRATO DE ID: sob `FONTE_LIGACOES=supabase`, o `taskId` que a fila expõe
+// e que as rotas de escrita repassam às RPCs do Caminho B (19-02,
+// `p_ligacao_id bigint`) é o id LOCAL de `ligacoes` (bigint, aqui como
+// string) — NÃO o `clickup_task_id` (nullable até o dreno do outbox).
+//
+// Guard anti-IDOR (CR-01): toda leitura por id valida `operador` NA PRÓPRIA
+// LINHA (nunca no ClickUp) — mesma régua de clickup.ts::lerLigacao/
+// buscarLigacoesDoLead. Mensagens de erro casam as strings que os catches das
+// rotas já mapeiam (404/409) pra não mudar o tratamento de erro quando o
+// wiring trocar a fonte.
+//
+// Erro de config/rede/HTTP LANÇA (WR-03, `checarConfig()`) — leitura crítica
+// da fila/detalhe não pode degradar silenciosamente pra lista vazia (o
+// operador ficaria sem Ligação pra trabalhar sem saber que é erro de infra).
+// PostgREST puro (sem transação — a escrita transacional são as RPCs do
+// 19-02). NUNCA loga telefone (LGPD).
+
+/** Linha crua de `ligacoes` (colunas comuns às leituras de fila/detalhe). */
+interface LinhaLigacaoBase {
+  id: number;
+  operador?: string | null;
+  status?: string | null;
+  script?: string | null;
+  telefone_canonico?: string | null;
+  lead_clickup_task_id?: string | null;
+  inicio?: string | null; // timestamptz ISO
+  criado_em?: string; // timestamptz ISO
+}
+
+/** Detalhe de uma Ligação lida do Supabase: item da fila + o script (mesmo shape de clickup.ts::DetalheLigacao). */
+export interface DetalheLigacaoSupabase extends ItemFila {
+  script: string;
+}
+
+/** Item da timeline de ligações de um lead (mesmo shape de clickup.ts::ItemTimeline). */
+export interface ItemTimelineSupabase {
+  data: string;
+  atendeu: boolean;
+  aderencia: string;
+  resumoAnalise: string;
+  motivoFalha: string;
+  duracao: string;
+}
+
+/**
+ * `ligacoes` não tem coluna "nome" própria (sql/escala/06_ligacoes.sql) — usa o
+ * telefone como fallback, mesmo racional de clickup.ts::lerLigacao
+ * (`item?.nome ?? task.name ?? telefone`). `idLead`/`leadTaskId` vêm de
+ * `lead_clickup_task_id` (única referência ao lead disponível nesta fase —
+ * `lead_id` numérico é resolvido à parte por `resolverLeadDaLigacaoSupabase`).
+ */
+function linhaParaItemFila(row: LinhaLigacaoBase): ItemFila {
+  const telefone = String(row.telefone_canonico ?? '');
+  const leadClickupTaskId = row.lead_clickup_task_id ? String(row.lead_clickup_task_id) : '';
+  return {
+    taskId: String(row.id),
+    nome: telefone,
+    telefone,
+    idLead: leadClickupTaskId,
+    leadTaskId: leadClickupTaskId || undefined,
+  };
+}
+
+/**
+ * Reproduz a ordenação EXATA de `clickup.ts::buscarFilaLigacoes` (D-P3-07,
+ * quick-260815-w6h, quick-260821): nunca-tentados (`inicio` ausente) primeiro,
+ * ordenados por `criado_em` ASC (prioridade — o lote nasce em ordem de
+ * prioridade); tentados depois, ordenados por `inicio` ASC (o que falhou há
+ * mais tempo primeiro). Sort estável, sobre CÓPIA (não muta `linhas`). Pura.
+ */
+function ordenarFilaLigacoes<T extends { inicio?: string | null; criado_em?: string }>(linhas: T[]): T[] {
+  return [...linhas].sort((a, b) => {
+    const tentadaA = !!a.inicio;
+    const tentadaB = !!b.inicio;
+    if (!tentadaA && !tentadaB) return (Date.parse(a.criado_em ?? '') || 0) - (Date.parse(b.criado_em ?? '') || 0);
+    if (!tentadaA) return -1;
+    if (!tentadaB) return 1;
+    return (Date.parse(a.inicio ?? '') || 0) - (Date.parse(b.inicio ?? '') || 0);
+  });
+}
+
+/**
+ * Fila de Ligações ABERTAS do operador (LEITURA-01, design §4) — troca
+ * `buscarFilaLigacoes` (listagem geral da Lista 02, D-01) por um SELECT
+ * filtrado (`ix_ligacoes_fila`). `taskId` de cada item é o id LOCAL (CONTRATO
+ * DE ID acima). Erro de config/rede/HTTP LANÇA (WR-03) — a fila vazia por
+ * erro de infra não pode se disfarçar de "sem Ligação pra ligar".
+ */
+export async function buscarFilaSupabase(operador: string): Promise<ItemFila[]> {
+  checarConfig();
+  if (!operador) {
+    throw new Error('[supabase] buscarFilaSupabase chamado sem operador');
+  }
+  const params = new URLSearchParams({
+    operador: `eq.${operador}`,
+    status: 'eq.aberta',
+    select: 'id,script,telefone_canonico,lead_clickup_task_id,inicio,criado_em',
+    order: 'inicio.asc.nullsfirst',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar a fila em ${SUPABASE_TABLE_LIGACOES}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar a fila em ${SUPABASE_TABLE_LIGACOES}`);
+  }
+  const data = (await res.json()) as LinhaLigacaoBase[];
+  const linhas = Array.isArray(data) ? data : [];
+  return ordenarFilaLigacoes(linhas).map(linhaParaItemFila);
+}
+
+/**
+ * Detalhe de uma Ligação por id LOCAL (LEITURA-03, design §4) — troca
+ * `lerLigacao` (`GET /task/{id}`) por um SELECT direto + os MESMOS 3 guards
+ * CR-01 de `clickup.ts::lerLigacao`, agora contra a própria linha: não
+ * encontrada, não pertence ao operador (IDOR), já concluída. Mensagens de
+ * erro casam as strings que os catches das rotas já mapeiam (404/409) — não
+ * muda o tratamento de erro quando o wiring (19-07/09) trocar a fonte.
+ */
+export async function lerLigacaoSupabase(id: number, operadorEsperado: string): Promise<DetalheLigacaoSupabase> {
+  checarConfig();
+  const params = new URLSearchParams({
+    id: `eq.${id}`,
+    select: 'id,operador,status,script,telefone_canonico,lead_clickup_task_id',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler a ligação ${id}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler a ligação ${id}`);
+  }
+  const data = (await res.json()) as LinhaLigacaoBase[];
+  const row = Array.isArray(data) ? data[0] : undefined;
+  if (!row) {
+    throw new Error(`[supabase] lerLigacaoSupabase: ligacao ${id} nao encontrada`);
+  }
+  if (String(row.operador ?? '') !== operadorEsperado) {
+    throw new Error(`[supabase] lerLigacaoSupabase: ligacao ${id} nao pertence ao operador`);
+  }
+  if (row.status === 'fechada') {
+    throw new Error(`[supabase] lerLigacaoSupabase: ligacao ${id} ja foi concluida`);
+  }
+  return { ...linhaParaItemFila(row), script: row.script ?? '' };
+}
+
+/**
+ * Contexto (dossiê 360°) do lead ligado à Ligação `ligacaoId` do operador —
+ * espelho Supabase de `clickup.ts::lerContextoLead`. Sob FONTE_LIGACOES=
+ * 'supabase' o taskId da rota é o id LOCAL numérico da Ligação; valida a posse
+ * (mesmos guards CR-01 de `lerLigacaoSupabase`: não encontrada / não pertence
+ * ao operador / concluída) e devolve a coluna `dossie` do lead no espelho
+ * (`SUPABASE_TABLE_LEADS_ESPELHO`, casado por `clickup_task_id =
+ * lead_clickup_task_id`). Mesmo contrato `{ temLead, contexto }` — o caller
+ * (index.ts) não muda o mapeamento de erro (as strings casam os catches
+ * 404/502). Read-only. Erros de infra/autorização LANÇAM (WR-03).
+ */
+export async function lerContextoLeadSupabase(
+  ligacaoId: number,
+  operador: string,
+): Promise<{ temLead: boolean; contexto: string }> {
+  checarConfig();
+  const lig = await lerLigacaoSupabase(ligacaoId, operador);
+  const leadTaskId = lig.leadTaskId ?? '';
+  if (!leadTaskId) return { temLead: false, contexto: '' };
+  const params = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select: 'dossie',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler o dossiê do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler o dossiê do lead em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<{ dossie?: string | null }>;
+  const dossie = data?.[0]?.dossie ?? '';
+  return { temLead: true, contexto: dossie ?? '' };
+}
+
+/**
+ * Detalhe do lead (ficha + dossiê) a partir do espelho Supabase — espelho de
+ * `clickup.ts::lerLeadDetalhe`, mas lendo `SUPABASE_TABLE_LEADS_ESPELHO` por
+ * `clickup_task_id` em vez da task da Lista 01 (cujo `description` era a fonte
+ * ANTIGA do dossiê). É o que a tela de conversa/áudio consome via
+ * `/api/discador/lead/:id?leve=1` sob FONTE_LEADS='supabase' — sem isso a tela
+ * cairia no ClickUp e mostraria o dossiê antigo (ou 502 para leads criados
+ * direto no banco). Mesmo contrato `{ lead, dossie, timeline }`; `timeline` é
+ * `[]` nesta fase (variante LEVE não usa timeline; `ligacoes.lead_id` numérico
+ * é débito conhecido). Shape ESTRUTURAL (supabase.ts nunca importa clickup.ts).
+ * Erros de infra/validação LANÇAM (WR-03) — o caller (index.ts) mapeia 404/502.
+ */
+export interface LeadDetalheEspelho {
+  leadTaskId: string;
+  nome: string;
+  telefone: string;
+  cpf: string;
+  bairro: string;
+  cidade: string;
+  uf: string;
+  confirmouRomero: string | null;
+  confirmouAndressa: string | null;
+  militante: boolean;
+  observacao: string;
+  ultimoContato: string;
+  proximoContato: string;
+}
+export async function lerLeadDetalheSupabase(
+  leadTaskId: string,
+): Promise<{ lead: LeadDetalheEspelho; dossie: string; timeline: never[] }> {
+  checarConfig();
+  const params = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select:
+      'clickup_task_id,nome,telefone,cpf,bairro,cidade,confirmou_romero,confirmou_andressa,militante,observacao_consolidada,ultimo_contato,proximo_contato,dossie',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler o detalhe do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler o detalhe do lead em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<Record<string, unknown>>;
+  const row = Array.isArray(data) ? data[0] : undefined;
+  if (!row) {
+    // MESMA string de validação de clickup.ts (mapeada a 404 no caller) — lead
+    // inexistente nunca vira 502.
+    throw new Error(`[supabase] lead ${leadTaskId} nao encontrada no espelho`);
+  }
+  const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
+  const lead: LeadDetalheEspelho = {
+    leadTaskId: str(row.clickup_task_id),
+    nome: str(row.nome),
+    telefone: str(row.telefone),
+    cpf: str(row.cpf),
+    bairro: str(row.bairro),
+    cidade: str(row.cidade),
+    uf: '',
+    confirmouRomero: row.confirmou_romero === null || row.confirmou_romero === undefined ? null : str(row.confirmou_romero),
+    confirmouAndressa: row.confirmou_andressa === null || row.confirmou_andressa === undefined ? null : str(row.confirmou_andressa),
+    militante: row.militante === true,
+    observacao: str(row.observacao_consolidada),
+    ultimoContato: formatarDataLigacaoSupabase(typeof row.ultimo_contato === 'string' ? row.ultimo_contato : null),
+    proximoContato: formatarDataLigacaoSupabase(typeof row.proximo_contato === 'string' ? row.proximo_contato : null),
+  };
+  return { lead, dossie: str(row.dossie), timeline: [] };
+}
+
+/** Formata `inicio` (timestamptz ISO) em "DD/MM/AAAA HH:MM" Brasília — mesmo
+ *  resultado visual de clickup.ts::formatarDataLigacao (fonte diferente: ISO
+ *  aqui, epoch-ms lá). Entrada vazia/inválida devolve '' (nunca lança). */
+function formatarDataLigacaoSupabase(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(ms));
+}
+
+/** Duração "humana" e curta ("33s" / "2min" / "2min 5s") — mesmo formato de
+ *  clickup.ts::formatarDuracaoCurta (duplicada de propósito; par pequeno
+ *  demais pra acoplar módulos, mesmo racional de telefone-canonico.ts). */
+function formatarDuracaoCurtaSupabase(segundos: number | null | undefined): string {
+  if (!Number.isFinite(segundos) || (segundos as number) <= 0) return '0s';
+  const total = Math.round(segundos as number);
+  if (total < 60) return `${total}s`;
+  const minutos = Math.floor(total / 60);
+  const restante = total % 60;
+  return restante ? `${minutos}min ${restante}s` : `${minutos}min`;
+}
+
+/**
+ * `analise_ia` (jsonb) hoje é gravado por `espelho.ts::paraAnaliseIa` como
+ * `{ texto }` — texto livre, não estruturado (mesmo débito documentado lá).
+ * Extrai `aderencia`/`resumoAnalise` de forma TOLERANTE: usa os campos
+ * estruturados quando existirem (estruturação futura, fora do escopo desta
+ * fase) e cai pro `texto` cru como `resumoAnalise` caso contrário. Nunca lança.
+ */
+function extrairAnaliseIa(raw: unknown): { aderencia: string; resumoAnalise: string } {
+  if (!raw || typeof raw !== 'object') return { aderencia: '', resumoAnalise: '' };
+  const obj = raw as Record<string, unknown>;
+  const aderencia = typeof obj.aderencia === 'number' || typeof obj.aderencia === 'string' ? String(obj.aderencia) : '';
+  const resumoAnalise =
+    typeof obj.resumoAnalise === 'string' ? obj.resumoAnalise : typeof obj.texto === 'string' ? obj.texto : '';
+  return { aderencia, resumoAnalise };
+}
+
+/** Linha crua de `ligacoes` usada pela timeline (colunas distintas da fila/detalhe). */
+interface LinhaTimelineLigacao {
+  operador?: string | null;
+  inicio?: string | null;
+  atendeu?: boolean | null;
+  motivo_falha?: string | null;
+  duracao_seg?: number | null;
+  analise_ia?: unknown;
+}
+
+function linhaParaItemTimeline(row: LinhaTimelineLigacao): ItemTimelineSupabase {
+  const { aderencia, resumoAnalise } = extrairAnaliseIa(row.analise_ia);
+  return {
+    data: formatarDataLigacaoSupabase(row.inicio),
+    atendeu: Boolean(row.atendeu),
+    aderencia,
+    resumoAnalise,
+    motivoFalha: row.motivo_falha ?? '',
+    duracao: formatarDuracaoCurtaSupabase(row.duracao_seg),
+  };
+}
+
+/**
+ * Timeline de Ligações de um lead pelo id LOCAL do lead (LEITURA-03/`ix_ligacoes_lead`,
+ * design §4) — troca as 2 listagens filtradas de `buscarLigacoesDoLead` por um
+ * SELECT direto (`WHERE lead_id=$1 ORDER BY inicio DESC LIMIT 10`).
+ *
+ * Guard CR-01: só devolve a timeline se ALGUMA Ligação do lead pertence ao
+ * `operadorEsperado` (prova que o operador já trabalhou este lead) — lead sem
+ * NENHUMA ligação (`linhas.length === 0`) é resultado legítimo (timeline
+ * vazia), não guard negado.
+ */
+export async function buscarLigacoesDoLeadSupabase(
+  leadId: number,
+  operadorEsperado: string,
+): Promise<ItemTimelineSupabase[]> {
+  checarConfig();
+  const params = new URLSearchParams({
+    lead_id: `eq.${leadId}`,
+    select: 'operador,inicio,atendeu,motivo_falha,duracao_seg,analise_ia',
+    order: 'inicio.desc',
+    limit: '10',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar as ligacoes do lead ${leadId}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar as ligacoes do lead ${leadId}`);
+  }
+  const data = (await res.json()) as LinhaTimelineLigacao[];
+  const linhas = Array.isArray(data) ? data : [];
+  if (linhas.length > 0 && !linhas.some((l) => String(l.operador ?? '') === operadorEsperado)) {
+    throw new Error(`[supabase] buscarLigacoesDoLeadSupabase: lead ${leadId} nao pertence ao operador`);
+  }
+  return linhas.map(linhaParaItemTimeline);
+}
+
+/**
+ * Monta o filtro PostgREST `or=(telefone_canonico.eq.$canon,telefone_variantes.ov.{...})`
+ * da correlação multi-candidato (LEITURA-05, §5.3, Riscos R4) — PURA/sem I/O,
+ * testável sem rede. `canonizarTelefone`/`variantesTelefone` (19-01) garantem
+ * que 12 e 13 dígitos do MESMO número produzem o MESMO `telefone_canonico` e o
+ * MESMO conjunto de candidatos — por isso o filtro casa a mesma linha
+ * independente do formato de entrada. `null` quando o telefone não é
+ * normalizável (nem canônico nem variante) — resultado legítimo, não erro.
+ */
+export function montarFiltroCorrelacaoTelefone(telefone: string): { or: string } | null {
+  const canon = canonizarTelefone(telefone);
+  const candidatos = variantesTelefone(telefone);
+  const partes: string[] = [];
+  if (canon) partes.push(`telefone_canonico.eq.${canon}`);
+  if (candidatos.length > 0) partes.push(`telefone_variantes.ov.{${candidatos.join(',')}}`);
+  if (partes.length === 0) return null;
+  return { or: `(${partes.join(',')})` };
+}
+
+/**
+ * Busca a Ligação ABERTA cujo telefone casa (LEITURA-05, design §4) — troca
+ * `buscarLigacaoAbertaPorTelefone` (varredura da Lista 02) pelo filtro de
+ * `montarFiltroCorrelacaoTelefone` (`telefone_canonico = $canon OR
+ * telefone_variantes && $candidatos`), preservando o casamento multi-candidato
+ * ±9º dígito (R4). Retorna o id LOCAL (CONTRATO DE ID) ou `null` — sem
+ * Ligação aberta casando é resultado legítimo, não erro. NUNCA loga o
+ * telefone completo.
+ */
+export async function buscarLigacaoAbertaPorTelefoneSupabase(telefone: string): Promise<string | null> {
+  checarConfig();
+  const filtro = montarFiltroCorrelacaoTelefone(telefone);
+  if (!filtro) return null;
+  const params = new URLSearchParams({
+    status: 'eq.aberta',
+    select: 'id',
+    limit: '1',
+  });
+  params.set('or', filtro.or);
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar ligacao aberta por telefone: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao buscar ligacao aberta por telefone`);
+  }
+  const data = (await res.json()) as Array<{ id?: number }>;
+  const row = Array.isArray(data) ? data[0] : undefined;
+  return row?.id !== undefined ? String(row.id) : null;
+}
+
+/**
+ * Resolve o lead (id local + clickup_task_id) de uma Ligação por id LOCAL
+ * (LEITURA-05, design §4) — troca `resolverLeadDaLigacao` (`GET /task` +
+ * fallback de listagem de 100k) por um SELECT direto de `lead_id`/
+ * `lead_clickup_task_id`. `null` quando a Ligação não existe ou não tem lead
+ * vinculado (resultado legítimo).
+ */
+export async function resolverLeadDaLigacaoSupabase(
+  id: number,
+): Promise<{ leadId: number | null; leadClickupTaskId: string | null } | null> {
+  checarConfig();
+  const params = new URLSearchParams({
+    id: `eq.${id}`,
+    select: 'lead_id,lead_clickup_task_id',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o lead da ligacao ${id}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao resolver o lead da ligacao ${id}`);
+  }
+  const data = (await res.json()) as Array<{ lead_id?: number | null; lead_clickup_task_id?: string | null }>;
+  const row = Array.isArray(data) ? data[0] : undefined;
+  if (!row) return null;
+  return { leadId: row.lead_id ?? null, leadClickupTaskId: row.lead_clickup_task_id ?? null };
+}
+
+// ===== Fase C (20-04) — LEITURAS de audios/leads/notas do Supabase (design §4) =====
+//
+// Nunca-ligados (anti-join lead_id), selo de conversa, histórico de envios —
+// espelham o padrão de leitura provado no 19-05 (self-contained, checarConfig()
+// + LANÇA em erro de infra WR-03). NENHUMA rota chama estas funções ainda — o
+// wiring atrás de FONTE_AUDIOS/FONTE_LEADS é 20-05/20-06/20-07.
+//
+// CONTRATO: sob FONTE_AUDIOS/FONTE_LEADS=supabase, o critério de "tem
+// Ligação" passa a ser `lead_id` — a chave numérica materializada no 20-01
+// (`discador_leads_espelho.id` + trigger que resolve `lead_id` em
+// `ligacoes`/`audios_envios` a partir de `lead_clickup_task_id`) — não mais
+// o telefone-fallback que `clickup.ts::buscarLeadsNuncaLigados` usa. EDGE:
+// uma Ligação cujo `lead_id` ainda não foi resolvido (linha gravada antes do
+// 20-01 sem backfill, ou `lead_clickup_task_id` nulo) não entra no conjunto
+// "tem ligação" — o backfill do 20-01 cobre as linhas existentes; linhas
+// novas sempre resolvem via trigger no INSERT/UPDATE.
+//
+// Erro de config/rede/HTTP LANÇA (WR-03) — nunca lista vazia mascarando
+// falha. NUNCA loga telefone/nome/corpo de nota (LGPD).
+
+export interface LeadNuncaLigadoSupabase {
+  leadTaskId: string;
+  nome: string;
+  telefone: string;
+  /** CAMPOS_LEADS.ORIGEM (ClickUp) NÃO é materializado em
+   *  `discador_leads_espelho` (sql/escala/02/08) — fica sempre '' nesta
+   *  leitura. Adicionar a coluna é mudança de schema (fora do escopo desta
+   *  leitura-only, files_modified deste plano é só supabase.ts/smoke);
+   *  débito documentado para quando o wiring (20-05) precisar dos chips
+   *  dinâmicos de origem. */
+  origem: string;
+}
+
+const LIMITE_LOTE_NUNCA_LIGADOS = 200;
+
+/**
+ * Nunca-ligados por ANTI-JOIN `lead_id` (LEITURA-04, design §4) — troca a
+ * varredura cruzada de 3 listas (`clickup.ts::buscarLeadsNuncaLigados`) por
+ * duas leituras: (1) os `lead_id` DISTINTOS que já têm QUALQUER Ligação
+ * (aberta ou fechada — mesmo critério `includeClosed:true` do ClickUp,
+ * "tem Ligação" nunca depende de status) e (2) os leads cujo `id` NÃO está
+ * nesse conjunto (`id=not.in.(...)`), na mesma ordem/tamanho de lote do
+ * espelho (`LIMITE_LOTE_NUNCA_LIGADOS`, ordenado por `atualizado_em` desc —
+ * decisão do executor: prioriza os leads mais recentemente sincronizados,
+ * já que a Lista 01 real não define prioridade para o lote de nunca-ligados).
+ * `origens` fica sempre `[]` (ver `LeadNuncaLigadoSupabase.origem`). Erro de
+ * config/rede/HTTP LANÇA (WR-03); nunca chama a listagem do ClickUp.
+ */
+export async function buscarLeadsNuncaLigadosSupabase(): Promise<{
+  leads: LeadNuncaLigadoSupabase[];
+  origens: string[];
+}> {
+  checarConfig();
+  const paramsLig = new URLSearchParams({
+    select: 'lead_id',
+    lead_id: 'not.is.null',
+  });
+  let resLig: Response;
+  try {
+    resLig = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${paramsLig.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler os lead_id com ligacao: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLig.ok) {
+    throw new Error(`[supabase] HTTP ${resLig.status} ao ler os lead_id com ligacao em ${SUPABASE_TABLE_LIGACOES}`);
+  }
+  const dataLig = (await resLig.json()) as Array<{ lead_id?: number | null }>;
+  const idsComLigacao = [
+    ...new Set(
+      (Array.isArray(dataLig) ? dataLig : [])
+        .map((r) => r.lead_id)
+        .filter((v): v is number => v !== null && v !== undefined),
+    ),
+  ];
+
+  const paramsLeads = new URLSearchParams({
+    select: 'id,clickup_task_id,nome,telefone',
+    order: 'atualizado_em.desc',
+    limit: String(LIMITE_LOTE_NUNCA_LIGADOS),
+  });
+  if (idsComLigacao.length > 0) {
+    paramsLeads.set('id', `not.in.(${idsComLigacao.join(',')})`);
+  }
+  let resLeads: Response;
+  try {
+    resLeads = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${paramsLeads.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao buscar leads nunca-ligados: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLeads.ok) {
+    throw new Error(
+      `[supabase] HTTP ${resLeads.status} ao buscar leads nunca-ligados em ${SUPABASE_TABLE_LEADS_ESPELHO}`,
+    );
+  }
+  const dataLeads = (await resLeads.json()) as Array<{
+    id?: number;
+    clickup_task_id?: string;
+    nome?: string;
+    telefone?: string;
+  }>;
+  const leads: LeadNuncaLigadoSupabase[] = (Array.isArray(dataLeads) ? dataLeads : []).map((r) => ({
+    leadTaskId: String(r.clickup_task_id ?? ''),
+    nome: String(r.nome ?? ''),
+    telefone: String(r.telefone ?? ''),
+    origem: '',
+  }));
+  return { leads, origens: [] };
+}
+
+/** Resumo do selo de conversa de UM lead — mesmo shape de
+ *  `clickup.ts::ResumoConversaLead`. */
+export interface ResumoConversaLeadSupabase {
+  envios: number;
+  temResposta: boolean;
+  respostaTexto: string | null;
+  analise: string | null;
+}
+
+/**
+ * Selo de conversa por lead (LEITURA-04, design §2.2/§4) — agrega
+ * `audios_envios` por `lead_clickup_task_id`, mesmo shape de
+ * `clickup.ts::mapaConversaPorLead`. `selo_conversa` (enum
+ * `ligar`|`nao_ligar`|`sem_conversa`) é a única coluna que hoje carrega o
+ * resultado da avaliação da resposta do lead nesta tabela — nenhuma escrita
+ * grava `respostaTexto`/`analise` (texto livre) em `audios_envios` ainda
+ * (ver `sql/escala/24_rpc_registrar_envio_audio.sql`: o INSERT não tem essas
+ * colunas) — ficam sempre `null` enquanto isso (débito de ESCRITA, fora do
+ * escopo desta leitura). `temResposta` deriva de `selo_conversa IN ('ligar',
+ * 'nao_ligar')` — um veredito já foi formado sobre a resposta do lead. Erro
+ * de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function mapaConversaPorLeadSupabase(): Promise<Map<string, ResumoConversaLeadSupabase>> {
+  checarConfig();
+  const params = new URLSearchParams({
+    select: 'lead_clickup_task_id,selo_conversa',
+    lead_clickup_task_id: 'not.is.null',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler o mapa de conversa: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao ler o mapa de conversa em ${SUPABASE_TABLE_AUDIOS_ENVIOS}`);
+  }
+  const data = (await res.json()) as Array<{ lead_clickup_task_id?: string | null; selo_conversa?: string | null }>;
+  const mapa = new Map<string, ResumoConversaLeadSupabase>();
+  for (const r of Array.isArray(data) ? data : []) {
+    const leadId = String(r.lead_clickup_task_id ?? '');
+    if (!leadId) continue;
+    const atual = mapa.get(leadId) ?? { envios: 0, temResposta: false, respostaTexto: null, analise: null };
+    atual.envios += 1;
+    if (r.selo_conversa === 'ligar' || r.selo_conversa === 'nao_ligar') atual.temResposta = true;
+    mapa.set(leadId, atual);
+  }
+  return mapa;
+}
+
+/** Um envio (áudio OU texto) lido de `audios_envios` — mesmo shape de
+ *  `clickup.ts::EnvioAudioHistorico`. */
+export interface EnvioAudioHistoricoSupabase {
+  taskId: string;
+  em: number;
+  por: string;
+  tipo: 'audio' | 'texto';
+  texto: string | null;
+  audioUrl: string | null;
+  transcricao: string | null;
+}
+
+/**
+ * Histórico de envios de um lead (LEITURA-04, design §2.2/§4) — resolve o
+ * lead (`discador_leads_espelho` por `clickup_task_id`) e lê `audios_envios
+ * WHERE lead_id=$1 ORDER BY enviado_em` (`ix_audios_lead`). `taskId` = id
+ * LOCAL de `audios_envios` (bigint como string). `por` (enviado_por) NÃO é
+ * persistido em `audios_envios` ainda — só passa pelo payload do outbox pro
+ * ClickUp (`sql/escala/24_rpc_registrar_envio_audio.sql`) — fica sempre `''`
+ * (débito de ESCRITA, fora do escopo desta leitura). `audioUrl` = `midia_ref`
+ * cru (ponteiro pro store canônico Supabase Storage; resolver pra URL
+ * assinada é trabalho do wiring, 20-06/07). Sem lead resolvido -> `[]`
+ * (resultado legítimo). Erro de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function listarEnviosAudioDoLeadSupabase(leadTaskId: string): Promise<EnvioAudioHistoricoSupabase[]> {
+  checarConfig();
+  if (!leadTaskId) {
+    throw new Error('[supabase] listarEnviosAudioDoLeadSupabase chamado sem leadTaskId');
+  }
+  const paramsLead = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select: 'id',
+    limit: '1',
+  });
+  let resLead: Response;
+  try {
+    resLead = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${paramsLead.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o lead do historico de envios: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLead.ok) {
+    throw new Error(`[supabase] HTTP ${resLead.status} ao resolver o lead do historico de envios`);
+  }
+  const dataLead = (await resLead.json()) as Array<{ id?: number }>;
+  const leadId = dataLead?.[0]?.id;
+  if (leadId === undefined || leadId === null) return [];
+
+  const params = new URLSearchParams({
+    lead_id: `eq.${leadId}`,
+    select: 'id,tipo,corpo,transcricao_audio,midia_ref,enviado_em',
+    order: 'enviado_em.asc',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_AUDIOS_ENVIOS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar o historico de envios do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `[supabase] HTTP ${res.status} ao listar o historico de envios em ${SUPABASE_TABLE_AUDIOS_ENVIOS}`,
+    );
+  }
+  const data = (await res.json()) as Array<{
+    id?: number;
+    tipo?: string;
+    corpo?: string | null;
+    transcricao_audio?: string | null;
+    midia_ref?: string | null;
+    enviado_em?: string | null;
+  }>;
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    taskId: String(r.id ?? ''),
+    em: r.enviado_em ? Date.parse(r.enviado_em) || 0 : 0,
+    por: '',
+    tipo: r.tipo === 'texto' ? 'texto' : 'audio',
+    texto: r.tipo === 'texto' ? (r.corpo ?? null) : null,
+    audioUrl: r.midia_ref ?? null,
+    transcricao: r.transcricao_audio ?? null,
+  }));
+}
+
+/**
+ * Leitor mínimo de nome por `clickup_task_id` no espelho de leads — mesma
+ * primitiva de fetch de `listarEnviosAudioDoLeadSupabase`/
+ * `listarNotasDoLeadSupabase`, mas selecionando `nome` (nenhum dos dois
+ * seleciona). Reusado pela rota `/api/discador/audios/fila` sob
+ * FONTE_LIGACOES='supabase' pra resolver o nome real do lead quando a fila
+ * Supabase entrega o telefone como nome (19-05: `ligacoes` não tem coluna
+ * nome própria). LANÇA em erro de config/rede/HTTP (WR-03) — o caller faz
+ * try/catch e mantém o telefone como nome (nunca quebra a lista). Sem
+ * `clickupTaskId`, degrada silenciosamente pra `null` (única divergência do
+ * padrão dos irmãos, que lançam nesse caso: aqui o caller quer sempre
+ * degradar pro telefone, não abortar). NUNCA logar telefone/CPF (LGPD).
+ */
+export async function lerNomeLeadEspelho(clickupTaskId: string): Promise<string | null> {
+  checarConfig();
+  if (!clickupTaskId) return null;
+  const params = new URLSearchParams({
+    clickup_task_id: `eq.${clickupTaskId}`,
+    select: 'nome',
+    limit: '1',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o nome do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao resolver o nome do lead em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<{ nome?: string | null }>;
+  return data?.[0]?.nome ?? null;
+}
+
+/** Lead elegível para o lote — shape que o runner (20-06) precisa para
+ *  montar o script e chamar `gerar_lote`. */
+export interface LeadLoteElegivelSupabase {
+  id: number;
+  clickupTaskId: string;
+  telefone: string;
+  nome: string;
+  score: number;
+  tentativas: number;
+  proximoContato: string | null;
+}
+
+/**
+ * Seleção do lote elegível por SQL (LEITURA-06, design §5(1)) — PREVIEW/
+ * paridade de teste: a RPC `gerar_lote` (`sql/escala/26_rpc_gerar_lote.sql`,
+ * 20-03) JÁ faz a seleção + o INSERT de `ligacoes` atomicamente server-side
+ * (both-or-neither) — ESTA função NÃO decide quem entra no lote real; serve
+ * o preview/contagem do runner (20-06) e a paridade de teste com
+ * `lote.ts::selecionarLoteElegivel`, reproduzindo a MESMA ordem
+ * (`retorno_necessario DESC, score DESC, tentativas ASC`, `ix_leads_lote`) e
+ * o MESMO filtro (`elegivel=true`, sem Ligação ABERTA — anti-join por
+ * `lead_id`, mesmo padrão de `buscarLeadsNuncaLigadosSupabase`). Uma corrida
+ * entre este preview e `gerar_lote` é aceitável (preview não commita nada).
+ * Erro de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function selecionarLoteElegiveisSupabase(tamanho: number): Promise<LeadLoteElegivelSupabase[]> {
+  checarConfig();
+  const paramsLig = new URLSearchParams({
+    select: 'lead_id',
+    status: 'eq.aberta',
+    lead_id: 'not.is.null',
+  });
+  let resLig: Response;
+  try {
+    resLig = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LIGACOES}?${paramsLig.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao ler ligacoes abertas para a selecao do lote: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLig.ok) {
+    throw new Error(`[supabase] HTTP ${resLig.status} ao ler ligacoes abertas para a selecao do lote`);
+  }
+  const dataLig = (await resLig.json()) as Array<{ lead_id?: number | null }>;
+  const idsComLigacaoAberta = [
+    ...new Set(
+      (Array.isArray(dataLig) ? dataLig : [])
+        .map((r) => r.lead_id)
+        .filter((v): v is number => v !== null && v !== undefined),
+    ),
+  ];
+
+  const params = new URLSearchParams({
+    select: 'id,clickup_task_id,telefone,nome,score,tentativas,proximo_contato',
+    elegivel: 'eq.true',
+    order: 'retorno_necessario.desc,score.desc,tentativas.asc',
+    limit: String(tamanho),
+  });
+  if (idsComLigacaoAberta.length > 0) {
+    params.set('id', `not.in.(${idsComLigacaoAberta.join(',')})`);
+  }
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao selecionar o lote elegivel: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao selecionar o lote elegivel em ${SUPABASE_TABLE_LEADS_ESPELHO}`);
+  }
+  const data = (await res.json()) as Array<{
+    id?: number;
+    clickup_task_id?: string;
+    telefone?: string;
+    nome?: string;
+    score?: number;
+    tentativas?: number;
+    proximo_contato?: string | null;
+  }>;
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    id: Number(r.id ?? 0),
+    clickupTaskId: String(r.clickup_task_id ?? ''),
+    telefone: String(r.telefone ?? ''),
+    nome: String(r.nome ?? ''),
+    score: Number(r.score ?? 0),
+    tentativas: Number(r.tentativas ?? 0),
+    proximoContato: r.proximo_contato ?? null,
+  }));
+}
+
+/** Uma nota (comentário) de `notas` (`aggregate='lead'`). */
+export interface NotaLeadSupabase {
+  id: number;
+  autor: string | null;
+  corpo: string;
+  criadoEm: string;
+}
+
+/**
+ * Notas (comentários) de um lead para o detalhe/timeline (LEITURA-04, design
+ * §2.6/§4) — resolve o lead (`discador_leads_espelho` por `clickup_task_id`)
+ * e lê `notas WHERE aggregate='lead' AND aggregate_id=$1 ORDER BY
+ * criado_em` (`ix_notas_aggregate`, `sql/escala/23_indices_fase_c.sql`). Sem
+ * lead resolvido -> `[]` (resultado legítimo). NUNCA loga o `corpo`/telefone
+ * (LGPD). Erro de config/rede/HTTP LANÇA (WR-03).
+ */
+export async function listarNotasDoLeadSupabase(leadTaskId: string): Promise<NotaLeadSupabase[]> {
+  checarConfig();
+  if (!leadTaskId) {
+    throw new Error('[supabase] listarNotasDoLeadSupabase chamado sem leadTaskId');
+  }
+  const paramsLead = new URLSearchParams({
+    clickup_task_id: `eq.${leadTaskId}`,
+    select: 'id',
+    limit: '1',
+  });
+  let resLead: Response;
+  try {
+    resLead = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_LEADS_ESPELHO}?${paramsLead.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao resolver o lead das notas: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!resLead.ok) {
+    throw new Error(`[supabase] HTTP ${resLead.status} ao resolver o lead das notas`);
+  }
+  const dataLead = (await resLead.json()) as Array<{ id?: number }>;
+  const leadId = dataLead?.[0]?.id;
+  if (leadId === undefined || leadId === null) return [];
+
+  const params = new URLSearchParams({
+    aggregate: 'eq.lead',
+    aggregate_id: `eq.${leadId}`,
+    select: 'id,autor,corpo,criado_em',
+    order: 'criado_em.asc',
+  });
+  let res: Response;
+  try {
+    res = await fetchTimeout(`${SUPABASE_REST_URL}/${SUPABASE_TABLE_NOTAS}?${params.toString()}`, {
+      headers: headers(),
+    });
+  } catch (e) {
+    throw new Error(
+      `[supabase] falha de rede ao listar as notas do lead: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`[supabase] HTTP ${res.status} ao listar as notas em ${SUPABASE_TABLE_NOTAS}`);
+  }
+  const data = (await res.json()) as Array<{
+    id?: number;
+    autor?: string | null;
+    corpo?: string | null;
+    criado_em?: string;
+  }>;
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    id: Number(r.id ?? 0),
+    autor: r.autor ?? null,
+    corpo: String(r.corpo ?? ''),
+    criadoEm: r.criado_em ?? '',
+  }));
 }
 
 // ===== Conversa WhatsApp por lead (Fase 13 — campanha de áudios, sql/escala/03) =====
@@ -1303,6 +2418,57 @@ export async function inserirTranscricaoLigacao(row: TranscricaoLigacaoRow): Pro
       `[supabase] HTTP ${res.status} ao inserir transcricao em ${SUPABASE_TABLE_TRANSCRICOES_LIGACAO}`,
     );
   }
+}
+
+// ===== Criação de lead nativo (quick 260823-h1s, Fase C — Caminho B) =====
+//
+// Thin wrapper sobre `comOutboxRpc(SUPABASE_RPC_CRIAR_LEAD)` — sql/escala/
+// 27_rpc_criar_lead.sql faz o INSERT em discador_leads_espelho + o INSERT no
+// clickup_outbox (aggregate='lead', op='criar_task') na MESMA transação.
+// NUNCA faz uma segunda chamada pra compor a mutação (comOutboxRpc é o ponto
+// único — invariante "uma chamada = uma tx", design §3.0/§3.1). NUNCA loga
+// telefone/CPF (LGPD) — este writer só repassa; o tratamento de erro fica na
+// rota (index.ts).
+
+export interface CriarLeadInput {
+  nome: string;
+  telefone: string;
+  cpf?: string;
+  bairro?: string;
+  cidade?: string;
+  dossie?: string;
+  tags?: string[];
+  militante?: boolean;
+  superFa?: boolean;
+  elegivel?: boolean;
+  score?: number;
+  idSupabase?: string;
+  origem?: string;
+}
+
+export interface CriarLeadResultado {
+  lead_id: number;
+  id_supabase: string | null;
+  clickup_task_id_local: string;
+  outbox_inseridos: number;
+}
+
+export async function criarLeadSupabase(input: CriarLeadInput): Promise<CriarLeadResultado> {
+  return comOutboxRpc<CriarLeadResultado>(SUPABASE_RPC_CRIAR_LEAD, {
+    p_nome: input.nome,
+    p_telefone: input.telefone,
+    p_cpf: input.cpf ?? null,
+    p_bairro: input.bairro ?? null,
+    p_cidade: input.cidade ?? null,
+    p_dossie: input.dossie ?? null,
+    p_tags: input.tags ?? null,
+    p_militante: input.militante ?? false,
+    p_super_fa: input.superFa ?? false,
+    p_elegivel: input.elegivel ?? null,
+    p_score: input.score ?? null,
+    p_id_supabase: input.idSupabase ?? null,
+    p_origem: input.origem ?? null,
+  });
 }
 
 // ===== Fase 2 (roadmap) — biblioteca de conteúdos recorrentes (sql/escala/27) =====

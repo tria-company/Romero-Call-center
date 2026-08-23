@@ -14,10 +14,55 @@ import {
   ALERTA_QUEDA_COOLDOWN_MS,
   // Inbound → fila (2026-08-19): dedupe por telefone direto na Lista 02.
   CLICKUP_LIST_LIGACOES,
+  // Fase B (Phase 19, 19-07): flag por-agregado da inversão Supabase-fonte-
+  // da-verdade (default 'clickup', flip só no 19-10) + nomes das RPCs do
+  // Caminho B (Portão 1) que as rotas de escrita chamam via comOutboxRpc
+  // quando FONTE_LIGACOES='supabase'.
+  FONTE_LIGACOES,
+  SUPABASE_RPC_INICIAR_LIGACAO,
+  SUPABASE_RPC_REGISTRAR_DESFECHO,
+  SUPABASE_RPC_PULAR_LIGACAO,
+  SUPABASE_RPC_CRIAR_LIGACAO_AVULSA,
+  // 19-08: RPC do voto (SoT leads.confirmou_* + ledger votos_ligacao + outbox
+  // na mesma tx) — /voto (caminho ligação) e /lead/:id/voto (caminho lead,
+  // regra determinística p_ligacao_id=null) consomem a MESMA RPC.
+  SUPABASE_RPC_REGISTRAR_VOTO,
+  // Fase C (Phase 20, 20-05): flag por-agregado 'audios' (default 'clickup',
+  // flip só no 20-08) + nomes das RPCs do Caminho B que as 2 rotas de escrita
+  // de áudio/mensagem chamam via comOutboxRpc quando FONTE_AUDIOS='supabase'.
+  FONTE_AUDIOS,
+  SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO,
+  SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO,
+  // Fase C (Phase 20, 20-07): flag do agregado 'notas' (default 'clickup',
+  // flip só no 20-08) + nome da RPC de anotação + tabela do espelho de leads
+  // (resolução best-effort de lead_id numérico p/ registrar_anotacao — notas
+  // não tem trigger de auto-resolução como ligacoes/audios_envios, 22_fundacao).
+  FONTE_NOTAS,
+  SUPABASE_RPC_REGISTRAR_ANOTACAO,
+  SUPABASE_TABLE_LEADS_ESPELHO,
+  // Quick 260823-h1s: flag do agregado 'leads' (default 'clickup') pro
+  // caminho de CRIAÇÃO de lead nativo — POST /api/discador/lead. Débito
+  // pré-flip (dreno) documentado em sql/escala/27_rpc_criar_lead.sql;
+  // nenhum flip acontece nesta quick task.
+  FONTE_LEADS,
 } from './config';
+// Helper transacional único do Caminho B (Portão 1, Fase 18/19): toda
+// mutação de `ligacoes` sob FONTE_LIGACOES='supabase' vira UMA chamada
+// `comOutboxRpc(nomeRpc, args)` — mutação + INSERT no outbox no MESMO corpo
+// plpgsql (both-or-neither). Ver src/mastra/outbox-rpc.ts.
+import { comOutboxRpc } from './outbox-rpc.ts';
+// Normalização de telefone (19-01) — usada pela avulsa (Task 2) pra montar
+// p_telefone_canonico/p_telefone_variantes da RPC criar_ligacao_avulsa.
+import { canonizarTelefone, variantesTelefone } from './telefone-canonico.ts';
 
 // Auth do PWA discador (login por closer, token HMAC sem estado).
 import { verificarCredenciais, emitirToken, verificarToken, tokenDoHeader } from './discador-auth';
+// Fase A espelho (17-03, MODELO-06/PORTAO-03): validação do mapa de field-ids
+// ClickUp no boot (uma única autoridade, R8) + healthcheck de boot das
+// tabelas novas do espelho (SELECT+escrita, R11) — disparados 1x no boot
+// abaixo, mesmo molde fire-and-forget não-fatal de semearUsuariosSeVazio.
+import { carregarEValidarCampoMapa, DivergenciaCampoMapa } from './campo-mapa.ts';
+import { healthcheckEspelho } from './boot-espelho.ts';
 // Seed idempotente (USER-05) + snapshot em memoria de discador_usuarios
 // (Fase 11 D-01/D-02) — disparados 1x no boot abaixo; verificarCredenciais
 // (discador-auth.ts) e assigneeDoOperador/resolverConfigDoUsuario
@@ -100,6 +145,10 @@ import {
   criarLigacaoAvulsa,
   valorCampoLead,
   CAMPOS_LEADS,
+  // Fase B (Phase 19, 19-07 Task 3): correlação de fallback do webhook por
+  // telefone (caminho ClickUp, sob FONTE_LIGACOES='clickup') — o par
+  // Supabase (buscarLigacaoAbertaPorTelefoneSupabase, multi-candidato ±9º)
+  // vem do import de './supabase' abaixo.
   // Fase 19.1 Plano 08 (DUR-02/06): fallback persistido de correlação
   // call->task, resolvido NA HORA DO ENQUEUE do RECORD (correlação durável,
   // ver import de lerTaskAtiva abaixo).
@@ -459,6 +508,10 @@ async function avaliarConversaComDebounce(
     }
     avaliacaoPorLead.set(leadId, { paraContagem: doLead.length, status, motivo });
     try {
+      // Fase C (20-05): NÃO ramificar por FONTE_AUDIOS — grava ANALISE_IA no
+      // ClickUp por `ultimo.taskId`; sob supabase o id local de
+      // `audios_envios` não é o clickup_task_id (mesmo débito documentado
+      // abaixo, na persistência de resposta de /conversa).
       const envios = await listarEnviosAudioDoLead(leadId);
       const ultimo = envios[envios.length - 1];
       if (ultimo?.taskId) {
@@ -644,8 +697,150 @@ async function buscarFilaResiliente(assignee: string): Promise<Awaited<ReturnTyp
 // Sync assincrono do voto pos-ligacao (Fase 08 Plano 03, CACHE-03/D-07a):
 // /voto enfileira o job (worker espelha no ClickUp em <60s) com fallback
 // inline (processarSyncClickupJob) sem Redis (SC5).
-import { enfileirarSyncClickup } from './fila.ts';
+import { enfileirarSyncClickup, enfileirarDrenoOutbox } from './fila.ts';
 import { processarSyncClickupJob, atribuirVotoDoLead } from './sync-clickup.ts';
+// Kick do dreno do outbox (ESCRITA-02, Fase B Plano 03/07): fallback INLINE
+// quando enfileirarDrenoOutbox devolve { enfileirado:false } (sem Redis) —
+// mesmo padrão de processarSyncClickupJob acima, nunca fire-and-forget
+// (T-19-07-Av).
+import { processarDrenoOutboxJob } from './drenar-outbox.ts';
+
+// ============ Fase B (Phase 19, 19-07) — helpers do Caminho B para as rotas de escrita de `ligacoes` ============
+//
+// posCommitLigacao: read-your-writes NO COMMIT LOCAL (as MESMAS invalidações
+// que /desfecho já faz — removerDaFilaCache/invalidarFilaCache/
+// derrubarFilaMem, no-op sem Redis, nunca lançam) + kick do dreno do outbox
+// CHECANDO o retorno — mesmo padrão de enfileirarSyncClickup/
+// processarSyncClickupJob já usado em /voto (linhas abaixo). NUNCA
+// fire-and-forget: sem Redis (dev/homolog) o dreno roda INLINE aqui, senão o
+// outbox nunca drenaria (T-19-07-Av, R12/decisão 9). O `.catch` é
+// best-effort — a linha do outbox já foi persistida (a RPC gravou na MESMA
+// tx da mutação) e será drenada no próximo kick/worker mesmo se o inline
+// falhar aqui; nunca transforma um sucesso da RPC (a mutação já commitou)
+// em erro HTTP da rota.
+async function posCommitLigacao(assignee: string, ligacaoId: number): Promise<void> {
+  await removerDaFilaCache(assignee, String(ligacaoId));
+  await invalidarFilaCache(assignee);
+  derrubarFilaMem(assignee);
+  const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: ligacaoId });
+  if (!enfileirado) {
+    await processarDrenoOutboxJob(ligacaoId).catch((e) => {
+      console.error(
+        '[dreno] inline pós-commit falhou (best-effort — a linha do outbox já foi persistida, drena depois):',
+        e instanceof Error ? e.message : String(e),
+      );
+    });
+  }
+}
+
+// ============ Fase C (Phase 20, 20-05) — helper análogo pro agregado 'audio' ============
+//
+// posCommitEnvioAudio: MESMO padrão CHECADO de posCommitLigacao acima — kick
+// do dreno do outbox do registro de áudio/mensagem (audios_envios) logo após
+// o commit local (a RPC registrar_envio_audio/registrar_mensagem_texto já
+// gravou o agregado + a linha do outbox na MESMA tx). Sem invalidação de
+// cache de fila (audios não usa filaMem/cache-fila — isso é só de `ligacoes`).
+// NUNCA fire-and-forget: sem Redis o dreno roda INLINE aqui (T-19-07-Av,
+// mesma decisão 9 aplicada ao novo agregado).
+async function posCommitEnvioAudio(audioId: number): Promise<void> {
+  const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: audioId });
+  if (!enfileirado) {
+    await processarDrenoOutboxJob(audioId).catch((e) => {
+      console.error(
+        '[dreno] inline envio-áudio pós-commit falhou (best-effort — a linha do outbox já foi persistida, drena depois):',
+        e instanceof Error ? e.message : String(e),
+      );
+    });
+  }
+}
+
+// ============ Fase C (Phase 20, 20-07) — helper análogo pro agregado 'nota' ============
+//
+// posCommitAnotacao: MESMO padrão CHECADO de posCommitLigacao/posCommitEnvioAudio
+// — kick do dreno do outbox da linha 'comentar' (não-bloqueante, R6) logo após
+// o commit local (registrar_anotacao já gravou `notas` + a linha do outbox na
+// MESMA tx). Sem invalidação de cache de fila (notas não usa filaMem/cache-fila).
+// NUNCA fire-and-forget: sem Redis o dreno roda INLINE aqui (T-19-07-Av).
+async function posCommitAnotacao(notaId: number): Promise<void> {
+  const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: notaId });
+  if (!enfileirado) {
+    await processarDrenoOutboxJob(notaId).catch((e) => {
+      console.error(
+        '[dreno] inline anotacao pós-commit falhou (best-effort — a linha do outbox já foi persistida, drena depois):',
+        e instanceof Error ? e.message : String(e),
+      );
+    });
+  }
+}
+
+// ============ Quick 260823-h1s — helper análogo pro agregado 'lead' (criação) ============
+//
+// posCommitCriarLead: MESMO padrão CHECADO de posCommitAnotacao/
+// posCommitEnvioAudio acima — kick do dreno do outbox da linha
+// aggregate='lead'/op='criar_task' logo após o commit local (criar_lead já
+// gravou discador_leads_espelho + a linha do outbox na MESMA tx). Sem
+// invalidação de cache de fila (leads não usa filaMem/cache-fila). NUNCA
+// fire-and-forget: sem Redis o dreno roda INLINE aqui (T-19-07-Av). A
+// criação EFETIVA da task na Lista 01 a partir desta linha de outbox depende
+// do débito pré-flip do dreno (ver rodapé de sql/escala/27_rpc_criar_lead.sql)
+// — o kick só garante que o dreno TENTA processar a linha assim que existir.
+async function posCommitCriarLead(leadId: number): Promise<void> {
+  const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: leadId });
+  if (!enfileirado) {
+    await processarDrenoOutboxJob(leadId).catch((e) => {
+      console.error(
+        '[dreno] inline criar-lead pós-commit falhou (best-effort — a linha do outbox já foi persistida, drena depois):',
+        e instanceof Error ? e.message : String(e),
+      );
+    });
+  }
+}
+
+/**
+ * Reconhece um erro de NEGÓCIO lançado por `comOutboxRpc` (RAISE da RPC —
+ * ligação inexistente / não pertence ao operador, sempre um 4xx do
+ * PostgREST) — `outbox-rpc.ts` NUNCA expõe o corpo/mensagem original da RPC
+ * (WR-03/LGPD), só o status HTTP na própria mensagem de erro (formato fixo
+ * `[outbox-rpc] HTTP <status> ao chamar RPC <nome>`). Usado pra OR-ar nos
+ * MESMOS checks `naoAutorizada` que os catches abaixo já fazem pro caminho
+ * ClickUp: 4xx vira 404 (IDOR-safe, não revela qual dos dois motivos);
+ * 5xx/falha de rede (mensagem não bate o padrão) devolve `false` — cai no
+ * 502 default de cada catch. Inócuo pro caminho ClickUp (suas mensagens de
+ * erro nunca começam com `[outbox-rpc]`).
+ */
+function ehErroRpcNaoAutorizado(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  const m = msg.match(/^\[outbox-rpc\] HTTP (\d+) ao chamar RPC/);
+  if (!m) return false;
+  const status = Number(m[1]);
+  return status >= 400 && status < 500;
+}
+
+/**
+ * Correlação de FALLBACK do webhook Wavoip por telefone (LEITURA-05, Fase B
+ * 19-07 Task 3) — usada quando a correlação em memória (call_id→telefone,
+ * `guardarCorrelacao`/`lerCorrelacao` abaixo) não tem a entrada
+ * (restart/TTL expirado). Ramifica por `FONTE_LIGACOES`: 'supabase' chama
+ * `buscarLigacaoAbertaPorTelefoneSupabase` (multi-candidato ±9º dígito,
+ * 19-05 — devolve o id LOCAL da Ligação); 'clickup' (default) chama a
+ * função atual de clickup.ts (varre a página 0 de Ligações abertas —
+ * devolve o `taskId` do ClickUp). `null` = nenhuma Ligação aberta casou
+ * (resultado legítimo, distinto de erro de infra — ambas as funções
+ * LANÇAM em falha de rede/config, WR-03). NUNCA loga telefone (LGPD).
+ *
+ * CALL SITES: nenhum em index.ts ainda — os 3 pontos que hoje chamam
+ * `buscarLigacaoAbertaPorTelefone` diretamente (correlação de falha
+ * terminal / RECORD) vivem em `processador.ts`
+ * (`processarFalhaTerminalJob`/`processarRecordJob`, linhas ~356/496/678),
+ * cujo wiring atrás da flag é o plano **19-08** (owner de processador.ts —
+ * FORA DE ESCOPO tocar aqui, conforme o próprio 19-07-PLAN.md). Esta função
+ * fica exportada e pronta pro 19-08 trocar as 3 chamadas diretas por ela.
+ */
+export async function resolverLigacaoAbertaPorTelefone(telefone: string): Promise<string | null> {
+  return FONTE_LIGACOES === 'supabase'
+    ? buscarLigacaoAbertaPorTelefoneSupabase(telefone)
+    : buscarLigacaoAbertaPorTelefone(telefone);
+}
 
 // Mapa usuario-do-discador -> assignee (memberId) do ClickUp (Fase 02 Plano 02).
 import { assigneeDoOperador, papelDoOperador } from './operadores';
@@ -696,6 +891,35 @@ import {
   // Sinal de novidade (2026-08-19): ts da última mensagem persistida — o app
   // sonda a cada ~4s e recarrega lista/conversa na hora quando muda.
   ultimoTsMensagens,
+  // Fase B (Phase 19, 19-05/19-07): leitura direta de `ligacoes` sob
+  // FONTE_LIGACOES='supabase' — lerLigacaoSupabase valida existência/
+  // ownership/"já concluída" com as MESMAS 3 mensagens que os catches abaixo
+  // já mapeiam (404/409), e devolve o telefone (pra guardarTaskAtiva em
+  // /ligando); buscarLigacaoAbertaPorTelefoneSupabase é a correlação
+  // multi-candidato ±9º do webhook (Task 3 — export pronto pro wiring do
+  // 19-08 em processador.ts).
+  lerLigacaoSupabase,
+  buscarLigacaoAbertaPorTelefoneSupabase,
+  // Fase B (Phase 19, 19-09): LEITURA de `ligacoes` do Supabase atrás de
+  // FONTE_LIGACOES — fila do operador (id local como taskId, LEITURA-01),
+  // timeline por lead (LEITURA-03) e resolução do lead a partir da ligação
+  // (para a timeline de /timeline). Contrato de resposta idêntico ao ClickUp.
+  buscarFilaSupabase,
+  buscarLigacoesDoLeadSupabase,
+  resolverLeadDaLigacaoSupabase,
+  // Quick 260823-kwu: resolução do nome real do lead (via discador_leads_
+  // espelho por clickup_task_id) na fila de áudios sob FONTE_LIGACOES=
+  // supabase — paridade com o ramo ClickUp (lerTask), sem o qual a fila
+  // Supabase mostraria o telefone cru como nome.
+  lerNomeLeadEspelho,
+  // Quick 260823: dossiê 360° do lead a partir do Supabase (coluna `dossie`
+  // do espelho) sob FONTE_LIGACOES=supabase — espelho de clickup.ts::
+  // lerContextoLead, resolve o lead pela Ligação local (id numérico).
+  lerContextoLeadSupabase,
+  // Quick 260823: ficha+dossiê do lead a partir do espelho Supabase, servindo
+  // /api/discador/lead/:id?leve=1 (tela de conversa/áudio) sob FONTE_LEADS=
+  // supabase — sem isto a tela lê a description da task ClickUp (dossiê antigo).
+  lerLeadDetalheSupabase,
   // Quick 260822-tdj: escrita dupla best-effort dos campos estruturados do
   // retorno de ligação (rotas /anotacao e /super-fa) — inserirAnotacaoLigacao
   // grava em anotacoes_ligacao, marcarSuperFaEspelho seta
@@ -703,6 +927,24 @@ import {
   // rotas abaixo faz try/catch e loga-e-segue (nunca quebra o fluxo ClickUp).
   inserirAnotacaoLigacao,
   marcarSuperFaEspelho,
+  // Fase C (Phase 20, 20-04/20-05): LEITURAS de áudios/conversa atrás de
+  // FONTE_AUDIOS — mesmo contrato JSON das funções ClickUp que substituem
+  // (buscarLeadsNuncaLigados/mapaConversaPorLead/listarEnviosAudioDoLead),
+  // sem cruzar as 3 listas do ClickUp (LEITURA-04).
+  buscarLeadsNuncaLigadosSupabase,
+  mapaConversaPorLeadSupabase,
+  listarEnviosAudioDoLeadSupabase,
+  // Fase C (Phase 20, 20-04/20-07): comentários (`notas`, aggregate='lead')
+  // do detalhe do lead atrás de FONTE_NOTAS + leitura genérica de tabela
+  // (listarTabela) reusada pra resolver o lead_id numérico best-effort na
+  // escrita (registrar_anotacao não tem trigger de auto-resolução).
+  listarNotasDoLeadSupabase,
+  type NotaLeadSupabase,
+  listarTabela,
+  // Quick 260823-h1s: criação de lead nativo (Fase C, Caminho B) — thin
+  // wrapper sobre comOutboxRpc(SUPABASE_RPC_CRIAR_LEAD); INSERT no espelho +
+  // outbox 'lead'/'criar_task' na mesma tx (sql/escala/27_rpc_criar_lead.sql).
+  criarLeadSupabase,
   // Fase 2 (roadmap): biblioteca de conteúdos recorrentes (mensagens/links prontos).
   listarConteudos,
   buscarConteudo,
@@ -721,6 +963,12 @@ import {
   CHAVE_CADASTROS,
   CHAVE_VOTOS,
   CHAVE_LIGACOES,
+  // Fase B (Phase 19, 19-09): agregados SQL do Supabase (LEITURA-02) — MESMO
+  // shape de campanhaComCache/ligacoesComCache, porém de UM agregado sobre
+  // `ligacoes` (sem paginar a Lista 02). Servem /campanha e /painel-numeros
+  // sob FONTE_LIGACOES='supabase'.
+  resumoCampanhaSupabase,
+  resumoLigacoesSupabase,
 } from './painel-dados.ts';
 // Estado do webhook (Fase 5 — escala): correlacao call->telefone (guardada/
 // lida no request) mora na camada Redis-ou-memoria (estado-webhook.ts) —
@@ -844,6 +1092,34 @@ console.log(
 // usado por operadores.ts/dispositivos.ts. Fire-and-forget nao-fatal — nunca
 // derruba o boot do processo; usuarios.ts ja loga sucesso/falha internamente.
 void semearUsuariosSeVazio().then(() => recarregarUsuarios()).catch(() => {});
+
+// Boot (Fase A espelho, 17-03/MODELO-06): valida as constantes CAMPOS_*/
+// OPCOES_* (clickup.ts) contra `get_custom_fields` do ClickUp — uma única
+// autoridade (R8). ClickUp inalcançável já degrada (warn+skip) DENTRO de
+// carregarEValidarCampoMapa — só chega aqui uma DivergenciaCampoMapa
+// GENUÍNA (campo/opção reamente divergente), que FALHA ALTO o processo
+// (MODELO-06: nunca segue silencioso, o caminho reverso futuro derrubaria
+// valor). Qualquer outro erro inesperado é só-log, não derruba o boot.
+void carregarEValidarCampoMapa().catch((e) => {
+  if (e instanceof DivergenciaCampoMapa) {
+    console.error('[boot] DIVERGÊNCIA no mapa de field-ids ClickUp — falha alto (MODELO-06):', e.message);
+    process.exit(1);
+  }
+  console.error(
+    '[boot] erro inesperado ao carregar/validar o mapa de field-ids (nao-fatal):',
+    e instanceof Error ? e.message : String(e),
+  );
+});
+
+// Boot (Fase A espelho, 17-03/PORTAO-03): healthcheck SELECT+escrita das
+// tabelas novas do espelho (ligacoes/audios_envios/clickup_outbox/
+// clickup_campo_mapa/notas) — NUNCA derruba o boot (degradação graciosa);
+// só registra o resultado. Enquanto uma tabela não estiver visível+
+// escrevível, o fallback 404->ClickUp já existente no código segue intacto
+// (nenhuma rota muda nesta fase).
+void healthcheckEspelho().catch((e) => {
+  console.error('[boot-espelho] healthcheck falhou (nao-fatal):', e instanceof Error ? e.message : String(e));
+});
 
 /**
  * Gate de gestor (Fase 11 Plano 04, USER-03 — a peca de seguranca central da
@@ -1040,6 +1316,17 @@ export const mastra = new Mastra({
             return c.json({ fila: [], semMapeamento: true });
           }
           try {
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a fila vem de um
+            // SELECT filtrado em `ligacoes` (por `operador` = login, id LOCAL
+            // como taskId — LEITURA-01), NUNCA da listagem geral da Lista 02
+            // (que caiu no incidente que motivou a inversão). A resiliência
+            // (buscarFilaResiliente) era do ClickUp; o Supabase é a própria
+            // fonte, então não passa por ela. Caminho 'clickup' (fallback)
+            // intacto.
+            if (FONTE_LIGACOES === 'supabase') {
+              const fila = await buscarFilaSupabase(sess.usuario);
+              return c.json({ fila });
+            }
             // resiliente: fresca por 20s; ClickUp fora → última cópia boa.
             const fila = await buscarFilaResiliente(assignee);
             return c.json({ fila });
@@ -1068,6 +1355,20 @@ export const mastra = new Mastra({
           }
           const taskId = c.req.param('taskId');
           try {
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' o detalhe/script
+            // vem de um SELECT direto em `ligacoes` por id LOCAL (LEITURA-03),
+            // com os MESMOS 3 guards CR-01 de lerLigacao (não encontrada / não
+            // pertence ao operador / já concluída) — as mensagens de erro de
+            // lerLigacaoSupabase casam os catches abaixo (404/409), então o
+            // tratamento de erro não muda. Caminho 'clickup' (fallback) intacto.
+            if (FONTE_LIGACOES === 'supabase') {
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) {
+                return c.json({ erro: 'Ligação não encontrada' }, 404);
+              }
+              const ligacao = await lerLigacaoSupabase(ligacaoId, sess.usuario);
+              return c.json({ ligacao });
+            }
             const ligacao = await lerLigacao(taskId, assignee);
             return c.json({ ligacao });
           } catch (e) {
@@ -1097,6 +1398,10 @@ export const mastra = new Mastra({
         // "em processamento" (some da fila). Mesmo isolamento por operador
         // de /api/discador/ligacao/:taskId (CR-01/T-03-01-01) — sem ele, um
         // taskId arbitrario no body gravaria em Ligacao de outro operador.
+        // Fase B (19-07): sob FONTE_LIGACOES='supabase' grava via
+        // comOutboxRpc(SUPABASE_RPC_INICIAR_LIGACAO) — taskId vira o id
+        // LOCAL de `ligacoes` (p_ligacao_id); caminho 'clickup' (fallback)
+        // é o código atual, intacto.
         path: '/api/discador/ligando',
         method: 'POST',
         handler: async (c) => {
@@ -1116,6 +1421,31 @@ export const mastra = new Mastra({
           // por assigneeDoOperador acima). Ausente -> telefone-so (DD-07-13).
           const deviceId = String(body.deviceId || '') || undefined;
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              // taskId = id LOCAL de `ligacoes` (contrato 19-05/19-09).
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) {
+                return c.json({ erro: 'Ligação não encontrada' }, 404);
+              }
+              // Valida existência/ownership/"já concluída" ANTES da RPC —
+              // lerLigacaoSupabase lança com as MESMAS 3 mensagens que o
+              // catch abaixo já mapeia (404/409, mesmo guard de
+              // iniciarLigacao/tarefaConcluida no caminho ClickUp) e devolve
+              // o telefone (guardarTaskAtiva não vem da RPC — o retorno dela
+              // é só {ligacao_id, outbox_inseridos}).
+              const detalhe = await lerLigacaoSupabase(ligacaoId, sess.usuario);
+              await comOutboxRpc(SUPABASE_RPC_INICIAR_LIGACAO, {
+                p_ligacao_id: ligacaoId,
+                p_operador: sess.usuario,
+                p_assignee_clickup_id: Number(assignee) || undefined,
+              });
+              if (detalhe.telefone) await guardarTaskAtiva(detalhe.telefone, taskId, deviceId);
+              marcarEmChamada(sess.usuario);
+              // Read-your-writes no commit local + kick do dreno (checado,
+              // fallback inline sem Redis) — T-19-07-Ti/Av.
+              await posCommitLigacao(assignee, ligacaoId);
+              return c.json({ status: 'ok' });
+            }
             const { telefone } = await iniciarLigacao(taskId, assignee, sess.usuario);
             if (telefone) await guardarTaskAtiva(telefone, taskId, deviceId);
             // Operação ao vivo (Fase 2): operador entrou EM CHAMADA — some no
@@ -1137,7 +1467,7 @@ export const mastra = new Mastra({
             console.error('[discador] erro ao registrar ligando:', e);
             // Mesmo criterio de /ligacao/:taskId: task inexistente/fora da
             // Lista 02/de outro operador -> 404 identico (nao revela nada);
-            // erro de infra do ClickUp -> 502.
+            // erro de infra do ClickUp/RPC -> 502.
             const msg = e instanceof Error ? e.message : String(e);
             // Concluida: nao recarimba INICIO nem conta como tentativa.
             if (msg.includes('ja foi concluida')) {
@@ -1146,7 +1476,8 @@ export const mastra = new Mastra({
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
-              msg.includes('nao pertence ao operador');
+              msg.includes('nao pertence ao operador') ||
+              ehErroRpcNaoAutorizado(e);
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao iniciar ligação' }, 502);
@@ -1254,6 +1585,59 @@ export const mastra = new Mastra({
             }
           };
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) return c.json({ erro: 'Ligação não encontrada' }, 404);
+              if (resultado === 'atendida') {
+                // Fase B (débito documentado no SUMMARY 19-07): não fecha
+                // (mesmo comportamento do caminho ClickUp — 'atendida' NÃO é
+                // terminal aqui, quem tira da fila é o desfecho seguinte).
+                // O caminho ClickUp move a task pra OPER_STATUS_EM_PROCESSAMENTO
+                // (status nativo, não mapeado no enum de `ligacoes` ainda) —
+                // sem RPC de status parcial nesta fase, a Ligação permanece
+                // 'aberta' no Supabase até o desfecho terminal.
+              } else if (resultado === 'nao_atendida' && !motivo?.categoria) {
+                // Sem motivo (cliente legado): só recarimba a última
+                // tentativa — reusa iniciar_ligacao (MESMO efeito de
+                // setCustomField(INICIO) no caminho ClickUp), NÃO fecha, a
+                // Ligação PERMANECE na fila (buscarFilaSupabase reordena por
+                // `inicio`).
+                await comOutboxRpc(SUPABASE_RPC_INICIAR_LIGACAO, {
+                  p_ligacao_id: ligacaoId,
+                  p_operador: sess.usuario,
+                  p_assignee_clickup_id: Number(assignee) || undefined,
+                });
+              } else {
+                // 'recusou' OU 'nao_atendida' com motivo — TERMINAL: fecha +
+                // fecha duplicatas do lead + outbox, tudo na MESMA tx da RPC
+                // (a RPC já reconcilia duplicatas — não chamar
+                // fecharLigacoesDuplicadas aqui, T-19-07-Ti).
+                const motivoFalha = resultado === 'recusou' ? 'Recusada pelo lead' : String(motivo?.categoria || '');
+                await comOutboxRpc(SUPABASE_RPC_REGISTRAR_DESFECHO, {
+                  p_ligacao_id: ligacaoId,
+                  p_resultado: resultado,
+                  p_atendeu: false,
+                  p_motivo_falha: motivoFalha,
+                  p_fim: new Date().toISOString(),
+                  p_duracao_seg: motivo?.duracao ?? null,
+                });
+                // Débito documentado (SUMMARY 19-07): o comentário multi-linha
+                // (categoria/observação/duração/quem ligou/linha) do caminho
+                // ClickUp NÃO é enfileirado aqui — registrar_desfecho (Phase
+                // 18) só grava a coluna motivo_falha, não insere outbox
+                // 'comentar' (diferente de pular_ligacao, 19-02). A
+                // informação persiste na coluna (telemetria); o comentário
+                // legível no ClickUp fica pra um plano futuro se necessário.
+              }
+              registrarChamadaDevice(deviceIdDoUsuario(sess.usuario) || '', resultado === 'atendida' ? 'atendida' : 'nao');
+              limparEmChamada(sess.usuario);
+              // Read-your-writes no commit local + kick do dreno (checado,
+              // fallback inline) — no-op seguro quando 'atendida' não gravou
+              // nada no outbox (processarDrenoOutboxJob relê 0 linhas).
+              await posCommitLigacao(assignee, ligacaoId);
+              await gravarAnotacaoDesfecho();
+              return c.json({ status: 'ok' });
+            }
             await registrarDesfecho(taskId, assignee, resultado, motivo);
             // Métrica "chamadas por número" (Fase 1): conta 1 chamada por DESFECHO,
             // atribuída ao NÚMERO do operador (deviceIdDoUsuario). "hoje" no painel
@@ -1279,7 +1663,8 @@ export const mastra = new Mastra({
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
-              msg.includes('nao pertence ao operador');
+              msg.includes('nao pertence ao operador') ||
+              ehErroRpcNaoAutorizado(e);
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao registrar desfecho' }, 502);
@@ -1449,6 +1834,25 @@ export const mastra = new Mastra({
           if (!taskId) return c.json({ erro: 'taskId obrigatório' }, 400);
           if (!motivo) return c.json({ erro: 'motivo obrigatório' }, 400);
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) return c.json({ erro: 'Ligação não encontrada' }, 404);
+              // A RPC faz TUDO na mesma tx: fecha a principal (resultado
+              // 'pulado') + fecha duplicatas do lead + outbox ('fechar'
+              // bloqueante + 'comentar' não-bloqueante com o motivo,
+              // sql/escala/15_rpc_pular_ligacao.sql) — não chamar
+              // fecharLigacoesDuplicadas aqui (T-19-07-Ti).
+              await comOutboxRpc(SUPABASE_RPC_PULAR_LIGACAO, {
+                p_ligacao_id: ligacaoId,
+                p_operador: sess.usuario,
+                p_motivo: motivo,
+              });
+              // posCommitLigacao já faz a MESMA eviction (removerDaFilaCache/
+              // invalidarFilaCache/derrubarFilaMem) + o kick do dreno
+              // checado (fallback inline).
+              await posCommitLigacao(assignee, ligacaoId);
+              return c.json({ status: 'ok' });
+            }
             const taskPulada = await validarLigacaoDoOperador(taskId, assignee);
             await gravarMetadadosLigacao(taskId, { atendeu: false, motivoFalha: 'Pulado' });
             // LGPD: só a frase do operador + login — nunca telefone/CPF.
@@ -1476,7 +1880,8 @@ export const mastra = new Mastra({
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
-              msg.includes('nao pertence ao operador');
+              msg.includes('nao pertence ao operador') ||
+              ehErroRpcNaoAutorizado(e);
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao pular o contato' }, 502);
@@ -1618,6 +2023,14 @@ export const mastra = new Mastra({
           if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
           const taskId = c.req.param('taskId');
           try {
+            // Fase B/C: sob FONTE_LIGACOES='supabase' o `taskId` é o id LOCAL
+            // numérico da Ligação e o dossiê vem da coluna `dossie` do espelho
+            // (não da descrição da task ClickUp, que pode nem existir para leads
+            // criados direto no banco). Mesmo shape {temLead,contexto}.
+            if (FONTE_LIGACOES === 'supabase') {
+              const contexto = await lerContextoLeadSupabase(Number(taskId), sess.usuario);
+              return c.json(contexto);
+            }
             const contexto = await lerContextoLead(taskId, assignee);
             return c.json(contexto);
           } catch (e) {
@@ -1723,7 +2136,15 @@ export const mastra = new Mastra({
             // Dois caches distintos: a Lista 02 (produção/ranking/motivos) e os votos do
             // ClickUp (intenção/cidade). Em paralelo, e cada um degrada sozinho — voto
             // fora do ar não derruba os cards de ligação, que são a maior parte da tela.
-            const [rCamp, rVotos] = await Promise.allSettled([campanhaComCache(), votosComCache()]);
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a fonte de campanha
+            // (produção/ranking/motivos) vira o agregado SQL resumoCampanhaSupabase
+            // (MESMO shape, sem paginar a Lista 02 — LEITURA-02); os votos de
+            // intenção/cidade seguem por votosComCache (inalterado). Caminho
+            // 'clickup' (campanhaComCache) intacto. O degradar-sozinho é preservado.
+            const [rCamp, rVotos] = await Promise.allSettled([
+              FONTE_LIGACOES === 'supabase' ? resumoCampanhaSupabase() : campanhaComCache(),
+              votosComCache(),
+            ]);
             if (rVotos.status === 'rejected') {
               console.error('[painel] votos indisponiveis na campanha:', rVotos.reason instanceof Error ? rVotos.reason.message : String(rVotos.reason));
             }
@@ -1765,10 +2186,15 @@ export const mastra = new Mastra({
           if (!sess) return c.json({ status: 'unauthorized' }, 401);
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
 
+          // Fase B (19-09): sob FONTE_LIGACOES='supabase' o bloco `ligacoes`
+          // vira o agregado SQL resumoLigacoesSupabase (MESMO shape, sem
+          // paginar a Lista 02 — LEITURA-02). Cadastros (Postgres) e votos
+          // (ClickUp/espelho) seguem inalterados. Caminho 'clickup'
+          // (ligacoesComCache) intacto; cada bloco degrada sozinho.
           const [rCad, rVotos, rLig] = await Promise.allSettled([
             cadastrosComCache(),
             votosComCache(),
-            ligacoesComCache(),
+            FONTE_LIGACOES === 'supabase' ? resumoLigacoesSupabase() : ligacoesComCache(),
           ]);
           if (rCad.status === 'rejected') console.error('[painel] cadastros indisponivel:', rCad.reason instanceof Error ? rCad.reason.message : String(rCad.reason));
           if (rVotos.status === 'rejected') console.error('[painel] votos indisponivel:', rVotos.reason instanceof Error ? rVotos.reason.message : String(rVotos.reason));
@@ -1829,18 +2255,58 @@ export const mastra = new Mastra({
           if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
           const leadTaskId = c.req.param('leadTaskId');
           try {
-            // ?leve=1 (2026-08-20): ficha SEM timeline — o card da conversa e o
-            // modo fast só usam o dossiê; pular a timeline corta ~10s no frio.
-            const detalhe =
-              c.req.query('leve') === '1'
-                ? await lerLeadDossieResiliente(leadTaskId)
-                : await lerLeadDetalheResiliente(leadTaskId);
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a rota deixa de
+            // depender da listagem frágil da Lista 02 LIGACOES (buscarLigacoesDoLead,
+            // que caiu no incidente que motivou a inversão). A Lista 01 LEADS
+            // segue ClickUp-autoritativa nesta fase (a escrita de leads é Phase
+            // 20), então ficha + dossiê vêm do reader resiliente na variante
+            // LEVE (GET /task único da Lista 01 + descrição/dossiê — NUNCA a
+            // listagem da Lista 02). A TIMELINE de `ligacoes` é a parte que
+            // inverte pro Supabase (LEITURA-03).
+            // NOTA (débito p/ 19-10/Phase 20): sem `ligacoes.lead_id` numérico
+            // materializado (idem /timeline), a timeline do detalhe degrada
+            // para vazia sob supabase — a ficha/dossiê seguem completos e o
+            // contrato { lead, dossie, timeline } é preservado. Caminho
+            // 'clickup' (lerLeadDetalheResiliente/lerLeadDossieResiliente) intacto.
+            // Fase C (20-07): sob FONTE_NOTAS='supabase' os comentários do
+            // lead (`notas`, aggregate='lead') são servidos ADITIVAMENTE
+            // aqui — o caminho ClickUp NUNCA teve uma leitura de comentários
+            // (lerLeadDetalhe só lê a description como dossiê; comentarTask é
+            // write-only), então o campo `notas` só existe sob supabase
+            // (contrato preservado: nunca remove/troca um campo existente).
+            // Em paralelo com o detalhe (Promise.allSettled, mesmo padrão de
+            // /campanha e /painel-numeros) — a leitura de notas degrada
+            // sozinha (T-20-07-Deg): erro vira comentários vazios, NUNCA
+            // derruba o detalhe. LGPD: corpo da nota nunca logado.
+            const [rDetalhe, rNotas] = await Promise.allSettled([
+              // Fase C (Quick 260823): sob FONTE_LEADS='supabase' a ficha+dossiê
+              // vêm do espelho Supabase (coluna `dossie`, formato IDENTIFICAÇÃO/
+              // HISTÓRICO/GANCHO), NÃO da description da task ClickUp — leads
+              // criados direto no banco nem têm task, e o dossiê autoritativo
+              // agora é o do Supabase. Fora do supabase: caminho resiliente
+              // ClickUp intacto (leve pula a timeline).
+              FONTE_LEADS === 'supabase'
+                ? lerLeadDetalheSupabase(leadTaskId)
+                : FONTE_LIGACOES === 'supabase' || c.req.query('leve') === '1'
+                  ? lerLeadDossieResiliente(leadTaskId)
+                  : lerLeadDetalheResiliente(leadTaskId),
+              FONTE_NOTAS === 'supabase' ? listarNotasDoLeadSupabase(leadTaskId) : Promise.resolve(null),
+            ]);
+            if (rDetalhe.status === 'rejected') throw rDetalhe.reason;
+            const detalhe = rDetalhe.value;
+            if (rNotas.status === 'rejected') {
+              console.warn(
+                '[discador] leitura das notas do lead falhou — comentários vazios (detalhe segue servido):',
+                rNotas.reason instanceof Error ? rNotas.reason.message : String(rNotas.reason),
+              );
+            }
+            const notas: NotaLeadSupabase[] | null = rNotas.status === 'fulfilled' ? rNotas.value : [];
             // conhecimento pra ordenação da fila + geração sob demanda:
             // abriu ficha sem dossiê → gera em background (single-flight).
             const temDossie = (detalhe.dossie ?? '').trim() !== '';
             temDossiePorLead.set(leadTaskId, temDossie);
             if (!temDossie) gerarDossieSobDemanda(leadTaskId);
-            return c.json(detalhe);
+            return c.json(FONTE_NOTAS === 'supabase' ? { ...detalhe, notas: notas ?? [] } : detalhe);
           } catch (e) {
             console.error('[discador] erro ao ler detalhe do lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
@@ -1871,6 +2337,26 @@ export const mastra = new Mastra({
             return c.json({ status: 'ok', semAlteracao: true });
           }
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              // REGRA DETERMINÍSTICA TRAVADA (R12, nunca condicional a "se
+              // houver ligação"): esta rota é sobre o LEAD, sem ligação em
+              // curso — SEMPRE p_ligacao_id=null + p_lead_clickup_task_id. A
+              // RPC resolve o lead em discador_leads_espelho, grava a SoT
+              // (leads.confirmou_*) + o ledger (votos_ligacao com
+              // ligacao_task_id='lead:'||lead_id, referência determinística)
+              // + o outbox set_campo, tudo na MESMA tx. /voto (acima) e esta
+              // rota consomem a MESMA RPC — sem ramo condicional.
+              await comOutboxRpc(SUPABASE_RPC_REGISTRAR_VOTO, {
+                p_operador: sess.usuario,
+                p_ligacao_id: null,
+                p_lead_clickup_task_id: leadTaskId,
+                p_romero: romero ?? null,
+                p_andressa: andressa ?? null,
+              });
+              // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
+              derrubarLeadDetalheMem(leadTaskId);
+              return c.json({ status: 'ok' });
+            }
             // Guard anti-IDOR de escrita: a task tem que ser da Lista 01 ANTES
             // de gravar qualquer voto (definirVotoLeadCampo escreve por taskId cru).
             await validarLeadDaLista01(leadTaskId);
@@ -1905,7 +2391,8 @@ export const mastra = new Mastra({
           } catch (e) {
             console.error('[discador] erro ao gravar voto do lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
-            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            const naoEncontrado =
+              msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01') || ehErroRpcNaoAutorizado(e);
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao gravar o voto' }, 502);
@@ -1927,20 +2414,126 @@ export const mastra = new Mastra({
           const texto = String(body.texto || '').trim();
           if (!texto) return c.json({ erro: 'texto obrigatório' }, 400);
           try {
-            // Guard anti-IDOR de escrita ANTES de comentar (comentarTask escreve
-            // por taskId cru, sem validar a lista).
+            // Guard anti-IDOR de escrita ANTES de comentar (comOutboxRpc/
+            // comentarTask escrevem por taskId cru, sem validar a lista).
             await validarLeadDaLista01(leadTaskId);
-            await comentarTask(leadTaskId, texto);
+            if (FONTE_NOTAS === 'supabase') {
+              // Fase C (20-07): registrar_anotacao grava `notas`
+              // (aggregate='lead') + enfileira 'comentar' (não-bloqueante) no
+              // outbox NA MESMA tx — nunca mais um comentarTask síncrono
+              // direto. p_lead_id é resolvido BEST-EFFORT via o espelho
+              // (id numérico materializado no 20-01/22_fundacao_fase_c.sql):
+              // `notas` NÃO tem trigger de auto-resolução (diferente de
+              // ligacoes/audios_envios, que têm lead_clickup_task_id) — sem
+              // resolver aqui, a leitura (listarNotasDoLeadSupabase, filtro
+              // aggregate_id=eq.<leadId>) NUNCA encontraria a nota. Falha na
+              // resolução (rede/config) não aborta a escrita — grava com
+              // aggregate_id=null (débito: nota fica órfã de leitura, caso raro).
+              let leadId: number | null = null;
+              try {
+                const rows = await listarTabela(SUPABASE_TABLE_LEADS_ESPELHO, {
+                  select: 'id',
+                  filtros: { clickup_task_id: `eq.${leadTaskId}` },
+                  limit: 1,
+                });
+                const idRaw = (rows[0] as { id?: number } | undefined)?.id;
+                leadId = idRaw !== undefined && idRaw !== null ? Number(idRaw) : null;
+              } catch (e) {
+                console.warn(
+                  '[discador] resolução do lead_id p/ registrar_anotacao falhou — grava com aggregate_id=null:',
+                  e instanceof Error ? e.message : String(e),
+                );
+              }
+              const r = await comOutboxRpc<{ nota_id: number; outbox_inseridos: number }>(
+                SUPABASE_RPC_REGISTRAR_ANOTACAO,
+                {
+                  p_aggregate: 'lead',
+                  p_lead_id: leadId,
+                  p_clickup_task_id: leadTaskId,
+                  p_autor: sess.usuario,
+                  p_corpo: texto,
+                },
+              );
+              await posCommitAnotacao(r.nota_id);
+            } else {
+              await comentarTask(leadTaskId, texto);
+            }
             // Read-your-writes (T-v2a-02): a próxima leitura do detalhe vem fresca.
             derrubarLeadDetalheMem(leadTaskId);
             return c.json({ status: 'ok' });
           } catch (e) {
             console.error('[discador] erro ao anotar no lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
-            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            const naoEncontrado =
+              msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01') || ehErroRpcNaoAutorizado(e);
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao salvar a anotação' }, 502);
+          }
+        },
+      },
+      {
+        // Rota — criação de LEAD NATIVO (quick 260823-h1s, Fase C): sob
+        // FONTE_LEADS='supabase', cria o lead direto no Supabase (criar_lead
+        // RPC, Caminho B) + enfileira a criação da task na Lista 01 no
+        // outbox (débito pré-flip do dreno documentado em
+        // sql/escala/27_rpc_criar_lead.sql). Sob FONTE_LEADS='clickup'
+        // (default), não há caminho equivalente no ClickUp — 501.
+        path: '/api/discador/lead',
+        method: 'POST',
+        handler: async (c) => {
+          const sess = verificarToken(tokenDoHeader(c.req.header('Authorization')));
+          if (!sess) return c.json({ status: 'unauthorized' }, 401);
+          if (papelDoOperador(sess.usuario) !== 'gestor') return c.json({ erro: 'Acesso restrito a gestor' }, 403);
+          const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+          const nome = String(body.nome || '').trim();
+          const telefone = String(body.telefone || '').trim();
+          if (!nome || !telefone) return c.json({ erro: 'nome e telefone obrigatórios' }, 400);
+
+          if (FONTE_LEADS === 'supabase') {
+            const canonico = canonizarTelefone(telefone);
+            if (!canonico) return c.json({ erro: 'telefone inválido' }, 422);
+            try {
+              // Campos opcionais lidos defensivamente — NUNCA confia no shape do body.
+              const cpf = body.cpf !== undefined && body.cpf !== null ? String(body.cpf) : undefined;
+              const bairro = body.bairro !== undefined && body.bairro !== null ? String(body.bairro) : undefined;
+              const cidade = body.cidade !== undefined && body.cidade !== null ? String(body.cidade) : undefined;
+              const dossie = body.dossie !== undefined && body.dossie !== null ? String(body.dossie) : undefined;
+              const origem = body.origem !== undefined && body.origem !== null ? String(body.origem) : undefined;
+              const idSupabase =
+                body.idSupabase !== undefined && body.idSupabase !== null ? String(body.idSupabase) : undefined;
+              const tags = Array.isArray(body.tags) ? body.tags.map((t) => String(t)) : undefined;
+              const militante = typeof body.militante === 'boolean' ? body.militante : undefined;
+              const superFa = typeof body.superFa === 'boolean' ? body.superFa : undefined;
+              const elegivel = typeof body.elegivel === 'boolean' ? body.elegivel : undefined;
+              const score = typeof body.score === 'number' ? body.score : undefined;
+
+              const r = await criarLeadSupabase({
+                nome,
+                telefone,
+                cpf,
+                bairro,
+                cidade,
+                dossie,
+                tags,
+                militante,
+                superFa,
+                elegivel,
+                score,
+                idSupabase,
+                origem,
+              });
+              await posCommitCriarLead(r.lead_id);
+              return c.json({ status: 'ok', lead_id: r.lead_id, id_supabase: r.id_supabase });
+            } catch (e) {
+              // Log genérico, NUNCA PII (LGPD) — nunca cita nome/telefone/cpf.
+              console.error('[discador] erro ao criar o lead:', e instanceof Error ? e.message : String(e));
+              return c.json({ erro: 'Erro ao criar o lead' }, 502);
+            }
+          } else {
+            // FONTE_LEADS === 'clickup' (default) — não há caminho equivalente
+            // de criação nativa de lead no ClickUp neste código.
+            return c.json({ erro: 'Criação nativa de lead disponível apenas sob FONTE_LEADS=supabase' }, 501);
           }
         },
       },
@@ -1965,16 +2558,55 @@ export const mastra = new Mastra({
           try {
             // validarLeadDaLista01 é o guard anti-IDOR E devolve a task já lida —
             // reaproveita pra ler o telefone sem um segundo GET ao ClickUp.
+            // Continua ClickUp-autoritativo nesta fase (o lead vive na Lista
+            // 01 — a inversão da Lista 01 é fora de escopo, Phase 20).
             const task = await validarLeadDaLista01(leadTaskId);
             const telefone = valorCampoLead(task, CAMPOS_LEADS.TELEFONE);
             if (!telefone) return c.json({ erro: 'Lead sem telefone' }, 422);
+            if (FONTE_LIGACOES === 'supabase') {
+              const canonico = canonizarTelefone(telefone);
+              if (!canonico) return c.json({ erro: 'Lead com telefone inválido' }, 422);
+              const variantes = variantesTelefone(telefone);
+              // DEDUP AUTORITATIVO por rowcount (MODELO-02/R3, 19-02): a RPC
+              // decide criada-vs-existia pelo UNIQUE parcial
+              // (telefone_canonico, status='aberta') — nunca por guarda em
+              // memória de processo.
+              const r = await comOutboxRpc<{ ligacao_id: number; criada: boolean; outbox_inseridos: number }>(
+                SUPABASE_RPC_CRIAR_LIGACAO_AVULSA,
+                {
+                  p_telefone_canonico: canonico,
+                  p_telefone_variantes: variantes,
+                  p_operador: sess.usuario,
+                  p_assignee_clickup_id: Number(assignee) || undefined,
+                  p_lead_id: null,
+                  p_lead_clickup_task_id: leadTaskId,
+                },
+              );
+              // Só kicka o dreno quando CRIOU (rowcount=1) — evita
+              // re-enfileirar 'criar_task' (duplicaria a task no ClickUp)
+              // quando a ligação já existia (T-19-07-Ti). Mesmo padrão
+              // checado enfileirado→inline de posCommitLigacao.
+              if (r.criada) {
+                const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: r.ligacao_id });
+                if (!enfileirado) {
+                  await processarDrenoOutboxJob(r.ligacao_id).catch((e) => {
+                    console.error(
+                      '[dreno] inline avulsa pós-commit falhou (best-effort — linha já persistida):',
+                      e instanceof Error ? e.message : String(e),
+                    );
+                  });
+                }
+              }
+              return c.json({ taskId: String(r.ligacao_id) });
+            }
             const { id } = await criarLigacaoAvulsa(telefone, assignee);
             return c.json({ taskId: id });
           } catch (e) {
             // LGPD: nunca logar telefone/CPF — só a mensagem genérica de erro.
             console.error('[discador] erro ao criar ligação para o lead:', e instanceof Error ? e.message : String(e));
             const msg = e instanceof Error ? e.message : String(e);
-            const naoEncontrado = msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01');
+            const naoEncontrado =
+              msg.includes('nao encontrada') || msg.includes('nao e um Lead da Lista 01') || ehErroRpcNaoAutorizado(e);
             return naoEncontrado
               ? c.json({ erro: 'Lead não encontrado' }, 404)
               : c.json({ erro: 'Erro ao iniciar a ligação' }, 502);
@@ -1995,6 +2627,27 @@ export const mastra = new Mastra({
           if (!assignee) return c.json({ erro: 'Ligação não encontrada' }, 404);
           const taskId = c.req.param('taskId');
           try {
+            // Fase B (19-09): sob FONTE_LIGACOES='supabase' a timeline vem de
+            // `ligacoes` (LEITURA-03) — resolve o lead da Ligação por id LOCAL
+            // (resolverLeadDaLigacaoSupabase) e lê o histórico com o guard por
+            // operador (buscarLigacoesDoLeadSupabase valida que alguma Ligação
+            // do lead pertence ao operador — IDOR-safe), montando o MESMO shape
+            // que lerTimelineDaLigacao. NUNCA toca GET /list/{02}/task.
+            // NOTA (débito p/ 19-10/Phase 20): `ligacoes.lead_id` (FK numérica)
+            // ainda não é materializado nesta fase (ver LigacaoEspelhoRow em
+            // supabase.ts) — enquanto for null, buscarLigacoesDoLeadSupabase
+            // (que filtra por lead_id) devolve timeline vazia; a rota degrada
+            // (contrato preservado), não quebra. Caminho 'clickup' intacto.
+            if (FONTE_LIGACOES === 'supabase') {
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) return c.json({ erro: 'Ligação não encontrada' }, 404);
+              const ref = await resolverLeadDaLigacaoSupabase(ligacaoId);
+              const timeline =
+                ref && ref.leadId !== null
+                  ? await buscarLigacoesDoLeadSupabase(ref.leadId, sess.usuario)
+                  : [];
+              return c.json({ timeline });
+            }
             const timeline = await lerTimelineDaLigacao(taskId, assignee);
             return c.json({ timeline });
           } catch (e) {
@@ -2032,6 +2685,28 @@ export const mastra = new Mastra({
             return c.json({ status: 'ok', semAlteracao: true });
           }
           try {
+            if (FONTE_LIGACOES === 'supabase') {
+              // taskId = id LOCAL de `ligacoes` (contrato 19-05/19-09), a
+              // MESMA convenção de /ligando e /desfecho acima. Caminho
+              // LIGAÇÃO — p_ligacao_id não-nulo: registrar_voto resolve
+              // lead/operador pela linha (guard anti-IDOR embutido: RAISE se
+              // a ligação pertence a outro operador) e grava a SoT
+              // (leads.confirmou_*) + o ledger (votos_ligacao, ledger key =
+              // a própria ligação) + o outbox set_campo, tudo na MESMA tx.
+              const ligacaoId = Number(taskId);
+              if (!Number.isFinite(ligacaoId)) return c.json({ erro: 'Ligação não encontrada' }, 404);
+              await comOutboxRpc(SUPABASE_RPC_REGISTRAR_VOTO, {
+                p_ligacao_id: ligacaoId,
+                p_operador: sess.usuario,
+                p_romero: voto.romero ?? null,
+                p_andressa: voto.andressa ?? null,
+              });
+              // Read-your-writes no commit local (SC2 — o painel deriva do
+              // commit, não do drain) + kick do dreno checado (fallback
+              // inline sem Redis) — mesmo helper de /ligando/desfecho/pular.
+              await posCommitLigacao(assignee, ligacaoId);
+              return c.json({ status: 'ok' });
+            }
             // Checagem sincrona de autorizacao (CR-01/IDOR) ANTES de
             // enfileirar — Fase 08 Plano 04, follow-up de verificacao. Sem
             // isto, um taskId invalido/de outro operador responderia 200 na
@@ -2086,7 +2761,8 @@ export const mastra = new Mastra({
             const naoAutorizada =
               msg.includes('nao encontrada') ||
               msg.includes('nao e uma Ligacao da Lista 02') ||
-              msg.includes('nao pertence ao operador');
+              msg.includes('nao pertence ao operador') ||
+              ehErroRpcNaoAutorizado(e);
             return naoAutorizada
               ? c.json({ erro: 'Ligação não encontrada' }, 404)
               : c.json({ erro: 'Erro ao salvar o voto' }, 502);
@@ -2108,10 +2784,28 @@ export const mastra = new Mastra({
           const gate = await sessaoRomero(c);
           if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
           try {
-            const { leads, origens } = await buscarLeadsNuncaLigadosCacheado();
+            // Fase C (20-05): sob FONTE_AUDIOS='supabase' a lista vem do
+            // anti-join lead_id (LEITURA-04) em vez da varredura cruzada de 3
+            // listas do ClickUp. MESMO shape { leads, origens } — origens
+            // sempre [] sob supabase (débito de schema, 20-04). Caminho
+            // 'clickup' (default) intacto.
+            const { leads, origens } =
+              FONTE_AUDIOS === 'supabase' ? await buscarLeadsNuncaLigadosSupabase() : await buscarLeadsNuncaLigadosCacheado();
             // Selo por lead (Fase 13 fatia 2): agrega a Lista 03 (cache 60s);
-            // falha do mapa NÃO derruba a lista (selo sai neutro).
-            const mapa = await mapaConversaCacheado();
+            // falha do mapa NÃO derruba a lista (selo sai neutro). Sob
+            // supabase: mesma leitura de audios_envios (20-04), mesmo
+            // fail-open (selo neutro) — mapaConversaPorLeadSupabase LANÇA em
+            // erro de infra (WR-03), o handler decide degradar aqui.
+            const mapa =
+              FONTE_AUDIOS === 'supabase'
+                ? await mapaConversaPorLeadSupabase().catch((e) => {
+                    console.warn(
+                      '[discador] mapa de conversa (supabase) falhou (selo fica neutro):',
+                      e instanceof Error ? e.message : String(e),
+                    );
+                    return null;
+                  })
+                : await mapaConversaCacheado();
             // Última mensagem por lead (2026-08-19): ordena como WhatsApp (quem
             // falou por último no topo) + bolinha de "esperando resposta".
             // Falha aqui só tira a ordenação — nunca derruba a lista.
@@ -2154,9 +2848,27 @@ export const mastra = new Mastra({
           const assignee = assigneeDoOperador(gate.usuario);
           if (!assignee) return c.json({ leads: [], semMapeamento: true });
           try {
-            // resiliente: fresca por 20s; ClickUp fora → última cópia boa.
-            const fila = await buscarFilaResiliente(assignee);
-            const mapa = await mapaConversaCacheado();
+            // Quick 260823-kwu: a fila agora ramifica por FONTE_LIGACOES
+            // (paridade com GET /api/discador/fila, 19-09) — sob
+            // 'supabase' lê buscarFilaSupabase(gate.usuario) (operador =
+            // LOGIN, não assignee); senão mantém buscarFilaResiliente
+            // (assignee), resiliente/fresca por 20s, ClickUp fora → última
+            // cópia boa. O selo de conversa (Lista 03/audios_envios) segue
+            // ramificando à parte por FONTE_AUDIOS, logo abaixo.
+            const fila =
+              FONTE_LIGACOES === 'supabase'
+                ? await buscarFilaSupabase(gate.usuario)
+                : await buscarFilaResiliente(assignee);
+            const mapa =
+              FONTE_AUDIOS === 'supabase'
+                ? await mapaConversaPorLeadSupabase().catch((e) => {
+                    console.warn(
+                      '[discador] mapa de conversa (supabase) falhou (selo fica neutro, fila):',
+                      e instanceof Error ? e.message : String(e),
+                    );
+                    return null;
+                  })
+                : await mapaConversaCacheado();
             const ultimas = await ultimasMensagensWhatsapp().catch((e) => {
               console.warn('[discador] últimas mensagens indisponíveis (fila):', e instanceof Error ? e.message : String(e));
               return null;
@@ -2171,9 +2883,16 @@ export const mastra = new Mastra({
                 let nome = i.nome.replace(/^Ligação( avulsa)?\s*[—-]\s*/i, '');
                 if (leadTaskId && /^\+?\d[\d\s()-]*$/.test(nome)) {
                   try {
-                    const task = await lerTask(leadTaskId);
-                    const doLead = task ? valorCampoLead(task as Parameters<typeof valorCampoLead>[0], CAMPOS_LEADS.NOME) : '';
-                    if (doLead) nome = doLead;
+                    // Quick 260823-kwu: sob FONTE_LIGACOES=supabase resolve
+                    // pelo espelho (nunca ClickUp); ramo clickup inalterado.
+                    if (FONTE_LIGACOES === 'supabase') {
+                      const doLead = await lerNomeLeadEspelho(leadTaskId);
+                      if (doLead) nome = doLead;
+                    } else {
+                      const task = await lerTask(leadTaskId);
+                      const doLead = task ? valorCampoLead(task as Parameters<typeof valorCampoLead>[0], CAMPOS_LEADS.NOME) : '';
+                      if (doLead) nome = doLead;
+                    }
                   } catch {
                     /* mantém o telefone como nome — melhor que quebrar a lista */
                   }
@@ -2440,6 +3159,72 @@ export const mastra = new Mastra({
           // Fase 3: "Romero já falou" — write-through no espelho (best-effort,
           // fire-and-forget: o envio já aconteceu; a flag é conveniência de filtro).
           void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
+          // Fase C (20-05): sob FONTE_AUDIOS='supabase' o ENVIO PRIMÁRIO
+          // (Evolution API, acima) já aconteceu IDÊNTICO — só o REGISTRO na
+          // Lista 03 troca de registrarEnvioAudio (ClickUp direto) por
+          // comOutboxRpc(SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO, ...): grava
+          // audios_envios + enfileira criar_task no MESMO tx, depois kicka o
+          // dreno (posCommitEnvioAudio, padrão CHECADO do 19-07). Best-effort
+          // (WR-03) — falha aqui nunca desfaz/mascara o envio já feito.
+          if (FONTE_AUDIOS === 'supabase') {
+            const canonico = canonizarTelefone(telefoneE164);
+            let audioId: number | null = null;
+            try {
+              const r = await comOutboxRpc<{ audio_id: number; outbox_inseridos: number }>(
+                SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO,
+                {
+                  p_lead_clickup_task_id: leadId,
+                  p_lead_id: null,
+                  p_telefone_canonico: canonico,
+                  p_enviado_por: gate.usuario,
+                  // DÉBITO (fora do escopo — files_modified deste plano é só
+                  // index.ts): upload do binário pro Supabase Storage ainda
+                  // não existe; sem midia_ref a RPC não enfileira a linha
+                  // 'anexar' — o registro na Lista 03, quando drenado, sai
+                  // sem o áudio anexado (ver 20-05-SUMMARY.md).
+                  p_midia_ref: null,
+                  p_transcricao: null,
+                },
+              );
+              audioId = r.audio_id;
+            } catch (e) {
+              console.warn(
+                '[discador] registrar_envio_audio (supabase) falhou — envio já feito, registro não persistido:',
+                e instanceof Error ? e.message : String(e),
+              );
+            }
+            if (audioId !== null) {
+              await posCommitEnvioAudio(audioId);
+              const idRegistro = `registro-${audioId}`;
+              // Conversa persistida — mesma lógica do caminho ClickUp abaixo.
+              void salvarMensagemWhatsapp({
+                id: idRegistro,
+                lead_task_id: leadId,
+                telefone_canonico: telefoneCanonico(telefoneE164),
+                de_nos: true,
+                ts: new Date().toISOString(),
+                tipo: 'audio',
+                midia_base64: audioBase64,
+                midia_mime: mimetype ?? 'audio/webm',
+              }).catch((e) =>
+                console.warn('[discador] persistência do envio falhou:', e instanceof Error ? e.message : String(e)),
+              );
+              void (async () => {
+                try {
+                  const texto = await transcreverBuffer(Buffer.from(audioBase64, 'base64'), mimetype);
+                  // DÉBITO: sem RPC de UPDATE pra transcricao_audio em
+                  // audios_envios ainda — persiste só no read-model da
+                  // conversa (mensagens_whatsapp, já Supabase); NÃO chama
+                  // setCustomField (idRegistro aqui é o id LOCAL de
+                  // audios_envios, não um clickup_task_id).
+                  if (texto) await atualizarMensagemWhatsapp(idRegistro, { transcricao: texto });
+                } catch (e) {
+                  console.warn('[discador] transcrição do áudio enviado falhou:', e instanceof Error ? e.message : String(e));
+                }
+              })();
+            }
+            return c.json({ status: 'ok' });
+          }
           // Registro best-effort na Lista Audios (WR-03) — o envio (efeito
           // primário) já aconteceu; uma falha aqui nunca desfaz/mascara o envio.
           // enviadoPor vem do TOKEN (gate.usuario), nunca do body do cliente.
@@ -2545,6 +3330,47 @@ export const mastra = new Mastra({
           }
           // Fase 3: "Romero já falou" — write-through no espelho (best-effort).
           void marcarRomeroJaFalouEspelho(leadId).catch(() => {});
+          // Fase C (20-05): mesmo racional de /enviar acima — o ENVIO
+          // PRIMÁRIO (Evolution, acima) já aconteceu IDÊNTICO; só o REGISTRO
+          // troca de registrarMensagemTexto (ClickUp direto) por
+          // comOutboxRpc(SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO, ...).
+          if (FONTE_AUDIOS === 'supabase') {
+            const canonico = canonizarTelefone(telefoneE164);
+            let audioId: number | null = null;
+            try {
+              const r = await comOutboxRpc<{ audio_id: number; outbox_inseridos: number }>(
+                SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO,
+                {
+                  p_lead_clickup_task_id: leadId,
+                  p_lead_id: null,
+                  p_telefone_canonico: canonico,
+                  p_enviado_por: gate.usuario,
+                  p_texto: texto,
+                },
+              );
+              audioId = r.audio_id;
+            } catch (e) {
+              console.warn(
+                '[discador] registrar_mensagem_texto (supabase) falhou — envio já feito, registro não persistido:',
+                e instanceof Error ? e.message : String(e),
+              );
+            }
+            if (audioId !== null) {
+              await posCommitEnvioAudio(audioId);
+              void salvarMensagemWhatsapp({
+                id: `registro-${audioId}`,
+                lead_task_id: leadId,
+                telefone_canonico: telefoneCanonico(telefoneE164),
+                de_nos: true,
+                ts: new Date().toISOString(),
+                tipo: 'texto',
+                texto,
+              }).catch((e) =>
+                console.warn('[discador] persistência do texto falhou:', e instanceof Error ? e.message : String(e)),
+              );
+            }
+            return c.json({ status: 'ok' });
+          }
           const registroTxt = await registrarMensagemTexto({ telefone: telefoneE164, enviadoPor: gate.usuario, texto, leadTaskId: leadId });
           // Conversa persistida (sql/escala/03) — mesma lógica do envio de áudio.
           void salvarMensagemWhatsapp({
@@ -2635,7 +3461,11 @@ export const mastra = new Mastra({
           if (gate.status !== 200) return c.json({ status: gate.status === 401 ? 'unauthorized' : 'forbidden' }, gate.status);
           const leadId = c.req.param('leadId');
           try {
-            const envios = await listarEnviosAudioDoLead(leadId);
+            // Fase C (20-05): sob FONTE_AUDIOS='supabase' o histórico vem de
+            // `audios_envios` (LEITURA-04, 20-04) — mesmo shape
+            // EnvioAudioHistorico. Caminho 'clickup' (default) intacto.
+            const envios =
+              FONTE_AUDIOS === 'supabase' ? await listarEnviosAudioDoLeadSupabase(leadId) : await listarEnviosAudioDoLead(leadId);
             return c.json({ envios });
           } catch (e) {
             console.error('[discador] erro no histórico de áudios:', e instanceof Error ? e.message : String(e));
@@ -2721,7 +3551,11 @@ export const mastra = new Mastra({
               // mensagens do webhook — busca os registros uma vez e backfilla;
               // desta abertura em diante a conversa inteira vem do DB (ms).
               if (!rowsDb.some((r) => r.de_nos)) {
-                const envios = await listarEnviosAudioDoLead(leadId);
+                // Fase C (20-05): a conversa mistura audios_envios (histórico
+                // de envios) com mensagens_whatsapp (já Supabase) — só a
+                // fonte do histórico de envios inverte por FONTE_AUDIOS.
+                const envios =
+                  FONTE_AUDIOS === 'supabase' ? await listarEnviosAudioDoLeadSupabase(leadId) : await listarEnviosAudioDoLead(leadId);
                 const vistosDb = new Set(saida.map((m) => m.id));
                 for (const e2 of envios) {
                   const idReg = `registro-${e2.taskId}`;
@@ -2776,7 +3610,9 @@ export const mastra = new Mastra({
                 // guarda as conversas diretas (store só com grupos) — os NOSSOS
                 // envios entram direto da Lista 03 (registro + transcrição; a
                 // mídia sai do anexo via /mensagem/registro-<taskId>/midia).
-                const envios = await listarEnviosAudioDoLead(leadId);
+                // Fase C (20-05): mesma inversão do backfill acima.
+                const envios =
+                  FONTE_AUDIOS === 'supabase' ? await listarEnviosAudioDoLeadSupabase(leadId) : await listarEnviosAudioDoLead(leadId);
                 for (const e2 of envios) {
                   saida.push({
                     id: `registro-${e2.taskId}`,
@@ -2808,6 +3644,16 @@ export const mastra = new Mastra({
               respostaPersistidaPorLead.set(leadId, doLead.length);
               void (async () => {
                 try {
+                  // NÃO ramificar por FONTE_AUDIOS aqui: setCustomField grava
+                  // no ClickUp por `ultimo.taskId` — sob supabase,
+                  // listarEnviosAudioDoLeadSupabase().taskId é o id LOCAL de
+                  // `audios_envios` (não o clickup_task_id), então usar essa
+                  // leitura aqui gravaria no id errado. Sem RPC de UPDATE
+                  // pra DATA_DA_RESPOSTA/MENSAGENS_NA_RESPOSTA/
+                  // TRANSCRICAO_RESPOSTA em audios_envios ainda (débito, fora
+                  // do escopo de 20-03/20-05) — este write-side-effect segue
+                  // ClickUp-only nos dois caminhos (mesmo racional da
+                  // persistência de ANALISE_IA em avaliarConversaComDebounce).
                   const envios = await listarEnviosAudioDoLead(leadId);
                   const ultimo = envios[envios.length - 1];
                   if (!ultimo?.taskId) return;

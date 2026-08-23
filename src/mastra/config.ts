@@ -212,6 +212,30 @@ export const CLICKUP_TIMEOUT_MS = Number(process.env.CLICKUP_TIMEOUT_MS) || 6000
 // Prod-safe por design: só desativa quando explicitamente setado como 'false'.
 export const CLICKUP_ESCRITA_HABILITADA = process.env.CLICKUP_ESCRITA_HABILITADA !== 'false';
 
+// Flag por-agregado da inversão Supabase-fonte-da-verdade (Fase B,
+// .planning/phases/19-fase-b-inverter-ligacoes-escrita-leitura-juntas/
+// 19-CONTEXT.md decisão 13, design §6). Default 'clickup' = comportamento
+// ATUAL (escrita/leitura de `ligacoes` via ClickUp; fallback 404→ClickUp
+// intacto). 'supabase' ativa a leitura+escrita LOCAL de `ligacoes` JUNTAS
+// (R10 — nunca uma sem a outra, pra não deixar o espelho atrasado servir
+// fila vazia). O flip só acontece no homolog na verificação final (19-10).
+// Não é boolean de propósito: deixa espaço a outros modos (ex.: 'shadow')
+// sem quebrar o contrato do caller.
+export const FONTE_LIGACOES = process.env.FONTE_LIGACOES || 'clickup';
+
+// ===== Fase 20 (Fase C) — flags por-agregado dos demais espelhos =====
+//
+// Mesmo racional/molde de FONTE_LIGACOES acima (string, não boolean — deixa
+// espaço a modos futuros). Cada `FONTE_*` gateia a escrita+leitura JUNTAS
+// daquele agregado (R10 — nunca uma sem a outra). NUNCA reusar
+// FONTE_LIGACOES: o roadmap exige que áudios/leads/notas invertam e rolem de
+// volta INDEPENDENTES um do outro — um flip/rollback de um agregado não pode
+// arrastar os outros. Default 'clickup' = comportamento ATUAL em todos os
+// três. O flip acontece só no homolog na verificação final (20-08).
+export const FONTE_AUDIOS = process.env.FONTE_AUDIOS || 'clickup';
+export const FONTE_LEADS = process.env.FONTE_LEADS || 'clickup';
+export const FONTE_NOTAS = process.env.FONTE_NOTAS || 'clickup';
+
 // Workspace (team) cujos MEMBROS aparecem no painel de admin (dropdown do
 // vínculo clickup_member_id). Default = Gabinete 509 (9014971829, a mesma das
 // listas). O token enxerga várias workspaces; sem esse filtro o painel mistura
@@ -448,6 +472,19 @@ export const SUPABASE_TABLE_MENSAGENS_WHATSAPP =
 export const SUPABASE_TABLE_VOTOS_LIGACAO =
   process.env.SUPABASE_TABLE_VOTOS_LIGACAO || 'votos_ligacao';
 
+// ===== Fase 17-A — inversão Supabase-fonte-da-verdade: espelho p/ LEITURA futura =====
+//
+// Tabelas novas de sql/escala/06..11 (.planning/arquitetura/
+// inversao-supabase-fonte-da-verdade.md §2). Mesmo padrão de
+// SUPABASE_TABLE_LEADS_ESPELHO: default SEM prefixo (produção); homolog
+// sobrescreve com o prefixo hml_ via deploy/homolog.env. NADA lê estas
+// tabelas ainda nesta fase — defaults sensatos, sem console.warn.
+export const SUPABASE_TABLE_LIGACOES = process.env.SUPABASE_TABLE_LIGACOES || 'ligacoes';
+export const SUPABASE_TABLE_AUDIOS_ENVIOS = process.env.SUPABASE_TABLE_AUDIOS_ENVIOS || 'audios_envios';
+export const SUPABASE_TABLE_CLICKUP_OUTBOX = process.env.SUPABASE_TABLE_CLICKUP_OUTBOX || 'clickup_outbox';
+export const SUPABASE_TABLE_CLICKUP_CAMPO_MAPA =
+  process.env.SUPABASE_TABLE_CLICKUP_CAMPO_MAPA || 'clickup_campo_mapa';
+export const SUPABASE_TABLE_NOTAS = process.env.SUPABASE_TABLE_NOTAS || 'notas';
 // ===== Quick 260822-tdj — persistência de classificação/demanda/super-fã =====
 //
 // Tabela nova (sql/escala/20_anotacoes_ligacao.sql) para a escrita dupla
@@ -468,6 +505,93 @@ export const SUPABASE_TABLE_ANOTACOES_LIGACAO =
 // console.warn.
 export const SUPABASE_TABLE_TRANSCRICOES_LIGACAO =
   process.env.SUPABASE_TABLE_TRANSCRICOES_LIGACAO || 'transcricoes_ligacao';
+
+// ===== Fase 18 — Portão 1 (substrato transacional, Caminho B) — nome da RPC =====
+//
+// Nome da RPC plpgsql que src/mastra/outbox-rpc.ts::comOutboxRpc chama
+// (sql/escala/12_rpc_registrar_desfecho.sql). Default SEM prefixo (produção,
+// mesmo padrão de isolamento só-env das SUPABASE_TABLE_* acima); homolog
+// sobrescreve para 'hml_registrar_desfecho' via deploy/homolog.env — sem
+// isso, chamar do homolog escreveria em tabelas de PRODUÇÃO (lição do
+// 17-02). Default sensato -> sem console.warn.
+export const SUPABASE_RPC_REGISTRAR_DESFECHO =
+  process.env.SUPABASE_RPC_REGISTRAR_DESFECHO || 'registrar_desfecho';
+
+// ===== Fase 19 (Fase B) — nomes das demais RPCs do Caminho B =====
+//
+// Mesmo padrão de isolamento de SUPABASE_RPC_REGISTRAR_DESFECHO acima: default
+// SEM prefixo (produção); homolog sobrescreve pra 'hml_<nome>' via
+// deploy/homolog.env — sem isso, chamar do homolog escreveria nas RPCs (logo,
+// nas tabelas) de PRODUÇÃO (lição do 17-02). Uma RPC plpgsql por mutação de
+// `ligacoes`/voto (19-02..19-09) — cada corpo é criado/aplicado nos planos que
+// invertem a rota correspondente; aqui só se declara o NOME que
+// src/mastra/outbox-rpc.ts::comOutboxRpc vai chamar. Defaults sensatos -> sem
+// console.warn.
+export const SUPABASE_RPC_INICIAR_LIGACAO = process.env.SUPABASE_RPC_INICIAR_LIGACAO || 'iniciar_ligacao';
+export const SUPABASE_RPC_PULAR_LIGACAO = process.env.SUPABASE_RPC_PULAR_LIGACAO || 'pular_ligacao';
+export const SUPABASE_RPC_CRIAR_LIGACAO_AVULSA =
+  process.env.SUPABASE_RPC_CRIAR_LIGACAO_AVULSA || 'criar_ligacao_avulsa';
+export const SUPABASE_RPC_REGISTRAR_VOTO = process.env.SUPABASE_RPC_REGISTRAR_VOTO || 'registrar_voto';
+export const SUPABASE_RPC_CONSOLIDAR_E_FECHAR =
+  process.env.SUPABASE_RPC_CONSOLIDAR_E_FECHAR || 'consolidar_e_fechar_ligacao';
+
+// ===== Fase 20 (Fase C) — nomes das RPCs novas do Caminho B =====
+//
+// Mesmo padrão de isolamento das SUPABASE_RPC_* acima: default SEM prefixo
+// (produção); homolog sobrescreve pra 'hml_<nome>' via deploy/homolog.env —
+// sem isso, chamar do homolog escreveria nas RPCs (logo, nas tabelas) de
+// PRODUÇÃO (lição do 17-02). Corpo de cada RPC criado/aplicado nos planos que
+// estendem os agregados audios/leads/notas (20-02+); aqui só se declara o
+// NOME. Defaults sensatos -> sem console.warn.
+export const SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO =
+  process.env.SUPABASE_RPC_REGISTRAR_ENVIO_AUDIO || 'registrar_envio_audio';
+export const SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO =
+  process.env.SUPABASE_RPC_REGISTRAR_MENSAGEM_TEXTO || 'registrar_mensagem_texto';
+export const SUPABASE_RPC_REGISTRAR_ANOTACAO =
+  process.env.SUPABASE_RPC_REGISTRAR_ANOTACAO || 'registrar_anotacao';
+export const SUPABASE_RPC_GERAR_LOTE = process.env.SUPABASE_RPC_GERAR_LOTE || 'gerar_lote';
+
+// Nome da RPC de criação de lead nativo (quick 260823-h1s,
+// sql/escala/27_rpc_criar_lead.sql). Mesmo padrão de isolamento das
+// SUPABASE_RPC_* acima: default SEM prefixo (produção); homolog sobrescreve
+// pra 'hml_criar_lead' via deploy/homolog.env — sem isso, chamar do homolog
+// escreveria na RPC/tabelas de PRODUÇÃO (lição do 17-02). Default sensato ->
+// sem console.warn.
+export const SUPABASE_RPC_CRIAR_LEAD = process.env.SUPABASE_RPC_CRIAR_LEAD || 'criar_lead';
+
+// ===== Fase 19 (Fase B) — teto/threshold do worker de dreno do outbox =====
+//
+// Consumidos por src/mastra/drenar-outbox.ts (19-03) — o dreno generaliza
+// sync-clickup.ts pra empurrar TODO o clickup_outbox (não só votos),
+// idempotente, ordenado por `seq` por aggregate. Riscos R6 (head-of-line) e
+// R9 (rate cap global fail-closed), 19-CONTEXT.md decisões 3-5. Numéricos
+// parseados com `Number(process.env.X) || DEFAULT` — mesmo molde de
+// RL_CLICKUP_MAX/RL_CLICKUP_WINDOW_MS (rate-limiter-clickup.ts). Defaults
+// sensatos -> sem console.warn.
+
+// Teto GLOBAL de pushes ao ClickUp pelo dreno, somando TODAS as réplicas
+// (R9 — fail-CLOSED, não é `concurrency` por-processo). Mesmo teto de
+// RL_CLICKUP_MAX (90/min): o dreno de fundo disputa o MESMO balde do ClickUp
+// que a fila síncrona dos closers, então o cap vira throughput de sync de
+// fundo, nunca latência do usuário.
+export const DRENO_RATE_MAX = Number(process.env.DRENO_RATE_MAX) || 90;
+
+// Janela do teto acima (ms) — mesmo molde de RL_CLICKUP_WINDOW_MS.
+export const DRENO_RATE_WINDOW_MS = Number(process.env.DRENO_RATE_WINDOW_MS) || 60000;
+
+// Idade (ms) da cabeça de um aggregate no outbox que dispara o alarme de
+// head-of-line (R6, ix_outbox_head_age) — reusa alertas.ts::avaliarThresholds.
+// Default 2h: uma linha travada bloqueando o push de um aggregate por mais
+// que isso é sintoma de algo preso (ClickUp fora, payload inválido, etc.),
+// não backlog normal de tráfego.
+export const DRENO_HEAD_AGE_ALERTA_MS = Number(process.env.DRENO_HEAD_AGE_ALERTA_MS) || 7200000;
+
+// Habilita o dreno INLINE (síncrono, sem BullMQ) quando não há REDIS_URL —
+// mesmo espírito do fallback inline de fila.ts (degradação graciosa "roda
+// sem infra opcional"). Boolean-por-env: qualquer valor exceto 'false'
+// habilita quando não há Redis (default sensato: sem Redis, o dreno TEM que
+// rodar de algum jeito pro outbox não empilhar pra sempre).
+export const DRENO_INLINE = process.env.DRENO_INLINE !== 'false';
 
 // ===== Fase 2 (roadmap) — biblioteca de conteúdos recorrentes (sql/escala/27) =====
 //

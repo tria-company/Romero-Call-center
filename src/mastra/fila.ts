@@ -74,7 +74,7 @@ export interface DadosJobSyncClickup {
   operador?: string;
 }
 
-export type NomeJob = 'record' | 'falha-terminal' | 'sync-clickup';
+export type NomeJob = 'record' | 'falha-terminal' | 'sync-clickup' | 'drenar-outbox';
 
 /** Nome da fila BullMQ (Redis key namespace) — padrao 'processamento-ligacao'. */
 export const NOME_FILA: string = FILA_NOME;
@@ -276,6 +276,58 @@ export async function enfileirarSyncClickup(
     // ClickUp em vez de esperar o worker (SC5).
     console.error(
       '[fila] falha ao enfileirar sync-clickup (degradando p/ inline):',
+      e instanceof Error ? e.message : String(e),
+    );
+    return { enfileirado: false };
+  }
+}
+
+/**
+ * Payload MÍNIMO do job de dreno do outbox (ESCRITA-02, Fase B, Phase 19
+ * Plano 03) — só o id do aggregate, sem PII (mesma minimização de
+ * `DadosJobSyncClickup`); o worker (`processarDrenoOutboxJob`, drenar-outbox.ts)
+ * relê o próprio outbox via `outbox-repo.ts` a partir daqui.
+ */
+export interface DadosJobDrenoOutbox {
+  aggregateId: number;
+}
+
+/**
+ * Enfileira o *kick* do dreno do outbox de UM aggregate (ESCRITA-02/LGPD-03,
+ * Fase B, Phase 19 Plano 03) — mesmo molde de `enfileirarSyncClickup`:
+ * fail-open p/ inline sem Redis ou em erro de enqueue em runtime. `jobId =
+ * 'dreno:{aggregateId}'` (dedup de ENQUEUE — kicks repetidos do mesmo
+ * aggregate, ex.: duas mutações seguidas antes do worker consumir a
+ * primeira, coalescem num único job; o dreno em si sempre relê TODAS as
+ * linhas pendentes daquele aggregate, então perder um kick duplicado não
+ * perde trabalho). Reusa `opcoesJob()` (backoff exponencial + DLQ, D-08) e a
+ * MESMA fila `NOME_FILA` (sem fila própria).
+ *
+ * CONTRATO OBRIGATÓRIO PARA O CALLER (mesmo de `enfileirarSyncClickup`,
+ * index.ts:1867-1870): em MODO `'bullmq'`, enfileira e retorna
+ * `{ enfileirado:true }` — o worker (`worker.ts`, case `'drenar-outbox'`)
+ * drena em segundo plano. Em MODO `'inline'` (sem `REDIS_URL` — normal em
+ * dev/homolog), retorna `{ enfileirado:false }` SEM lançar — o CALLER DEVE
+ * checar o retorno e, quando `!enfileirado`, rodar
+ * `processarDrenoOutboxJob(aggregateId)` (drenar-outbox.ts) INLINE. Fire-
+ * and-forget NÃO é aceitável aqui: sem Redis, ignorar o retorno faria o
+ * outbox nunca drenar.
+ */
+export async function enfileirarDrenoOutbox(
+  dados: DadosJobDrenoOutbox,
+): Promise<{ enfileirado: boolean }> {
+  if (MODO !== 'bullmq') return { enfileirado: false };
+  try {
+    await garantirFila().add('drenar-outbox', dados, {
+      ...opcoesJob(),
+      jobId: 'dreno:' + dados.aggregateId,
+    });
+    return { enfileirado: true };
+  } catch (e) {
+    // Fail-open p/ inline: o caller (19-07/08) drena o aggregate sincrono
+    // via processarDrenoOutboxJob em vez de esperar o worker.
+    console.error(
+      '[fila] falha ao enfileirar drenar-outbox (degradando p/ inline):',
       e instanceof Error ? e.message : String(e),
     );
     return { enfileirado: false };

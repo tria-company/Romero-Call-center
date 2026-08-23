@@ -39,7 +39,21 @@ import {
   ANALISE_ADERENCIA_MINIMA,
   OPER_RETORNO_NAO_ATENDEU_DIAS,
   OPER_RETORNO_DEFAULT_DIAS,
+  // Fase B (Phase 19, 19-08): flag por-agregado + nome da RPC do Caminho B
+  // que consolidarEFecharLigacao chama via comOutboxRpc quando
+  // FONTE_LIGACOES='supabase' (mesmo padrão de index.ts, 19-07).
+  FONTE_LIGACOES,
+  SUPABASE_RPC_CONSOLIDAR_E_FECHAR,
 } from './config.ts';
+// Helper transacional único do Caminho B (Portão 1) — ver o mesmo import em
+// index.ts (19-07/08). consolidarEFecharLigacao concentra a PARTE DE ESCRITA
+// (leads+ligacoes+outbox) nesta RPC sob a flag; LLM/dossiê continuam no TS.
+import { comOutboxRpc } from './outbox-rpc.ts';
+// Kick do dreno do outbox (mesmo padrão de posCommitLigacao em index.ts,
+// 19-07): fallback INLINE quando enfileirarDrenoOutbox devolve
+// { enfileirado:false } (sem Redis) — nunca fire-and-forget (T-19-08-Av).
+import { enfileirarDrenoOutbox } from './fila.ts';
+import { processarDrenoOutboxJob } from './drenar-outbox.ts';
 
 import {
   gravarTranscricao,
@@ -88,10 +102,13 @@ import { chamarLLM } from './llm.ts';
 
 import { regenerarDossieDoLead } from './gerar-dossie.ts';
 
+// Correlação do lead a partir da Ligação (LEITURA-05, 19-05) sob a flag —
+// substitui resolverLeadDaLigacao (ClickUp) quando FONTE_LIGACOES='supabase'
+// dentro de consolidarEFecharLigacao (19-08).
 // inserirTranscricaoLigacao (quick-260822-ubk): linha estruturada de
 // transcrição/análise-IA — RETRY-BACKED (não best-effort), chamada FORA de
 // try/catch em processarRecordJob (ver comentário no call site).
-import { marcarEventoWebhook, inserirTranscricaoLigacao } from './supabase.ts';
+import { marcarEventoWebhook, resolverLeadDaLigacaoSupabase, inserirTranscricaoLigacao } from './supabase.ts';
 
 import {
   lerTaskAtiva,
@@ -133,16 +150,40 @@ function rotuloVoto(v: EscolhaVoto | null): string {
  * Consolida o resultado da ligacao no lead (Lista 01) e fecha a task de
  * Ligacao (Lista 02) — usado nos DOIS caminhos do processador (atendida, apos
  * o Agente Analise; nao-atendida, sem transcricao/LLM de analise). Resolve o
- * lead via `resolverLeadDaLigacao` (LEAD_REL, fallback telefone); le os
- * valores atuais do lead; chama o Agente Contexto (`montarPromptContexto` +
+ * lead via `resolverLeadDaLigacao` (LEAD_REL, fallback telefone) — sob
+ * `FONTE_LIGACOES='supabase'` via `resolverLeadDaLigacaoSupabase` (19-05);
+ * le os valores atuais do lead; chama o Agente Contexto (`montarPromptContexto` +
  * `chamarLLM`) pra reescrever o resumo vivo (D-P3-13) — falha do LLM loga e
  * MANTEM a observacao anterior (nao trava a consolidacao dos contadores/
- * proximo contato); calcula `proximoContato` (D-P3-14) e `derivarContadores`;
- * grava tudo via `consolidarLead`. Fecha a Ligacao (`fecharLigacao`, D-P3-06)
+ * proximo contato); calcula `proximoContato` (D-P3-14) e `derivarContadores`.
+ * A PARTE DE ESCRITA (leads + fechar ligação + outbox) ramifica por
+ * `FONTE_LIGACOES` (19-08, ESCRITA-05): caminho clickup grava via
+ * `consolidarLead`/`fecharLigacao` (comportamento de hoje); caminho supabase
+ * concentra tudo numa ÚNICA transação via `comOutboxRpc(SUPABASE_RPC_CONSOLIDAR_E_FECHAR)`
+ * — a lógica de LLM/dossiê/decisão de voto/contadores é IDÊNTICA nos dois
+ * caminhos, o TS só computa os patches que a RPC aplica. Fecha a Ligacao
  * SEMPRE ao final, mesmo se a consolidacao do lead falhar (a task nao pode
  * ficar aberta pra sempre so por causa de uma falha isolada de escrita no
  * lead — cada passo loga-e-segue, WR-03/D-P3-08). Nenhuma PII em log — so
  * ids/flags.
+ *
+ * DÉBITO DOCUMENTADO (19-08, fora do escopo do plano): o preenchimento do
+ * voto PELA IA (`definirVotoLeadCampo` abaixo) e o log de voto no
+ * `ANALISE_IA`/`NECESSITA_REVISAO` por divergência continuam escrevendo
+ * DIRETO no ClickUp em AMBOS os caminhos — a whitelist de
+ * `p_leads_patch`/`p_ligacao_patch` da RPC `consolidar_e_fechar_ligacao`
+ * (sql/escala/18) não inclui chaves de voto (a SoT do voto do CLOSER é
+ * `registrar_voto`, Task 1 deste plano; este é o preenchimento do AGENTE,
+ * um caminho distinto). Também fora do escopo: os 3 call sites de
+ * `buscarLigacaoAbertaPorTelefone` (correlação por telefone no início de
+ * `processarFalhaTerminalJob`/`processarRecordJob`/`finalizarRecordSemTranscricao`)
+ * continuam ClickUp-only — o id devolvido por `buscarLigacaoAbertaPorTelefoneSupabase`
+ * é o id LOCAL de `ligacoes` (contrato 19-05), mas o resto do pipeline
+ * (`gravarTranscricao`/`gravarMetadadosLigacao`/`lerTask`/`setCustomField` do
+ * Agente Análise) ainda opera 100% por ClickUp taskId — trocar só a
+ * correlação quebraria essas chamadas sob a flag; reescrever o pipeline
+ * inteiro atrás da flag não está no action/verify/acceptance_criteria do
+ * 19-08-PLAN.md (autoritativo). Ver SUMMARY.
  */
 async function consolidarEFecharLigacao(
   taskLigacaoId: string,
@@ -157,10 +198,39 @@ async function consolidarEFecharLigacao(
     votoEvidencia?: { romero: string | null; andressa: string | null };
     /** Texto BASE do ANALISE_IA (resumoAnalise cru, sem sinaisTexto) sobre o qual a seção "Voto (IA × closer)" é composta — D3, quick-260815-oq4. Ausente = não grava a seção (mantém o comportamento de hoje). */
     analiseIaBase?: string;
+    /** Transcrição da chamada (só o caminho RECORD, transcrito) — usada em
+     *  `p_ligacao_patch.transcricao` sob `FONTE_LIGACOES='supabase'` (a
+     *  escrita ClickUp de `gravarTranscricao` roda ANTES desta função, fora
+     *  do escopo aqui). Ausente (falha terminal, sem gravação) = não grava a
+     *  coluna no Supabase — mesma semântica do caminho clickup, que também
+     *  não toca TRANSCRICAO dentro desta função quando não houve gravação. */
+    transcricao?: string;
+    /** CR-02: verdict de revisão do Agente Análise (baixa aderência / sinais /
+     *  falha técnica) computado por `necessitaRevisao` no caminho que roda a
+     *  Análise. Sob `supabase`, alimenta `p_ligacao_patch.necessita_revisao`
+     *  para o SoT/espelho não perderem o flag de baixa aderência (o caminho
+     *  ClickUp já o grava direto). `undefined` = a Análise não rodou (caminho
+     *  não-atendida/sem-transcrição) — a chave fica AUSENTE do patch e a RPC
+     *  PRESERVA o valor atual (não zera). `true` só quando há sinal real. */
+    revisaoAnalise?: boolean;
   },
 ): Promise<void> {
+  // Hoisted fora do try: o fechamento "SEMPRE ao final" (abaixo) precisa
+  // destes valores mesmo se a consolidação do lead falhar/lançar no meio.
+  let leadTaskId: string | null = null;
+  let leadIdSupabase: number | null = null;
+  const leadsPatch: Record<string, unknown> = {};
+  let analiseIaParaLigacao: string | undefined;
+  let necessitaRevisaoPorVoto = false;
+
   try {
-    const leadTaskId = await resolverLeadDaLigacao(taskLigacaoId);
+    if (FONTE_LIGACOES === 'supabase') {
+      const resolvido = await resolverLeadDaLigacaoSupabase(Number(taskLigacaoId));
+      leadTaskId = resolvido?.leadClickupTaskId ?? null;
+      leadIdSupabase = resolvido?.leadId ?? null;
+    } else {
+      leadTaskId = await resolverLeadDaLigacao(taskLigacaoId);
+    }
     if (!leadTaskId) {
       console.warn(`[processador] consolidacao: lead nao resolvido a partir da Ligacao ${taskLigacaoId} — pulando consolidarLead`);
     } else {
@@ -239,9 +309,14 @@ async function consolidarEFecharLigacao(
       // D-P3-08): nunca trava a consolidação/fechamento. LGPD: a evidência
       // (trecho da transcrição) só vai pro ClickUp, nunca pro console.
       if (linhasLog.length > 0 && opts.analiseIaBase !== undefined) {
+        analiseIaParaLigacao = opts.analiseIaBase + montarSecaoLogVoto(linhasLog);
+        // Débito documentado (ver docstring da função): grava DIRETO no
+        // ClickUp em AMBOS os caminhos — a RPC não tem chave de voto no
+        // whitelist. Sob supabase, o mesmo texto TAMBÉM entra em
+        // p_ligacao_patch.analise_ia (abaixo) — a Ligação no Supabase reflete
+        // o mesmo log, mesmo que o campo ClickUp já tenha sido escrito aqui.
         try {
-          const analiseComLog = opts.analiseIaBase + montarSecaoLogVoto(linhasLog);
-          await setCustomField(taskLigacaoId, CAMPOS_LIGACOES.ANALISE_IA, analiseComLog);
+          await setCustomField(taskLigacaoId, CAMPOS_LIGACOES.ANALISE_IA, analiseIaParaLigacao);
         } catch (e) {
           console.error('[processador] falha ao gravar log de voto no ANALISE_IA (segue):', e instanceof Error ? e.message : String(e));
         }
@@ -270,6 +345,11 @@ async function consolidarEFecharLigacao(
       // dossiê/preview) e força NECESSITA_REVISAO na Ligação — sem tocar no voto.
       if (divergenciasVoto.length > 0) {
         observacaoConsolidada = `${observacaoConsolidada}\n\n⚠️ Voto — divergência IA×closer (revisar): ${divergenciasVoto.join('; ')}.`.trim();
+        necessitaRevisaoPorVoto = true;
+        // Débito documentado (ver docstring): escreve direto no ClickUp em
+        // AMBOS os caminhos (mesma razão do bloco ANALISE_IA acima); sob
+        // supabase, necessitaRevisaoPorVoto TAMBÉM entra em
+        // p_ligacao_patch.necessita_revisao (abaixo).
         try {
           await setCustomField(taskLigacaoId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
         } catch (e) {
@@ -292,26 +372,47 @@ async function consolidarEFecharLigacao(
         hoje,
       });
 
-      await consolidarLead(leadTaskId, {
-        observacaoConsolidada,
-        proximoContato: proximoContatoData.getTime(),
-        contadores,
-      });
+      if (FONTE_LIGACOES === 'supabase') {
+        // PARTE DE ESCRITA concentrada na RPC (abaixo, "SEMPRE ao final") —
+        // aqui só computa o patch com os MESMOS valores que consolidarLead
+        // gravaria no ClickUp hoje. qtd_contatos usa o mesmo total de
+        // `tentativas` (o espelho não tem colunas separadas de
+        // atendimentos/não-atendimentos, sql/escala/08_leads_full.sql).
+        leadsPatch.tentativas = contadores.tentativas;
+        leadsPatch.qtd_contatos = contadores.tentativas;
+        leadsPatch.proximo_contato = proximoContatoData.toISOString();
+        leadsPatch.retorno_necessario = opts.retorno.necessario;
+        leadsPatch.observacao_consolidada = observacaoConsolidada;
+        leadsPatch.ultimo_contato = new Date(contadores.ultimoContato).toISOString();
+      } else {
+        await consolidarLead(leadTaskId, {
+          observacaoConsolidada,
+          proximoContato: proximoContatoData.getTime(),
+          contadores,
+        });
+      }
 
       // Fase 3 do board do Miro aplicada POR-LIGACAO: o Agente Contexto
       // regenera o Dossie 360 completo (6 secoes) na description do lead
       // (Lista 01) LOGO APOS a consolidacao — o dossie ja incorpora o
       // historico de Ligacoes (Secao 4, Lista 02) + a observacao consolidada
       // recem-escrita acima; e ESSE dossie que aparece no preview do discador.
-      // Log-e-segue: NUNCA bloqueia fecharLigacao — a task nao pode ficar
+      // Log-e-segue: NUNCA bloqueia o fechamento — a task nao pode ficar
       // aberta por uma falha isolada de regeneracao (WR-03/D-P3-08).
       // CAVEAT (aceito, T-pxq-03): regenerar o dossie inteiro a cada ligacao
       // re-consulta GHL/Supabase; se uma fonte externa estiver instavel, a
       // secao dela degrada ("sem dados") ate a proxima regeneracao/lote —
       // trade-off aceito por um dossie fresco a cada ligacao (auto-cura na
       // proxima remontagem; mesma degradacao por fonte do lote diario).
+      // Sob supabase: dryRun (computa o markdown SEM escrever no ClickUp — a
+      // RPC grava `leads.dossie` no Supabase na mesma tx; a description do
+      // ClickUp fica pro dreno do outbox — débito documentado, o aggregate
+      // 'lead' ainda não é drenável hoje, drenar-outbox.ts só resolve
+      // clickup_task_id para 'ligacao'). Caminho clickup: comportamento de
+      // hoje (grava direto via atualizarTask, dentro da função).
       try {
-        await regenerarDossieDoLead(leadTaskId);
+        const dossie = await regenerarDossieDoLead(leadTaskId, FONTE_LIGACOES === 'supabase' ? { dryRun: true } : undefined);
+        if (FONTE_LIGACOES === 'supabase' && dossie) leadsPatch.dossie = dossie;
       } catch (e) {
         console.error('[processador] falha ao regenerar dossie pos-ligacao (segue):', e instanceof Error ? e.message : String(e));
       }
@@ -322,6 +423,60 @@ async function consolidarEFecharLigacao(
 
   // D-P3-06: a task fecha sozinha no pos-processamento, mesmo se a
   // consolidacao do lead falhou acima — "Proxima" no discador so avanca a UI.
+  if (FONTE_LIGACOES === 'supabase') {
+    const ligacaoId = Number(taskLigacaoId);
+    if (!Number.isFinite(ligacaoId)) {
+      console.error('[processador] consolidacao supabase: id de ligacao invalido — Ligacao nao fechada');
+      return;
+    }
+    // p_ligacao_patch — mesmos valores que as escritas ClickUp de hoje
+    // aplicariam (resultado/atendeu derivados de opts.atendeu; transcricao só
+    // quando houve gravação; analise_ia/necessita_revisao só quando o bloco
+    // de voto acima computou algo — chave ausente mantém o valor atual, a
+    // RPC nunca zera um campo que este passo não tocaria hoje).
+    const ligacaoPatch: Record<string, unknown> = {
+      resultado: opts.atendeu ? 'atendida' : 'nao_atendida',
+      atendeu: opts.atendeu,
+    };
+    if (opts.transcricao !== undefined) ligacaoPatch.transcricao = opts.transcricao;
+    if (analiseIaParaLigacao !== undefined) ligacaoPatch.analise_ia = analiseIaParaLigacao;
+    // CR-02: escreve necessita_revisao SÓ quando há sinal real — divergência de
+    // voto (necessitaRevisaoPorVoto) OU baixa aderência/sinais do Agente Análise
+    // (opts.revisaoAnalise). Sem sinal, a chave fica AUSENTE e a RPC PRESERVA o
+    // valor atual (COALESCE condicional em 18_rpc_consolidar_e_fechar.sql) — nunca
+    // zera a coluna nem emite push de espelho espúrio.
+    if (necessitaRevisaoPorVoto || opts.revisaoAnalise === true) ligacaoPatch.necessita_revisao = true;
+
+    try {
+      // A RPC faz TUDO numa única tx: UPDATE leads (leadsPatch) + UPDATE
+      // ligacoes (fecha, status='fechada') + outbox — "fechar sempre ao
+      // final" é garantido pela própria tx (nunca precisa de um catch
+      // separado só para o fechamento, ao contrário do caminho clickup).
+      await comOutboxRpc(SUPABASE_RPC_CONSOLIDAR_E_FECHAR, {
+        p_ligacao_id: ligacaoId,
+        p_lead_id: leadIdSupabase,
+        p_lead_clickup_task_id: leadTaskId,
+        p_leads_patch: leadsPatch,
+        p_ligacao_patch: ligacaoPatch,
+      });
+      // Kick do dreno CHECADO (nunca fire-and-forget) — mesmo padrão de
+      // posCommitLigacao (index.ts, 19-07/08): sem Redis o outbox drena
+      // inline aqui.
+      const { enfileirado } = await enfileirarDrenoOutbox({ aggregateId: ligacaoId });
+      if (!enfileirado) {
+        await processarDrenoOutboxJob(ligacaoId).catch((e) => {
+          console.error(
+            '[dreno] inline pos-consolidacao falhou (best-effort — a linha do outbox ja foi persistida, drena depois):',
+            e instanceof Error ? e.message : String(e),
+          );
+        });
+      }
+    } catch (e) {
+      console.error('[processador] falha ao consolidar+fechar a Ligacao via RPC (supabase):', e);
+    }
+    return;
+  }
+
   try {
     await fecharLigacao(taskLigacaoId);
   } catch (e) {
@@ -598,6 +753,11 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
   // Analise falhou (valores ficam `null`).
   let resultadoAnalise: ReturnType<typeof parseResultadoAnalise> | null = null;
   let retornoAnalise: ReturnType<typeof extrairRetorno> | null = null;
+  // CR-02: verdict de revisão hoisted — o Agente Contexto (consolidarEFecharLigacao,
+  // abaixo) precisa dele para levar o flag de baixa aderência ao SoT/espelho sob
+  // supabase. `true` no catch mantém a paridade com o caminho ClickUp (que marca
+  // NECESSITA_REVISAO=true quando a Análise falha, ver setCustomField no catch).
+  let revisaoAnalise = false;
   try {
     const task = await lerTask(taskId);
     const script = task?.description ?? task?.text_content ?? '';
@@ -610,6 +770,7 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
       sinaisAlerta: resultado.sinaisAlerta,
       falhaTecnica: resultado.falhaTecnica,
     });
+    revisaoAnalise = revisao;
     const retorno = extrairRetorno(resultado, { hoje: new Date(), defaultDias: 2 });
     resultadoAnalise = resultado;
     retornoAnalise = retorno;
@@ -632,6 +793,7 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     // distinguimos "precisa de revisao humana" de um erro que travaria o
     // job inteiro.
     registrarErroEtapa('analise');
+    revisaoAnalise = true; // CR-02: paridade com o setCustomField(true) abaixo — o SoT/espelho também precisam do flag
     console.error('[processador] falha no Agente Analise, marcando NECESSITA_REVISAO:', e);
     try {
       await setCustomField(taskId, CAMPOS_LIGACOES.NECESSITA_REVISAO, true);
@@ -657,6 +819,11 @@ export async function processarRecordJob(dados: DadosJobRecord): Promise<void> {
     voto: resultadoAnalise?.voto,
     votoEvidencia: resultadoAnalise?.votoEvidencia,
     analiseIaBase: resultadoAnalise?.resumoAnalise,
+    // p_ligacao_patch.transcricao sob supabase (19-08) — mesmo texto já
+    // gravado no ClickUp por gravarTranscricao acima.
+    transcricao,
+    // CR-02: leva o verdict de baixa aderência/sinais ao SoT/espelho sob supabase.
+    revisaoAnalise,
   });
 
   // DEVIATION APROVADA PELO USUÁRIO (quick-260822-ubk, 2026-08-22): grava a
@@ -834,6 +1001,12 @@ export async function finalizarRecordSemTranscricao(dados: DadosJobRecord): Prom
       'Ligação atendida, mas a transcrição automática falhou após 3 tentativas — sem análise de script.',
     aderencia: null,
     retorno: { necessario: false, data: null },
+    // Mesmo placeholder já gravado no ClickUp por gravarTranscricao acima —
+    // p_ligacao_patch.transcricao sob supabase (19-08).
+    transcricao: '(transcrição não obtida automaticamente após 3 tentativas — revisar manualmente)',
+    // CR-02: paridade com o setCustomField(NECESSITA_REVISAO=true) acima — sob
+    // supabase o SoT/espelho também precisam marcar revisão (transcrição falhou).
+    revisaoAnalise: true,
   });
 
   // Reconciliação (2026-08-20): mesma regra do record normal — ligou, as
