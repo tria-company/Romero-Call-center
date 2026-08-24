@@ -419,7 +419,7 @@ export const ADMIN_APP_JS = `(function(){
 
       if(d.votosPopulados){
         $('cm-votos').textContent=fmtN(d.apoiadores)+(d.votosParcial?'+':'');
-        subTxt('cm-votos-sub','Romero '+fmtN(d.votosRomero)+' · Andressa '+fmtN(d.votosAndressa));
+        subTxt('cm-votos-sub','Romero '+fmtN(d.votosRomero)+' · Andreza '+fmtN(d.votosAndressa));
       }else{
         $('cm-votos').textContent='—';
         subTxt('cm-votos-sub','não foi possível ler os votos');

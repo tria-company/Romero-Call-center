@@ -253,7 +253,7 @@ async function consolidarEFecharLigacao(
           const votoAtual = resolverVotoAtualLead(lead);
           const candidatos = [
             { chave: 'romero' as const, nome: 'Romero' },
-            { chave: 'andressa' as const, nome: 'Andressa' },
+            { chave: 'andressa' as const, nome: 'Andreza' },
           ];
           for (const { chave, nome } of candidatos) {
             const ia = opts.voto[chave];

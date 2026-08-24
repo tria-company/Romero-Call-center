@@ -200,7 +200,7 @@ export function PerfilLead({
           onVotar={(v) => votar({ romero: v })}
         />
         <LinhaApoio
-          rotulo="Andressa · 4020"
+          rotulo="Andreza · 4020"
           valor={lead.confirmouAndressa}
           salvando={salvando}
           onVotar={(v) => votar({ andressa: v })}

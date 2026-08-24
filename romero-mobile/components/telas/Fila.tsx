@@ -452,7 +452,7 @@ export function Fila({
               </div>
             </div>
             <div className="fp-telq">
-              <div className="fp-tellbl">Andressa</div>
+              <div className="fp-tellbl">Andreza</div>
               <div className="fp-telseg fp-telseg--col">
                 {(["sim", "nao", "naoDeclarou"] as const).map((v) => (
                   <button
